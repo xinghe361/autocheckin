@@ -22,7 +22,7 @@ DEFAULT_PORT = 28999      # 容器内部监听端口；host 模式下即宿主�
 DEFAULT_DATA_DIR = '/data'
 DEFAULT_TZ = 'Asia/Shanghai'
 
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 
 
 @dataclass
@@ -109,6 +109,20 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
                   else os.environ.get('TZ', DEFAULT_TZ))
     s.proxy = (args.proxy if args.proxy is not None
                else os.environ.get('PROXY', '')).strip()
+    # 代理地址还是模板占位符的话，必须在这里就指出来。
+    # 否则它会表现为"域名解析失败（Errno -2）"，看起来像 DNS 故障，
+    # 用户会去查 DNS —— 实测就是这么被带偏的。
+    if s.proxy:
+        from .netutil import looks_like_placeholder_proxy, proxy_host
+        if looks_like_placeholder_proxy(s.proxy):
+            print('[警告] 代理地址看起来还是模板占位符：%s' % s.proxy)
+            print('       程序会把它当成真实主机名去解析，必然失败，')
+            print('       报错会显示为"域名解析失败"，但真正的原因是代理没填。')
+            print('       请到「设置 → 网络」填真实地址，或删掉 compose 里的 PROXY 行。')
+            print('       已忽略这个占位符，本次按【直连】运行。')
+            s.proxy = ''
+        else:
+            print('[启动] 代理: %s（主机 %s）' % (s.proxy, proxy_host(s.proxy)))
     s.env_key = os.environ.get('AUTOCHECKIN_KEY', '').strip()
     s.log_level = (args.log_level if args.log_level is not None
                    else os.environ.get('LOG_LEVEL', 'info'))

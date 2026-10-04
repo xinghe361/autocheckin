@@ -142,8 +142,11 @@ def request(method: str, url: str, cfg: Optional[HttpConfig] = None,
     except HttpError:
         raise
     except Exception as e:  # noqa: BLE001
-        kind = netutil.classify_network_error(e)
-        raise HttpError(kind, netutil.describe_network_error(kind), str(e)) from e
+        # 把 proxy 传进去：这样才能区分"目标站点解析不了"和"代理地址解析不了"。
+        # 后者是配置问题，报成 DNS 故障会让人排查错方向（实测踩过）。
+        kind = netutil.classify_network_error(e, proxy=proxy)
+        raise HttpError(kind, netutil.describe_network_error(kind, proxy=proxy),
+                        str(e)) from e
 
 
 def _do_open(opener, req, cfg: HttpConfig, url: str) -> HttpResponse:

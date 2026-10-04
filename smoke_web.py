@@ -4,6 +4,7 @@
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import urllib.error
@@ -118,6 +119,18 @@ try:
           'http://nas.local:28999' in js, js[:160])
     check('油猴脚本无占位符残留',
           not any(p in js for p in ('__ORIGIN__', '__MATCHES__', '__SITES__')))
+
+    # ---- 界面：正在编辑时不能被自动刷新冲掉 ----
+    # 用户反馈"还没填完就刷新，填不了"。根因是 30 秒定时 refreshAll()，
+    # 而它会重渲染整个站点卡片，把表单里的内容替换掉。
+    check('页面有"正在编辑"保护标记', '_formDirty' in html and 'formHasEdits' in html)
+    check('自动刷新会跳过未保存的表单', '检测到你正在编辑' in html)
+    m = re.search(r'AUTO_REFRESH_MS\s*=\s*(\d+)', html)
+    if m:
+        ms = int(m.group(1))
+        check('自动刷新间隔已放长（>=60 秒）', ms >= 60000, 'AUTO_REFRESH_MS=%d' % ms)
+    else:
+        check('自动刷新间隔有命名常量（便于调整）', False, '没找到 AUTO_REFRESH_MS')
 
     # 用 HTML 解析器确认脚本闭合正常
     from html.parser import HTMLParser

@@ -1576,14 +1576,21 @@ function renderSiteForm(id){
     var s = d.site; SITE_CACHE[id] = s;
     api('GET','/api/site/cookie?id='+encodeURIComponent(id)).then(function(c){
       box.innerHTML = siteFormHtml(s, c);
-      flushCookieMsg(id);
+      afterFormRender(id);
     }).catch(function(){
       box.innerHTML = siteFormHtml(s, {has_cookie:s.has_cookie,names:[]});
-      flushCookieMsg(id);
+      afterFormRender(id);
     });
   }).catch(function(e){
     box.innerHTML = '<div class="err">读取站点失败：'+esc(e.message)+'</div>';
   });
+}
+
+/* 表单渲染完的收尾：快照基准值 + 重置脏标记 + 贴出待显示的提示 */
+function afterFormRender(id){
+  snapshotForm($('form-'+id));
+  _formDirty = false;
+  flushCookieMsg(id);
 }
 
 /* 表单渲染完后，把之前攒下的提示贴到新的提示区里（只贴一次） */
@@ -2119,7 +2126,95 @@ function closeCookieHelper(){
    浏览器会自动带上本容器的登录会话，所以不再需要配对码。
    相关后端接口保留（配套油猴脚本仍用它换令牌），但页面不再展示那套流程。 */
 
-function refreshAll(){ loadOverview(); loadSites(); }
+/* ---------------- 刷新与"正在编辑"保护 ---------------- */
+
+/* 表单是否被改动过。
+   为什么需要：后台每 30 秒自动刷新一次，而刷新会重渲染站点卡片
+   —— 正在编辑的表单会被整块替换掉，用户填到一半的内容就没了
+   （实测：粘贴 Cookie 到一半被冲掉）。所以改动过就暂停自动刷新。 */
+var _formDirty = false;
+var _pendingSitesRefresh = false;
+
+/* 标记原始值。用不可见字符做属性前缀，避免与站点自定义的字段名冲突。 */
+var _MARK = '\uE000acOrig\uE000';
+
+function snapshotForm(box){
+  if(!box) return;
+  box.querySelectorAll('input, textarea, select').forEach(function(el){
+    if(el.type === 'checkbox' || el.type === 'radio'){
+      el.setAttribute(_MARK, el.checked ? '1' : '0');
+    }else{
+      el.setAttribute(_MARK, el.value);
+    }
+  });
+}
+
+/* 事件委托挂在 document 上：表单是动态重建的，逐个绑定会漏。
+   只监听输入类事件，不用 setInterval 轮询比对。 */
+document.addEventListener('input', function(e){
+  var el = e.target;
+  if(!el || !el.closest) return;
+  if(el.closest('#tab-sites')) _formDirty = true;
+}, true);
+document.addEventListener('change', function(e){
+  var el = e.target;
+  if(!el || !el.closest) return;
+  if(el.closest('#tab-sites')) _formDirty = true;
+}, true);
+
+/* 用户在表单里改过东西吗？（对比当前值与快照） */
+function formHasEdits(){
+  var box = document.querySelector('#siteRows form');
+  if(!box) return false;
+  var els = box.querySelectorAll('input, textarea, select');
+  for(var i = 0; i < els.length; i++){
+    var el = els[i];
+    var orig = el.getAttribute(_MARK);
+    if(orig === null) return true;          /* 新出现的字段，视为已改动 */
+    if(el.type === 'checkbox' || el.type === 'radio'){
+      if((el.checked ? '1' : '0') !== orig) return true;
+    }else if(el.value !== orig){
+      return true;
+    }
+  }
+  return false;
+}
+
+function formIsOpen(){
+  var box = document.querySelector('#siteRows form');
+  return box ? box.closest('.site') : null;
+}
+
+function currentEditId(){
+  var s = formIsOpen();
+  return s ? s.id.replace('site-', '') : '';
+}
+
+/* 定时刷新走到这里：有未保存改动就跳过，不让用户白填 */
+function refreshAll(){
+  loadOverview();
+  if(formIsOpen() && (_formDirty || formHasEdits())){
+    _pendingSitesRefresh = true;
+    var id = currentEditId();
+    var el = $('f_'+id+'_ckmsg');
+    if(el && !el.textContent){
+      show('f_'+id+'_ckmsg',
+           '检测到你正在编辑，已暂停自动刷新，内容不会被冲掉。'
+           + '保存或取消后自动恢复。', '');
+    }
+    return;
+  }
+  loadSites();
+}
+
+/* 保存/取消后：如果之前因为编辑而暂停过，补一次刷新 */
+function resumeAutoRefresh(){
+  _formDirty = false;
+  if(_pendingSitesRefresh){
+    _pendingSitesRefresh = false;
+    loadSites();
+  }
+}
 
 function runNow(){
   show('runMsg','执行中…','');
@@ -2429,9 +2524,15 @@ function restoreNow(){
 
 /* ---------------- 启动 ---------------- */
 boot();
+/* 自动刷新间隔。
+   原来是 30 秒，用户反馈"还没填完就被刷新，填不了"，所以：
+     1. 放长到 120 秒
+     2. refreshAll 内部会在有未保存改动时自动跳过（见上面的 refreshAll）
+   想改回更快，把下面的 120000 调小即可。 */
+var AUTO_REFRESH_MS = 120000;
 setInterval(function(){
   if($('mainBody').className === '') refreshAll();
-}, 30000);
+}, AUTO_REFRESH_MS);
 </script>
 </body>
 </html>
