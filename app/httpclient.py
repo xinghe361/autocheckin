@@ -106,6 +106,62 @@ def _no_proxy_env():
                 os.environ.pop(k, None)
 
 
+# 跨域跳转时必须剥掉的头。
+# 为什么需要这个：urllib 的默认 HTTPRedirectHandler 会把原请求的
+# **所有** 头原样复制到跳转后的请求上（requests 库会剥 Authorization，
+# urllib 不会）。于是任意被签到站点只要返回一个 302 指向别的域名，
+# 你的站点登录 Cookie、Authorization、自定义 X-Api-Key 就全落到第三方手里。
+# 实测复现过：A 站 302 → B 站，B 站逐字收到 Cookie 与 Authorization。
+_CROSS_ORIGIN_STRIP = frozenset([
+    'cookie', 'cookie2', 'authorization', 'proxy-authorization',
+    'x-api-key', 'x-auth-token', 'x-ac-token', 'x-csrf-token',
+])
+
+
+def _origin_of(url: str) -> str:
+    """取 (scheme, host, port) 三元组，用于判断是否同源。
+
+    ⚠️ 这里刻意**不用**宽泛的 try/except 包住：之前写成
+    `try: p = urlsplit(url) except Exception: return ''`，
+    结果 urlsplit 没导入（NameError）被静默吞掉，函数对所有 URL 都返回 ''，
+    于是"跨源才剥头"的条件永远不成立 —— 安全修复静默失效，
+    而测试还以为通过。教训：解析函数出错要让它响，不要吞。
+    """
+    p = urllib.parse.urlsplit(url or '')
+    if not p.hostname:
+        return ''
+    scheme = (p.scheme or '').lower()
+    try:
+        port = p.port
+    except ValueError:      # 端口非法（如 http://h:abc/）
+        port = None
+    if port is None:
+        port = 443 if scheme == 'https' else 80
+    return '%s://%s:%d' % (scheme, p.hostname.lower(), port)
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """只允许跳转，但跨源时剥掉凭据类请求头。
+
+    取舍：不禁止跨域跳转（很多站点正常依赖它跳 CDN / 登录后跳回），
+    只剥凭据。这样既不影响功能，也不会把登录态送给第三方。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        if _origin_of(req.full_url) != _origin_of(newurl):
+            for name in list(new.headers):
+                if name.lower() in _CROSS_ORIGIN_STRIP:
+                    del new.headers[name]
+            # unredirected_hdrs 是 urllib 实际发送时优先用的那份，必须一起剥
+            for name in list(getattr(new, 'unredirected_hdrs', {})):
+                if name.lower() in _CROSS_ORIGIN_STRIP:
+                    del new.unredirected_hdrs[name]
+        return new
+
+
 def build_opener(cfg: HttpConfig, global_proxy: str = '',
                  cookie_jar: Optional[CookieJar] = None):
     """按配置构造 urllib 的 opener。"""
@@ -117,6 +173,8 @@ def build_opener(cfg: HttpConfig, global_proxy: str = '',
         handlers.append(urllib.request.HTTPSHandler(
             context=netutil.build_ssl_context(verify=False)))
     handlers.append(urllib.request.HTTPCookieProcessor(cookie_jar or CookieJar()))
+    # 必须在默认的 HTTPRedirectHandler 之前放进去
+    handlers.append(_SameOriginRedirectHandler())
     return urllib.request.build_opener(*handlers)
 
 

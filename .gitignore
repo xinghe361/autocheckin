@@ -27,11 +27,20 @@ state.json
 
 # 临时文件。
 # 我提交时用过信息文件、审计输出、调试输出，误提交过三次（_commitmsg.txt、
-# _cmsg.txt、_dbg.txt）。这里把"仓库根目录下以 _ 开头的文件"整体挡掉，
+# _cmsg.txt、_dbg.txt）。这里把"仓库根目录下以 _ 开头的文件/目录"整体挡掉，
 # 免得反复踩同一个坑。注意用 / 锚定根目录，避免误伤 docs/ 下的正常文件。
-/_
-/_*.txt
-/_*.py
-/_*.json
+#
+# 注意 `/_` 只挡名为 `_` 本身，挡不住 `_nas7/`、`_probe/` 这类
+# **以下划线开头后接别的字符**的目录 —— 踩过：临时脚本目录里的
+# nas.env（含 NAS 密码）和 run_sudo.py 差点被提交。所以分别列出。
+/_*
+!/_templates/
 /verify_*.py
 /fix_*.py
+
+# 本机运维用的凭据文件：绝不提交（selfcheck.py 也会扫这些名字）
+nas.env
+*.env
+!/.env.example
+run_sudo.py
+read_env.py

@@ -22,20 +22,24 @@ from .models import (NOTIFY_ALL, NOTIFY_CUSTOM, NOTIFY_FAIL_ONLY, NOTIFY_NONE,
                      PROXY_INHERIT, NotifyConfig)
 
 CHANNEL_PUSHPLUS = 'pushplus'
+# Server 酱已按要求从界面移除。这里保留常量，只为兼容旧配置里的
+# serverchan_key 字段（不删数据，但不再作为可选渠道发送）。
 CHANNEL_SERVERCHAN = 'serverchan'
 CHANNEL_WECOM = 'wecom'
 CHANNEL_TELEGRAM = 'telegram'
 
-ALL_CHANNELS = (CHANNEL_PUSHPLUS, CHANNEL_SERVERCHAN, CHANNEL_WECOM, CHANNEL_TELEGRAM)
+ALL_CHANNELS = (CHANNEL_PUSHPLUS, CHANNEL_WECOM, CHANNEL_TELEGRAM)
 
 
 def channel_proxy(cfg: NotifyConfig, channel: str, global_proxy: str = '') -> str:
     """决定某个通知渠道该走的代理地址（空字符串 = 直连）。
 
-    按用户要求：每个渠道都能单独选择走不走代理。
+    按用户要求：每个渠道可以单独选择走不走代理，没单独设置就跟随主代理。
+    （原来中间还有一层"通知级代理"，用户指出那是多余的：
+      已经有主代理，每个渠道又能独立设置，中间那层没有存在意义，已移除。）
+
       1) 该渠道有单独设置 → 用它（direct 则强制直连）
-      2) 否则用全局通知代理设置
-      3) 否则跟随主代理
+      2) 否则跟随主代理
     """
     override = (cfg.channel_proxy or {}).get(channel) or {}
     mode = (override.get('mode') or '').strip().lower()
@@ -46,13 +50,7 @@ def channel_proxy(cfg: NotifyConfig, channel: str, global_proxy: str = '') -> st
     if mode == PROXY_CUSTOM:
         return normalize_proxy(url)
 
-    # 渠道未单独设置 → 看全局通知代理
-    gmode = (cfg.proxy_mode or PROXY_INHERIT).strip().lower()
-    if gmode == PROXY_DIRECT:
-        return ''
-    if gmode == PROXY_CUSTOM:
-        return normalize_proxy(cfg.proxy_url)
-
+    # 渠道未单独设置 → 跟随主代理
     return normalize_proxy(global_proxy)
 
 
@@ -217,12 +215,14 @@ def send_telegram(bot_token: str, chat_id: str, title: str, content: str,
 
 
 def configured_channels(cfg: NotifyConfig) -> List[str]:
-    """根据已填写的凭据，推断哪些渠道可用。"""
+    """根据已填写的凭据，推断哪些渠道可用。
+
+    注意：Server 酱已从界面移除，所以这里不再把它算作可用渠道
+    （旧配置里若还留着 serverchan_key，也不会被发送）。
+    """
     out = []
     if cfg.pushplus_token:
         out.append(CHANNEL_PUSHPLUS)
-    if cfg.serverchan_key:
-        out.append(CHANNEL_SERVERCHAN)
     if cfg.wecom_webhook:
         out.append(CHANNEL_WECOM)
     if cfg.tg_bot_token and cfg.tg_chat_id:
@@ -252,8 +252,6 @@ def send_all(cfg: NotifyConfig, result: CheckinResult,
         try:
             if ch == CHANNEL_PUSHPLUS:
                 report[ch] = send_pushplus(cfg.pushplus_token, title, content, ch_proxy)
-            elif ch == CHANNEL_SERVERCHAN:
-                report[ch] = send_serverchan(cfg.serverchan_key, title, content, ch_proxy)
             elif ch == CHANNEL_WECOM:
                 report[ch] = send_wecom(cfg.wecom_webhook, title, content, ch_proxy)
             elif ch == CHANNEL_TELEGRAM:
@@ -298,8 +296,6 @@ def send_alert(cfg: NotifyConfig, title: str, content: str,
         try:
             if ch == CHANNEL_PUSHPLUS:
                 report[ch] = send_pushplus(cfg.pushplus_token, title, content, ch_proxy)
-            elif ch == CHANNEL_SERVERCHAN:
-                report[ch] = send_serverchan(cfg.serverchan_key, title, content, ch_proxy)
             elif ch == CHANNEL_WECOM:
                 report[ch] = send_wecom(cfg.wecom_webhook, title, content, ch_proxy)
             elif ch == CHANNEL_TELEGRAM:

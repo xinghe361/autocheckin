@@ -11,6 +11,31 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
+
+
+def safe_http_url(raw: str) -> str:
+    """只保留 http/https 的地址，其它一律丢弃（返回空串）。
+
+    为什么放在数据入口：这个值（站点主页 / 录制的起始地址）会被前端渲染成
+    可点链接。HTML 实体转义挡不住 `javascript:` 这类伪协议 ——
+    管理员点一下就在本页面同源下执行脚本，可直接调用全部管理接口。
+    前端另有 safeLink 做同款校验，两道都有更稳。
+    """
+    s = (raw or '').strip()
+    if not s:
+        return ''
+    try:
+        p = urlsplit(s)
+    except ValueError:
+        return ''
+    scheme = (p.scheme or '').lower()
+    if scheme in ('http', 'https'):
+        return s
+    # 没写协议时（例如 "www.example.com"）补成 http；其余（javascript/data/…）丢弃
+    if not scheme and not s.startswith('//'):
+        return 'http://' + s.lstrip('/')
+    return ''
 
 from . import notify as notify_mod
 from . import secrets as S
@@ -19,7 +44,7 @@ from .models import (AppConfig, NotifyConfig, SiteConfig, Step, WebdavConfig,
                      AiConfig, KIND_CUSTOM, default_config)
 from .recorder import RawEvent, StepRecorder, merge_steps
 from .runner import Runner
-from .store import RuntimeState, Store
+from .store import RuntimeState, Store, was_ever_initialized
 from .templates import builtin_sites, template_by_id
 
 
@@ -73,7 +98,15 @@ class Service:
     # ------------------------------------------------------------ 基础
     def load_config(self) -> AppConfig:
         cfg = self.store.load_config()
-        if not cfg.sites:
+        # 只在**站点为空、且配置没被显式管理过**时补内置站点。
+        #
+        # ⚠️ 不能只看 `if not cfg.sites`：用户把内置站点全删掉之后，
+        # 这个条件同样成立，于是站点会"自动复活"并继续被调度签到 ——
+        # 用户删了它们却又天天失败（国内直连 v2ex/nodeseek 不可达），
+        # 还会因此烧 AI 额度。实测就是如此。
+        # 判据：sites_initialized 表示用户动过站点列表；只有"从没动过"
+        # 的配置（含刚装好的默认配置）才允许补。
+        if not cfg.sites and not cfg.sites_initialized:
             cfg.sites = builtin_sites()
         # 环境变量里的代理优先于配置文件（方便 compose 统一控制）。
         # 注意：只有配置里还没设代理时才顶上去，否则会覆盖掉用户在
@@ -103,18 +136,6 @@ class Service:
     def load_state(self) -> RuntimeState:
         return self.store.load_state()
 
-    @staticmethod
-    def _today_attempts(site_id: str, st: Dict[str, Any]) -> int:
-        """今天这个站点已经尝试了几次（给界面显示"3/3"这种进度）。"""
-        day = (st or {}).get('day') or {}
-        today = time.strftime('%Y-%m-%d')
-        if day.get('date') != today:
-            return 0
-        try:
-            return int(day.get('attempts') or 0)
-        except (TypeError, ValueError):
-            return 0
-
     # ------------------------------------------------------------ 站点
     def list_sites(self) -> List[Dict[str, Any]]:
         """站点列表（含下一次运行时间与连败状态，供界面展示）。"""
@@ -140,6 +161,7 @@ class Service:
                 'retry_enabled': s.retry_enabled,
                 'retry_count': s.retry_count,
                 'retry_interval_minutes': s.retry_interval_minutes,
+                'success_interval_minutes': s.success_interval_minutes,
                 'ai_enabled': s.ai_enabled,
                 'ai_after_failures': s.ai_after_failures,
                 'notify': s.notify or '',
@@ -158,11 +180,6 @@ class Service:
                 # 站点级代理策略：界面要显示"直连 / 独立代理"标签
                 'proxy_mode': s.proxy_mode or 'inherit',
                 'proxy_url': s.proxy_url or '',
-                # 当天的问题标记：界面要显示"今天已停止重试"及原因
-                'day_problem': bool(st.get('day_problem')),
-                'day_problem_date': st.get('day_problem_date') or '',
-                'day_problem_reason': st.get('day_problem_reason') or '',
-                'day_attempts': self._today_attempts(s.id, st),
                 # AI 相关状态：便于界面解释"为什么这个站点不跑了"
                 'ai_consecutive_failures': int(st.get('ai_consecutive_failures') or 0),
                 'last_ai_error': st.get('last_ai_error') or '',
@@ -185,10 +202,22 @@ class Service:
 
         if 'name' in data and data['name']:
             site.name = str(data['name'])
-        for k in ('homepage', 'template', 'kind', 'mode', 'notify',
+        for k in ('template', 'kind', 'mode', 'notify',
                   'notify_override', 'proxy_mode'):
             if k in data and data[k] is not None:
                 setattr(site, k, str(data[k]))
+        # 主页地址要校验协议：它会被渲染成页面上的可点链接，
+        # 而 esc() 只做 HTML 实体转义、不挡协议 —— `javascript:` 会让
+        # 管理员点一下就在同源下执行脚本。前端也有 safeLink 兜底，
+        # 但数据入口挡掉更可靠（录制的 start_url 同样走这里）。
+        if 'homepage' in data and data['homepage'] is not None:
+            raw_home = str(data['homepage'])
+            cleaned = safe_http_url(raw_home)
+            # 非法地址不要"静默清空已有值"：主页还兼着"从哪里取 Cookie"和
+            # 浏览器流程的起点，清空会让这些功能莫名其妙失效。
+            # 因此只在清洗后仍有值时覆盖；清洗成空就保持原样不动。
+            if cleaned or not site.homepage:
+                site.homepage = cleaned
         # 站点级独立代理地址（只在 proxy_mode='custom' 时生效）
         if 'proxy_url' in data and data['proxy_url'] is not None:
             site.proxy_url = str(data['proxy_url'])
@@ -197,9 +226,13 @@ class Service:
             if k in data and data[k] is not None:
                 setattr(site, k, bool(data[k]))
         for k in ('daily_hour', 'daily_minute', 'jitter_seconds', 'retry_count',
-                  'retry_interval_minutes', 'ai_after_failures'):
+                  'retry_interval_minutes', 'ai_after_failures',
+                  'success_interval_minutes'):
             if k in data and data[k] is not None and str(data[k]) != '':
                 setattr(site, k, int(data[k]))
+        # 间隔不能小于 1 小时，否则会变成"几乎一直在签到"
+        site.success_interval_minutes = max(60, int(site.success_interval_minutes
+                                                    or 1440))
         for k in ('success_keywords', 'fail_keywords'):
             if k in data and isinstance(data[k], list):
                 setattr(site, k, [str(x) for x in data[k] if str(x).strip()])
@@ -220,6 +253,7 @@ class Service:
 
         if existing is None:
             cfg.sites.append(site)
+        cfg.sites_initialized = True         # 站点列表已被显式管理
         self.save_config(cfg)
         return site
 
@@ -329,6 +363,8 @@ class Service:
         cfg = self.load_config()
         before = len(cfg.sites)
         cfg.sites = [s for s in cfg.sites if s.id != site_id]
+        # 标记"已显式管理"：即使删到空，也不能让内置站点自动复活
+        cfg.sites_initialized = True
         if len(cfg.sites) == before:
             return False
         self.save_config(cfg)
@@ -351,14 +387,14 @@ class Service:
     def run_now(self, site_id: Optional[str] = None) -> Dict[str, Any]:
         """立即执行（单个站点或全部到期站点）。
 
-        指定单个站点时，清掉它的"今天已停止重试"标记与当天计数 ——
-        手动点「立即」是个明确意图，不该被自动限流挡住
-        （否则用户会以为功能坏了）。
+        指定单个站点时顺带清掉它的「今天已停止重试」标记（老版本留下的），
+        手动点「立即」是个明确意图，不该被任何残留限流挡住。
         """
         cfg = self.load_config()
         if site_id:
             state = self.load_state()
-            state.clear_day_problem(str(site_id))
+            state.clear_site_flag(str(site_id), 'day_problem')
+            state.clear_site_flag(str(site_id), 'day_problem_reason')
             self.store.save_state(state)
         runner = self.make_runner(cfg)
         report = runner.run_once(cfg, only_site=site_id)
@@ -530,11 +566,27 @@ class Service:
             raise ValueError('还没有配置 WebDAV 地址')
         client = self.webdav_client(cfg)
         data = W.do_restore(client)
-        restored = AppConfig.from_dict(data['config'])
-        # 保留当前的 WebDAV 凭据（恢复的内容里可能是别处的设置）
+        restored = self.store.import_config(data['config'], keep_auth_from=cfg)
+        # 恢复后，**控制面字段一律以本机为准**，绝不接受备份里的值：
+        #   webdav.*         —— 否则恢复动作本身会把凭据/地址改掉
+        #   ai.base_url      —— 这是"把 Key 发到哪里"。若由备份决定，
+        #                       攻击者只要让你恢复一份自己的备份，就能让容器
+        #                       把**真实的 DeepSeek Key** 发到他的服务器
+        #                       （实测：Authorization: Bearer sk-REAL... 落到了假服务器）
+        #   ai.api_key_enc   —— 别让备份覆盖本机已保存的 Key
+        #   proxy            —— 决定全部流量走向，可做全量劫持
+        #   remote_cdp_url   —— 连到外部 Chrome 调试端口（常带账密）
+        #   browser_path     —— 宿主机可执行文件路径：恢复它等于让容器按备份
+        #                       指定路径启动程序（= 代码执行面）
         restored.webdav.url = cfg.webdav.url
         restored.webdav.username = cfg.webdav.username
         restored.webdav.password_enc = cfg.webdav.password_enc
+        restored.ai.base_url = cfg.ai.base_url
+        restored.ai.api_key_enc = cfg.ai.api_key_enc
+        restored.proxy = cfg.proxy
+        restored.proxy_mode = cfg.proxy_mode
+        restored.remote_cdp_url = cfg.remote_cdp_url
+        restored.browser_path = cfg.browser_path
         self.save_config(restored)
         st = RuntimeState.from_dict(data['state'])
         self.store.save_state(st)
@@ -556,6 +608,28 @@ class Service:
         return W.test_connection(client)
 
     # ------------------------------------------------------------ 通知
+    def list_ai_models(self, api_key: str = '') -> Dict[str, Any]:
+        """问 DeepSeek：这个 key 能用哪些模型。
+
+        api_key 为空时用已保存的。返回值原样带上 models 列表与错误原因。
+
+        为什么需要这个接口：设置里"模型"是个文本框，用户没法知道
+        自己填的名字对应哪个模型、也不知道有哪些可选。直接问 /models
+        才能看到账号真实可用的清单，顺便验证 key 是否正确。
+        """
+        from . import deepseek as DS
+        cfg = self.load_config()
+        key = (api_key or '').strip()
+        if not key:
+            key = self.box.try_decrypt(cfg.ai.api_key_enc, '')
+        if not key:
+            return {'ok': False, 'models': [], 'status': 0,
+                    'error': '还没有配置 DeepSeek API Key', 'model': cfg.ai.model}
+        out = DS.list_models(cfg.ai, key, cfg.proxy or self.proxy)
+        out['model'] = cfg.ai.model or DS.DEEPSEEK_DEFAULT_MODEL
+        out['default'] = DS.DEEPSEEK_DEFAULT_MODEL
+        return out
+
     def test_notify(self, channel: str = '') -> Dict[str, Any]:
         """发一条测试通知，验证渠道配置是否可用。"""
         cfg = self.load_config()

@@ -40,6 +40,13 @@ class SiteSchedule:
     daily_hour: int = 3
     daily_minute: int = 0
 
+    # 与"上次签到成功时间"的间隔（分钟），mode=MODE_SUCCESS_BASED 时使用。
+    # 默认 1440 分钟 = 24 小时，即"每天一次"。
+    # 为什么要有这个字段：以前这里硬编码 +86400，界面上却显示
+    # "上次成功后 XX 分钟"（取的是重试间隔），显示与实际不符，
+    # 用户也没法真的调间隔。
+    success_interval_minutes: int = 1440
+
     # 是否启用随机偏移
     jitter_enabled: bool = False
     # 偏移范围（秒），默认 ±1 小时；可在 [-JITTER_MAX_SECONDS, JITTER_MAX_SECONDS] 内配置
@@ -105,22 +112,28 @@ def next_daily_time(now: int, site: SiteSchedule, rng: random.Random) -> int:
 
 
 def next_success_based_time(now: int, site: SiteSchedule, rng: random.Random) -> int:
-    """模式二：以上次签到成功时刻为基准，每 24 小时一次（+可选随机偏移）。
+    """模式二：以【上次签到成功时刻】为基准，每隔 N 分钟一次（+可选随机偏移）。
 
-    例：今天 03:21 成功 → 下次 明天 03:21 + 随机偏移。
-    若从未成功过，则退化为「从现在起 24 小时 + 偏移」。
+    例：今天 03:21 成功、间隔 1440 分钟 → 下次 明天 03:21 + 随机偏移。
+
+    若从未成功过（新加的站点），则以"现在"为基准排第一次 ——
+    也就是启用后先等一个间隔，再去尝试第一次签到。
+    首次尝试成功后，基准就自动换成真实的成功时间。
     """
+    interval = max(60, int(getattr(site, 'success_interval_minutes', 1440) or 1440))
+    interval_seconds = interval * 60
+
     if site.last_success_at:
-        base = int(site.last_success_at) + 86400
+        base = int(site.last_success_at) + interval_seconds
     else:
-        base = int(now) + 86400
+        base = int(now) + interval_seconds
 
     candidate = apply_jitter(base, site, rng)
     # 偏移可能把它拉到过去（例如上次成功在 23 小时前、偏移 -1h）；
-    # 这种情况下按 24 小时步进继续顺延，直到落到未来，保证不会立即重复触发。
+    # 这种情况下按间隔继续顺延，直到落到未来，保证不会立即重复触发。
     guard = 0
     while candidate <= now and guard < 400:
-        base += 86400
+        base += interval_seconds
         candidate = apply_jitter(base, site, rng)
         guard += 1
     return candidate
@@ -149,19 +162,31 @@ def next_retry_at(now: int, site: SiteSchedule) -> Optional[int]:
     return int(now) + interval
 
 
-def should_ask_ai(site: SiteSchedule) -> bool:
+def should_ask_ai(site: SiteSchedule, after_failures: Optional[int] = None) -> bool:
     """连续失败是否达到了需要 AI 分析的程度。
 
-    语义：在 ai_after_failures 的**整数倍**处各分析一次。
+    语义：在 after_failures 的**整数倍**处各分析一次。
     例如阈值 3 → 在连败 3、6、9… 次时分析。
 
     为什么不"每多失败一次就分析"：
     站点若持续坏掉（连败 4、5、6…），逐次分析会天天烧 token 却给不出新结论。
     按倍数走既能有限次尝试，又能随连败加重再要一次新建议。
+
+    after_failures 现在由**全局设置**提供（用户要求：统一逻辑，
+    站点只负责重试次数）。传 None 时回退到站点上的同名字段，
+    兼容旧调用方；0 表示不启用 AI 分析。
     """
     if not site.ai_enabled:
         return False
-    threshold = max(1, int(site.ai_after_failures))
+    raw = after_failures
+    if raw is None:
+        raw = getattr(site, 'ai_after_failures', 3)
+    try:
+        threshold = int(raw)
+    except (TypeError, ValueError):
+        threshold = 3
+    if threshold <= 0:
+        return False        # 0 = 不启用 AI 分析
     if site.consecutive_failures < threshold:
         return False
     if site.consecutive_failures % threshold != 0:

@@ -225,21 +225,31 @@ class TestChannelProxy(unittest.TestCase):
         self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL),
                          'http://10.0.0.1:8080')
 
-    def test_global_notify_proxy_overrides_main_proxy(self):
+    def test_notify_level_proxy_removed(self):
+        """通知级代理已移除：没给渠道单独设置时就跟随主代理。
+
+        用户指出"通知代理"那一层是多余的 —— 已经有主代理，
+        每个渠道又能独立设置，中间那层没有存在意义。
+        所以即使旧配置里还留着 proxy_mode / proxy_url，也不再参与判定。
+        """
         c = NotifyConfig(proxy_mode='custom', proxy_url='http://notify:8080')
         self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL),
-                         'http://notify:8080')
+                         self.GLOBAL,
+                         '通知级代理不该再生效，应跟随主代理')
 
-    def test_global_notify_direct_overrides_main_proxy(self):
+    def test_main_proxy_direct_means_direct(self):
+        """主代理为空（选了直连）时，未单独设置的渠道就是直连。"""
         c = NotifyConfig(proxy_mode='direct')
-        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL), '')
+        self.assertEqual(N.channel_proxy(c, 'pushplus', ''), '')
 
-    def test_channel_setting_beats_global_notify_setting(self):
-        c = NotifyConfig(proxy_mode='direct',
-                         channel_proxy={'telegram': {'mode': 'custom',
-                                                     'url': 'http://t:1'}})
+    def test_channel_setting_beats_main_proxy(self):
+        """渠道单独设置优先于主代理（这是保留的能力）。"""
+        c = NotifyConfig(channel_proxy={'telegram': {'mode': 'custom',
+                                                     'url': 'http://t:1'},
+                                        'wecom': {'mode': 'direct'}})
         self.assertEqual(N.channel_proxy(c, 'telegram', self.GLOBAL), 'http://t:1')
-        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL), '')
+        self.assertEqual(N.channel_proxy(c, 'wecom', self.GLOBAL), '')
+        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL), self.GLOBAL)
 
     def test_empty_main_proxy_stays_direct(self):
         c = NotifyConfig()
@@ -314,12 +324,20 @@ class TestChannelDetection(unittest.TestCase):
     def test_each_channel(self):
         c = NotifyConfig(pushplus_token='a')
         self.assertEqual(N.configured_channels(c), [N.CHANNEL_PUSHPLUS])
-        c = NotifyConfig(serverchan_key='b')
-        self.assertEqual(N.configured_channels(c), [N.CHANNEL_SERVERCHAN])
         c = NotifyConfig(wecom_webhook='https://qyapi.weixin.qq.com/x')
         self.assertEqual(N.configured_channels(c), [N.CHANNEL_WECOM])
         c = NotifyConfig(tg_bot_token='t', tg_chat_id='1')
         self.assertEqual(N.configured_channels(c), [N.CHANNEL_TELEGRAM])
+
+    def test_serverchan_removed_from_channels(self):
+        """Server 酱已从界面移除，不再算作可用渠道。
+
+        旧配置里如果还留着 serverchan_key，也不该让它被发送 ——
+        否则用户以为已经关掉了，实际还在推送。
+        """
+        self.assertNotIn(N.CHANNEL_SERVERCHAN, N.ALL_CHANNELS)
+        self.assertEqual(N.configured_channels(NotifyConfig(serverchan_key='b')),
+                         [], 'Server 酱不该再被识别为已配置渠道')
 
     def test_telegram_needs_both_fields(self):
         self.assertEqual(N.configured_channels(NotifyConfig(tg_bot_token='t')), [])

@@ -70,93 +70,58 @@ class TestRender(unittest.TestCase):
 
 
 class TestV2exFlow(unittest.TestCase):
-    """V2EX 两步流程：取页面 → 抽 once 令牌 → POST redeem。"""
+    """V2EX 流程：取页面 -> 抽 once 令牌 -> **GET** redeem -> 再取页面确认。
+
+    详细的行为验证（含 405 回归）在 tests/test_v2ex_flow.py，
+    这里只保留一个集成到流程引擎的冒烟，避免两处重复维护。
+    """
 
     FLOW = T.V2EX['flow']
+    VARS = {'mission_url': 'https://www.v2ex.com/mission/daily'}
+
+    def _run(self, script, calls):
+        f = fake_fetcher(script, calls)
+        return E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
+                               T.V2EX['fail_keywords'],
+                               T.V2EX['already_keywords'],
+                               initial_vars=dict(self.VARS))
 
     def test_success_with_token_extraction(self):
-        page = '<a href="/mission/daily/redeem?once=12345">领取</a>'
+        page = '<a href="/mission/daily/redeem?once=12345">领取 X 铜币</a>'
+        done = '<div>每日登录奖励已领取</div>'
         calls = []
-        f = fake_fetcher([(200, page), (200, '已领取 8 铜币')], calls)
-        out = E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                              T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                              initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
+        out = self._run([(200, page), (302, ''), (200, done)], calls)
         self.assertTrue(out.success, out.message)
         self.assertEqual(out.vars.get('once'), '12345')
-        # 第二次请求必须带上抽到的令牌
-        self.assertEqual(len(calls), 2)
+        # redeem 必须是 GET（POST 会 405），且在 redeem 之后还要再取一次页面
+        self.assertEqual([c[0] for c in calls], ['GET', 'GET', 'GET'])
         self.assertIn('once=12345', calls[1][1])
-        self.assertEqual(calls[1][0], 'POST')
-
-    def test_already_claimed_counts_as_success(self):
-        page = '<a href="/mission/daily/redeem?once=9">x</a>'
-        f = fake_fetcher([(200, page), (200, '今天已经领取过了')])
-        out = E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                              T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                              initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
-        self.assertTrue(out.success, '已领过应视为成功，否则会无意义地重试')
-        self.assertEqual(out.hit, 'already')
 
     def test_not_logged_in_is_failure(self):
         """未登录的页面没有令牌，会在取令牌这步就明确失败。"""
-        f = fake_fetcher([(200, '请先登录'), (200, '请先登录')])
-        out = E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                              T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                              initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
+        calls = []
+        out = self._run([(200, '请先登录'), (200, '请先登录')], calls)
         self.assertFalse(out.success)
         self.assertIn('令牌', out.message)
         self.assertIn('未登录', out.message, '应提示通常是未登录')
         self.assertEqual(out.error_kind, 'no_token')
 
     def test_fail_keyword_reported_when_token_present(self):
-        """有令牌但页面提示需要登录时，走关键词判定。"""
+        """有令牌但最后页面提示需要登录时，走关键词判定。"""
         page = '<a href="/mission/daily/redeem?once=7">x</a>'
-        f = fake_fetcher([(200, page), (200, '请先登录后再领取')])
-        out = E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                              T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                              initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
+        calls = []
+        out = self._run([(200, page), (302, ''), (200, '请先登录后再领取')], calls)
         self.assertFalse(out.success)
         self.assertEqual(out.hit, 'fail')
         self.assertIn('请先登录', out.message)
 
     def test_missing_token_reports_clearly(self):
         """页面到了但没有令牌：明确说是令牌问题。"""
-        f = fake_fetcher([(200, '<html>没有令牌的页面</html>')])
-        out = E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                              T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                              initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
+        calls = []
+        out = self._run([(200, '<html>没有令牌的页面</html>')], calls)
         self.assertFalse(out.success)
-        self.assertIn('令牌', out.message)
         self.assertEqual(out.error_kind, 'no_token')
 
-    def test_unclear_page_is_failure_with_unclear_kind(self):
-        f = fake_fetcher([(200, '<a href="/mission/daily/redeem?once=1">x</a>'),
-                          (200, '完全看不懂的页面')])
-        out = E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                              T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                              initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
-        self.assertFalse(out.success)
-        self.assertEqual(out.error_kind, 'unclear')
-
-    def test_403_http_status_surfaces_as_failure(self):
-        """Cloudflare 类 403：令牌取不到，错误必须带出 403，便于判断要上浏览器。"""
-        f = fake_fetcher([(403, 'Attention Required! Cloudflare')])
-        out = E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                              T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                              initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
-        self.assertFalse(out.success)
-        self.assertIn('403', out.message)
-        self.assertEqual(out.error_kind, 'http_403')
-
-    def test_403_does_not_continue_to_redeem(self):
-        """取不到令牌时不能继续往下请求，否则会带着字面量 {once} 发请求。"""
-        calls = []
-        f = fake_fetcher([(403, 'Cloudflare')], calls)
-        E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                        T.V2EX['fail_keywords'], T.V2EX['already_keywords'],
-                        initial_vars={'mission_url': 'https://www.v2ex.com/mission/daily'})
-        self.assertEqual(len(calls), 1, '不该发起第二次请求')
-        self.assertEqual(calls[0][0], 'GET')
 
 
 class TestFlowEngineGeneral(unittest.TestCase):
@@ -327,9 +292,12 @@ class TestCheckinSiteDispatch(unittest.TestCase):
         import app.engine as _e
         orig = _e._http_fetcher
 
-        def spy_fetcher(site, proxy, cookie=''):
+        def spy_fetcher(site, proxy, cookie='', headers_override=None):
             captured['cookie'] = cookie
-            captured['headers'] = dict(site.headers or {})
+            # 渲染后的头由调用方以 headers_override 传入（不再就地改 site.headers）
+            captured['headers'] = dict(headers_override
+                                       if headers_override is not None
+                                       else (site.headers or {}))
             return fake_fetch
 
         try:

@@ -16,13 +16,14 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from . import secrets as S
+from .netutil import mask_proxy_url
 
 DEFAULT_PORT = 28999      # 容器内部监听端口；host 模式下即宿主端口
 
 DEFAULT_DATA_DIR = '/data'
 DEFAULT_TZ = 'Asia/Shanghai'
 
-VERSION = '1.4.0'
+VERSION = '1.4.2'
 
 
 @dataclass
@@ -52,7 +53,7 @@ class Settings:
             '密钥来源 %s'
         ) % (
             self.version, self.host, self.port, self.data_dir, tz,
-            self.proxy or '(未配置，直连)',
+            mask_proxy_url(self.proxy) if self.proxy else '(未配置，直连)',
             self.tick_seconds,
             '，已禁用调度' if self.no_scheduler else '',
             '环境变量' if self.env_key else '数据目录中的密钥文件',
@@ -122,7 +123,9 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
             print('       已忽略这个占位符，本次按【直连】运行。')
             s.proxy = ''
         else:
-            print('[启动] 代理: %s（主机 %s）' % (s.proxy, proxy_host(s.proxy)))
+            # 打码后再打印：代理地址常带 user:pass，直接进日志等于凭据泄露
+            print('[启动] 代理: %s（主机 %s）'
+                  % (mask_proxy_url(s.proxy), proxy_host(s.proxy)))
     s.env_key = os.environ.get('AUTOCHECKIN_KEY', '').strip()
     s.log_level = (args.log_level if args.log_level is not None
                    else os.environ.get('LOG_LEVEL', 'info'))
@@ -133,6 +136,31 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
     s.tick_seconds = max(5, int(tick))
     s.version = os.environ.get('APP_VERSION', VERSION)
     return s
+
+
+def _warn_auth(service) -> None:
+    """把认证相关的真实风险窗口打到启动日志里。
+
+    为什么值得单独告警：这两种状态下，局域网内**任何人都能操作这个容器**
+    （改全局代理、读配置、触发签到、删除站点）。而用户往往以为"还没配好所以安全"。
+    """
+    try:
+        cfg = service.load_config()
+    except Exception:                                           # noqa: BLE001
+        return
+    if not getattr(cfg, 'auth_required', True):
+        print('=' * 56)
+        print('[警告] 网页访问口令已关闭：局域网内任何人都能打开界面并修改设置')
+        print('[警告] （可改全局代理、读取配置、触发签到、删除站点）')
+        print('[警告] 若不希望如此，请到「设置 → 访问口令」重新开启')
+        print('=' * 56)
+        return
+    if not getattr(cfg, 'auth_password_enc', ''):
+        print('=' * 56)
+        print('[注意] 尚未设置访问口令 —— 现在任何人都能抢先设置它并接管本容器。')
+        print('[注意] 请立刻打开 http://<本机IP>:%d/ 完成初始化。' % _env_int(
+            'PORT', DEFAULT_PORT))
+        print('=' * 56)
 
 
 def apply_timezone(tz_name: str) -> bool:
@@ -187,6 +215,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print('[警告] 请确认数据目录可写（需要生成密钥文件），'
               '或设置环境变量 %s' % S.KEY_ENV)
         print('=' * 56)
+
+    # 认证相关告警。这两条是真实存在的风险窗口，必须在启动日志里说清楚，
+    # 而不是等用户自己翻文档：
+    #   1) 要求认证但还没设口令 —— 此时 /api/auth/setup 是公开的，
+    #      局域网内任何人都能抢先设一个口令，从而接管这个容器
+    #      （能改代理、读配置、触发签到）。窗口一直持续到用户设好口令。
+    #   2) 用户主动关掉了认证 —— 那么整个界面（含代理设置）对局域网完全敞开。
+    _warn_auth(service)
 
     from . import web as WB
     from .scheduler import Scheduler

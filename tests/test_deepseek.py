@@ -103,11 +103,20 @@ class TestSanitizePatch(unittest.TestCase):
         self.assertEqual(D.sanitize_patch([1, 2]), {})
 
     def test_booleans_coerced(self):
-        got = D.sanitize_patch({'need_browser': 1, 'verify_ssl': 0,
+        got = D.sanitize_patch({'need_browser': 1,
                                 'jitter_enabled': 'yes'})
         self.assertIs(got['need_browser'], True)
-        self.assertIs(got['verify_ssl'], False)
         self.assertIs(got['jitter_enabled'], True)
+
+    def test_verify_ssl_is_not_patchable(self):
+        """AI 不能改 verify_ssl。
+
+        改回去会怎样：模型可以自动把某个站点的 TLS 校验永久关掉，
+        用户完全不知情就被削弱了传输安全。
+        """
+        got = D.sanitize_patch({'verify_ssl': False, 'need_browser': True})
+        self.assertNotIn('verify_ssl', got, 'verify_ssl 不该被 AI 补丁改动')
+        self.assertIn('need_browser', got)
 
 
 class TestBuildPrompt(unittest.TestCase):
@@ -302,12 +311,29 @@ class TestShouldAnalyze(unittest.TestCase):
         self.assertFalse(D.should_analyze(site, AiConfig(enabled=True)))
 
     def test_daily_call_limit(self):
-        site = SiteConfig(id='x', name='X', ai_enabled=True, ai_after_failures=1,
+        """次数限制看全局 max_calls_per_day（每天最多分析几次；0 = 不限制）。"""
+        site = SiteConfig(id='x', name='X', ai_enabled=True,
                           state={'consecutive_failures': 5})
-        ai = AiConfig(enabled=True, max_calls_per_day=3)
+        ai = AiConfig(enabled=True, ai_after_failures=1, max_calls_per_day=3)
         self.assertTrue(D.should_analyze(site, ai, calls_today=2))
         self.assertFalse(D.should_analyze(site, ai, calls_today=3))
         self.assertFalse(D.should_analyze(site, ai, calls_today=99))
+
+    def test_zero_max_calls_means_unlimited(self):
+        """max_calls_per_day=0 表示不限制次数（由失败倍数决定调用几次）。"""
+        site = SiteConfig(id='x', name='X', ai_enabled=True,
+                          state={'consecutive_failures': 5})
+        ai = AiConfig(enabled=True, ai_after_failures=1, max_calls_per_day=0)
+        self.assertTrue(D.should_analyze(site, ai, calls_today=0))
+        self.assertTrue(D.should_analyze(site, ai, calls_today=99))
+
+    def test_after_failures_zero_disables_analysis(self):
+        """ai_after_failures=0 表示不启用 AI 分析。"""
+        site = SiteConfig(id='x', name='X', ai_enabled=True,
+                          state={'consecutive_failures': 5})
+        ai = AiConfig(enabled=True, ai_after_failures=0)
+        self.assertFalse(D.should_analyze(site, ai, calls_today=0))
+        self.assertFalse(D.should_analyze(site, ai, calls_today=1))
 
 
 if __name__ == '__main__':

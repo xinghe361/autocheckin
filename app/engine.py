@@ -83,6 +83,28 @@ def classify_page(text: str, success_kw: List[str], fail_kw: List[str],
     return 'unknown', ''
 
 
+def _extra_note(variables: Dict[str, str]) -> str:
+    """把提取到的数值拼成一句附加说明，没有可展示的值就返回空串。
+
+    只挑已知有意义的键，避免把内部令牌（once）之类也打印出来。
+    """
+    if not variables:
+        return ''
+    labels = (
+        ('gain', '获得 %s 个鸡腿'),
+        ('current', '共 %s'),
+        ('log_days', '已连续登录 %s 天'),
+        ('log_value', '每日奖励 %s 铜币'),
+        ('jifen', '当前积分 %s'),
+    )
+    parts = []
+    for key, fmt in labels:
+        v = variables.get(key)
+        if v not in (None, ''):
+            parts.append(fmt % v)
+    return ('｜' + '，'.join(parts)) if parts else ''
+
+
 def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
                   success_kw: List[str], fail_kw: List[str],
                   already_kw: Optional[List[str]] = None,
@@ -153,16 +175,21 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
     text = (last_resp.text if last_resp else '') or ''
     kind, kw = classify_page(text, success_kw, fail_kw, already_kw)
 
+    # 把流程里提取到的、值得展示的数值附在消息后面，
+    # 例如 NodeSeek 的「获得 7 个鸡腿，共 408」、V2EX 的连续登录天数。
+    # 这些是用户在通知里最想看到的东西，光提取不显示等于白提。
+    extra = _extra_note(variables)
+
     if kind == 'success':
-        return FlowOutcome(True, '签到成功（命中「%s」）' % kw, 'success',
-                           vars=variables, trace=trace)
+        return FlowOutcome(True, '签到成功（命中「%s」）%s' % (kw, extra),
+                           'success', vars=variables, trace=trace)
     if kind == 'already':
         # 已经领过也算成功：不该因为"重复领取"而报失败并触发重试
-        return FlowOutcome(True, '今天已经领过了（命中「%s」）' % kw, 'already',
-                           vars=variables, trace=trace)
+        return FlowOutcome(True, '今天已经领过了（命中「%s」）%s' % (kw, extra),
+                           'already', vars=variables, trace=trace)
     if kind == 'fail':
-        return FlowOutcome(False, '站点提示需要处理（命中「%s」）' % kw, 'fail',
-                           vars=variables, trace=trace)
+        return FlowOutcome(False, '站点提示需要处理（命中「%s」）%s' % (kw, extra),
+                           'fail', vars=variables, trace=trace)
 
     status = last_resp.status if last_resp else 0
     # 无法判定时区分两种情况：HTTP 层就失败（把状态码带出来）还是页面看不懂
@@ -176,7 +203,8 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
 
 
 def _http_fetcher(site: SiteConfig, proxy: str,
-                  cookie_header: str = '') -> Fetcher:
+                  cookie_header: str = '',
+                  headers_override: Optional[Dict[str, str]] = None) -> Fetcher:
     """构造真实网络取数函数。
 
     cookie_header：站点配置里的 Cookie 头（形如 "a=1; b=2"）。
@@ -184,17 +212,22 @@ def _http_fetcher(site: SiteConfig, proxy: str,
         所以需要登录的站点永远拿到未登录页面 → 必然签到失败。
         现在把它显式塞进每个请求的 Cookie 头。
 
-    另外把站点自定义请求头（site.headers）一并带上：很多站点的接口会校验
+    另外把站点自定义请求头一并带上：很多站点的接口会校验
     Origin / Referer / Accept-Language，缺了就返回 403
     （实测 NodeSeek 的 /api/attendance：只带 Cookie 是 403，
       补上 Origin 与 Referer 才 200）。
+
+    headers_override：已经渲染好的自定义头（含 {cookie} 之类占位符的结果）。
+        由调用方传入，避免为了替换占位符而就地修改 site.headers
+        （那会把明文 Cookie/密码写回配置，见 checkin_via_http 的说明）。
     """
     from http.cookiejar import CookieJar
 
     jar = CookieJar()
     headers: Dict[str, str] = {}
+    source = headers_override if headers_override is not None else site.headers
     # 先放站点自定义头，再放 Cookie（Cookie 不允许被用户配置覆盖，避免误配）
-    for k, v in (site.headers or {}).items():
+    for k, v in (source or {}).items():
         if k and v is not None and k.lower() != 'cookie':
             headers[str(k)] = str(v)
     if cookie_header:
@@ -226,14 +259,21 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
                  'username': site.username, 'password': password,
                  'cookie': cookie_header}
 
-    # 站点自定义头里的 {cookie} 占位符也替换掉（有些模板把 Cookie 写在 headers 里）
-    if site.headers:
-        site.headers = {
-            k: _render(str(v), variables) for k, v in site.headers.items()
-        }
+    # 站点自定义头里的 {cookie} / {password} 占位符要替换掉
+    # （有些模板把 Cookie 写在 headers 里）。
+    #
+    # ⚠️ 必须替换到**局部副本**，绝不能就地改 site.headers：
+    #    variables 里含明文 Cookie 与密码，一旦写回 site.headers，
+    #    runner 随后 save_config 就会把明文落盘 config.json，
+    #    还会进 WebDAV 备份 —— 等于完全绕过 SecretBox 加密层。
+    #    （这里踩过一次：就地赋值会让"加密存储"这个承诺失效。）
+    rendered_headers = {
+        str(k): _render(str(v), variables)
+        for k, v in (site.headers or {}).items()
+    }
 
     return run_http_flow(
-        fetcher=_http_fetcher(site, proxy, cookie_header),
+        fetcher=_http_fetcher(site, proxy, cookie_header, rendered_headers),
         flow=[_render_step(s, variables) for s in flow],
         success_kw=list(site.success_keywords or tpl.get('success_keywords') or []),
         fail_kw=list(site.fail_keywords or tpl.get('fail_keywords') or []),

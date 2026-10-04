@@ -130,13 +130,33 @@ class SecretBox:
         if not token:
             return ''
         if token.startswith(PLAIN_PREFIX):
-            return base64.b64decode(token[len(PLAIN_PREFIX):]).decode('utf-8')
+            # ⚠️ 只有**当前确实处于弱模式**（没有密钥）时才接受 plain: 值。
+            #
+            # 以前这里不问当前模式、只看密文前缀就解，等于给出一个
+            # "不需要密钥就能构造合法凭据"的口子：任何能写配置/备份的人
+            # 只要写 auth_password_enc = "plain:" + base64(自选口令)，
+            # 就能凭空设一个口令或注入站点密码，完全绕过 Fernet。
+            # 加密与否必须由**当前配置**决定，不能由密文自身的形状决定。
+            if self._fernet is not None:
+                raise SecretError(
+                    '凭据用了未加密的 plain: 前缀，但当前已配置密钥，拒绝解密'
+                    '（可能是配置被改写，或是从无密钥环境迁移过来的）')
+            try:
+                return base64.b64decode(
+                    token[len(PLAIN_PREFIX):]).decode('utf-8')
+            except (ValueError, UnicodeError) as e:
+                raise SecretError('凭据格式损坏：%s' % e) from e
         if not self._fernet:
             raise SecretError('凭据是加密的，但当前没有可用密钥（请提供 %s）' % KEY_ENV)
         try:
             return self._fernet.decrypt(token.encode('ascii')).decode('utf-8')
         except InvalidToken as e:
             raise SecretError('凭据解密失败：密钥不匹配或数据损坏') from e
+        except (ValueError, UnicodeError) as e:
+            # 畸形密文（非法 base64 / 非法 ASCII）也要包成 SecretError，
+            # 否则 ValueError 会穿出去变成 HTTP 400 并把 stdlib 原文回显给用户；
+            # 更糟的是 Cookie 巡检循环会整体中断，导致每个 tick 重跑一遍。
+            raise SecretError('凭据格式损坏：%s' % e) from e
 
     def try_decrypt(self, token: str, default: str = '') -> str:
         """宽容版：解不开就返回 default。

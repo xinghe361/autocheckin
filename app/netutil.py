@@ -172,6 +172,25 @@ def normalize_proxy(raw: str) -> str:
     return p
 
 
+def mask_proxy_url(url: str) -> str:
+    """把代理地址里的账号密码打码，用于日志/界面显示。
+
+    为什么专门做：代理常写成 http://user:pass@host:port，
+    直接打印就把代理凭据写进容器日志（NAS 日志面板谁都能看）。
+    """
+    s = (url or '').strip()
+    if not s or '@' not in s:
+        return s
+    try:
+        p = urlsplit(normalize_proxy(s))
+        if not p.hostname:
+            return s
+        port = (':%d' % p.port) if p.port else ''
+        return '%s://***@%s%s' % (p.scheme or 'http', p.hostname, port)
+    except Exception:                                           # noqa: BLE001
+        return s
+
+
 def proxy_host(raw: str) -> str:
     """取出代理地址里的主机名（用于判断"是不是代理本身解析不了"）。"""
     p = normalize_proxy(raw)

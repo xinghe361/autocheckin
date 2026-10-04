@@ -26,11 +26,58 @@ from .models import AiConfig, SiteConfig
 from .notify import CheckinResult
 
 DEEPSEEK_DEFAULT_BASE = 'https://api.deepseek.com'
-DEEPSEEK_DEFAULT_MODEL = 'deepseek-chat'
+# 默认模型。用官方当前的通用名称；具体可用哪些由账号决定，
+# 所以界面提供"测试连接"直接问 /models 列出来（见 list_models）。
+# 为什么不再默认 deepseek-chat：那是旧名字，官方文档现在的模型表里
+# 只有 deepseek-flash 与 deepseek-v4-pro；旧名可能被映射、也可能报错，
+# 不该让用户在一个不知道会调到什么的名字上做默认选择。
+DEEPSEEK_DEFAULT_MODEL = 'deepseek-flash'
+
+
+def list_models(ai: AiConfig, api_key: str, proxy: str = '',
+                transport=None) -> Dict[str, Any]:
+    """问 DeepSeek 这个 key 能用哪些模型。
+
+    返回 {'ok': bool, 'models': [...], 'error': str, 'status': int}。
+
+    为什么需要它：光看设置里的那个文本框，用户无法知道
+    "我填的名字到底对应哪个模型、有没有被服务端映射成别的"。
+    直接问 /models 才能看到账号真实可用的清单。
+    """
+    base = (ai.base_url or DEEPSEEK_DEFAULT_BASE).rstrip('/')
+    url = base + '/models'
+    headers = {'Authorization': 'Bearer %s' % api_key}
+    try:
+        if transport is not None:
+            resp = transport(url, None, headers, ai.timeout, proxy)
+        else:
+            resp = request('GET', url, global_proxy=proxy,
+                           cfg=HttpConfig(timeout=min(int(ai.timeout or 20), 30),
+                                          headers=headers))
+    except HttpError as e:
+        return {'ok': False, 'models': [], 'status': 0, 'error': str(e)}
+    if not resp.ok:
+        detail = (resp.text or '')[:200]
+        return {'ok': False, 'models': [], 'status': resp.status,
+                'error': 'HTTP %d：%s' % (resp.status, detail)}
+    try:
+        data = json.loads(resp.text or '{}')
+    except ValueError as e:
+        return {'ok': False, 'models': [], 'status': resp.status,
+                'error': '返回不是合法 JSON：%s' % e}
+    ids = []
+    for m in (data.get('data') or []):
+        if isinstance(m, dict) and m.get('id'):
+            ids.append(str(m['id']))
+    return {'ok': True, 'models': sorted(ids), 'status': resp.status,
+            'error': ''}
 
 # 补丁里允许出现的字段（白名单，防止 AI 改坏关键配置）
 ALLOWED_PATCH_FIELDS = {
-    'homepage', 'need_browser', 'verify_ssl',
+    # 注意：**不含 verify_ssl**。
+    # 让 AI 自动关闭某个站点的 TLS 校验，等于允许模型永久性削弱传输安全，
+    # 而用户完全不知情。需要放宽校验时请到站点编辑里手动改。
+    'homepage', 'need_browser',
     'success_keywords', 'fail_keywords', 'steps',
     'daily_hour', 'daily_minute', 'jitter_enabled', 'jitter_seconds',
     'retry_enabled', 'retry_count', 'retry_interval_minutes',
@@ -69,6 +116,11 @@ class AiSuggestion:
     prompt_chars: int = 0
     duration_ms: int = 0
     raw: str = ''
+    # 请求时填的模型名，以及**服务端返回的**模型名。
+    # 后者才是"这次真正是哪个模型回答的"——旧名字可能被服务端映射到新模型，
+    # 只有比对这两者才能确认（用户问过"怎么确认我调用的是 flash 还是 pro"）。
+    requested_model: str = ''
+    served_model: str = ''
 
 
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -233,8 +285,9 @@ def analyze(site: SiteConfig, result: CheckinResult, ai: AiConfig,
     prompt = build_prompt(site, result, page_excerpt, trace)
     base = (ai.base_url or DEEPSEEK_DEFAULT_BASE).rstrip('/')
     url = base + '/chat/completions'
+    requested = ai.model or DEEPSEEK_DEFAULT_MODEL
     body = enc_json({
-        'model': ai.model or DEEPSEEK_DEFAULT_MODEL,
+        'model': requested,
         'messages': [
             {'role': 'system', 'content': SYSTEM_PROMPT},
             {'role': 'user', 'content': prompt},
@@ -268,16 +321,20 @@ def analyze(site: SiteConfig, result: CheckinResult, ai: AiConfig,
                             prompt_chars=len(prompt),
                             duration_ms=int((time.time() - started) * 1000))
 
+    # 服务端返回的 model 字段 = 这次真正回答的模型（可能与我们请求的不同）
+    served = str(data.get('model') or '')
     content = _extract_content(data)
     if not content:
         return AiSuggestion(False, error='DeepSeek 返回内容为空',
                             prompt_chars=len(prompt),
+                            requested_model=requested, served_model=served,
                             duration_ms=int((time.time() - started) * 1000))
 
     obj = extract_json(content)
     if obj is None:
         return AiSuggestion(False, error='AI 返回的不是合法 JSON',
                             raw=content[:500], prompt_chars=len(prompt),
+                            requested_model=requested, served_model=served,
                             duration_ms=int((time.time() - started) * 1000))
 
     try:
@@ -294,6 +351,8 @@ def analyze(site: SiteConfig, result: CheckinResult, ai: AiConfig,
         prompt_chars=len(prompt),
         duration_ms=int((time.time() - started) * 1000),
         raw=content[:2000],
+        requested_model=requested,
+        served_model=served,
     )
 
 
@@ -320,12 +379,27 @@ def apply_patch(site: SiteConfig, patch: Dict[str, Any]) -> List[str]:
 
 
 def should_analyze(site: SiteConfig, ai: AiConfig, calls_today: int = 0) -> bool:
-    """是否应该对这次失败调用 AI。"""
+    """是否应该对这次失败调用 AI。
+
+    统一逻辑：
+      * ai_after_failures（全局）= 每连续失败几次调用一次，0 = 不启用
+      * max_calls_per_day（全局）= 每天调用次数的硬上限，0 = 不限制
+    """
     if not ai.enabled:
         return False
     if not getattr(site, 'ai_enabled', True):
         return False
-    if calls_today >= max(1, int(ai.max_calls_per_day or 20)):
+    try:
+        after = int(getattr(ai, 'ai_after_failures', 3))
+    except (TypeError, ValueError):
+        after = 3
+    if after <= 0:
+        return False                    # 0 = 不启用 AI 分析
+    try:
+        cap = int(getattr(ai, 'max_calls_per_day', 20))
+    except (TypeError, ValueError):
+        cap = 20
+    if cap > 0 and calls_today >= cap:
         return False
     from .schedule import should_ask_ai
-    return should_ask_ai(site.to_schedule())
+    return should_ask_ai(site.to_schedule(), after)

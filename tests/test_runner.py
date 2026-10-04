@@ -470,7 +470,7 @@ class TestRunnerRetry(RunnerCase):
 
 class TestRunnerAi(RunnerCase):
     def test_ai_not_called_below_threshold(self):
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=3,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 0})
         cfg = AppConfig()
         cfg.sites = [site]
@@ -482,11 +482,11 @@ class TestRunnerAi(RunnerCase):
         self.assertEqual(self.ai_calls, [], '连败未达阈值不该调用 AI')
 
     def test_ai_called_at_threshold_and_patch_applied(self):
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=3,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 2})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True, auto_apply=True)
+        cfg.ai = AiConfig(enabled=True, auto_apply=True, ai_after_failures=3)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
         cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
@@ -501,16 +501,15 @@ class TestRunnerAi(RunnerCase):
     def test_ai_not_repeated_for_same_streak(self):
         """同一档连败只分析一次：4、5 次时不该再分析（否则持续故障天天烧 token）。
 
-        注意：现在还有"每天最多问一次"这层限制（见
-        test_ai_called_at_most_once_per_day），所以这里放开每日尝试上限，
-        单独验证"同一档位不重复分析"这条调度语义。
+        这里把每天上限设成 0（不限制），单独验证"同一档位不重复分析"
+        这条调度语义。
         """
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=3,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 2})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True, daily_limit_enabled=False,
-                          ai_calls_per_day=10)
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=3,
+                          max_calls_per_day=0)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
         cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
@@ -530,45 +529,14 @@ class TestRunnerAi(RunnerCase):
         self.assertEqual(len(self.ai_calls), 2,
                          '到达下一个阈值倍数应再次分析')
 
-    def test_ai_called_at_most_once_per_day(self):
-        """每天最多问 AI 一次（默认 ai_calls_per_day=1）。
-
-        这条替代了原来"按连败倍数重复分析"的语义 —— 用户要求
-        "三次之后调用 ai 一次还不成功就当天不再尝试"，
-        所以即使连败继续加重（跨过下一个倍数），当天也不会再问。
-        每天的尝试次数另行由 max_attempts_per_day 限住。
-        """
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=3,
-                          state={'consecutive_failures': 2})
-        cfg = AppConfig()
-        cfg.sites = [site]
-        # 放开每日尝试上限，单独验证"AI 每天一次"这一条
-        cfg.ai = AiConfig(enabled=True, daily_limit_enabled=False,
-                          ai_calls_per_day=1)
-        r = self.make_runner(cfg=cfg, results={
-            's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
-        cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
-
-        # 第 1 轮：连败 2→3，到达阈值 → 问一次
-        self.state.set_next_run_at('s1', self.now_value - 1)
-        r.run_once(cfg, self.state)
-        self.assertEqual(len(self.ai_calls), 1)
-
-        # 接下来无论失败多少次、跨过多少个阈值倍数，当天都不再问
-        for _ in range(4):
-            self.state.set_next_run_at('s1', self.now_value - 1)
-            r.run_once(cfg, self.state)
-        self.assertEqual(len(self.ai_calls), 1,
-                         '同一天内不该重复调用 AI（否则持续故障天天烧 token）')
-
     def test_ai_allowed_again_next_day(self):
-        """第二天恢复：每天一次，不是"一辈子一次"。"""
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=3,
+        """每天上限是"每天"重置的，不是一辈子只调用一次。"""
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 2})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True, daily_limit_enabled=False,
-                          ai_calls_per_day=1)
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=3,
+                          max_calls_per_day=1)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
         cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
@@ -580,45 +548,97 @@ class TestRunnerAi(RunnerCase):
         # 把时间推到第二天
         self.now_value += 86400
         site.state['consecutive_failures'] = 5   # 保证仍达阈值
+        site.state['ai_analyzed_for_streak'] = 0
         self.state.set_next_run_at('s1', self.now_value - 1)
         r.run_once(cfg, self.state)
         self.assertEqual(len(self.ai_calls), 2, '第二天应恢复调用')
 
-    def test_daily_attempt_limit_stops_retrying(self):
-        """用完当天尝试次数后就不再执行（due_sites 会过滤掉）。"""
-        site = SiteConfig(id='s1', name='S1', ai_enabled=False)
+    def test_ai_after_failures_zero_disables_ai(self):
+        """全局「每几次失败调用一次」设 0 = 不启用 AI 分析。
+
+        此时连 AI 分支都不会进入，所以 ai_note 为空、也不会调用分析。
+        """
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
+                          state={'consecutive_failures': 9})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(daily_limit_enabled=True, max_attempts_per_day=3)
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=0)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
+        cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
+        self.state.set_next_run_at('s1', self.now_value - 1)
+        report = r.run_once(cfg, self.state)
+        self.assertEqual(self.ai_calls, [], '设为 0 时不该调用 AI')
+        self.assertFalse(report.runs[0].ai_used)
+        self.assertEqual(report.runs[0].ai_note, '')
 
-        for i in range(3):
+    def test_max_calls_per_day_is_hard_cap(self):
+        """「每天最多分析几次」是硬上限：到了就不再调用，0 = 不限制。"""
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
+                          state={'consecutive_failures': 2})
+        cfg = AppConfig()
+        cfg.sites = [site]
+        # 每 3 次失败调用一次，但每天最多 1 次
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=3,
+                          max_calls_per_day=1)
+        r = self.make_runner(cfg=cfg, results={
+            's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
+        cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
+
+        # 连败 2→3: 调用一次
+        self.state.set_next_run_at('s1', self.now_value - 1)
+        r.run_once(cfg, self.state)
+        self.assertEqual(len(self.ai_calls), 1)
+        # 连败 3→4→5→6: 到倍数了，但已达每天上限 -> 不再调用
+        for _ in range(3):
+            site.state['ai_analyzed_for_streak'] = 0
+            self.state.set_next_run_at('s1', self.now_value - 1)
+            report = r.run_once(cfg, self.state)
+        self.assertEqual(len(self.ai_calls), 1, '已达每天上限不该再调用')
+
+    def test_max_calls_per_day_zero_means_unlimited(self):
+        """每天上限设 0 = 不限制（完全由倍数规则决定调用几次）。"""
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
+                          state={'consecutive_failures': 2})
+        cfg = AppConfig()
+        cfg.sites = [site]
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=1,
+                          max_calls_per_day=0)
+        r = self.make_runner(cfg=cfg, results={
+            's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
+        cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
+        for _ in range(4):
+            site.state['ai_analyzed_for_streak'] = 0
+            self.state.set_next_run_at('s1', self.now_value - 1)
+            r.run_once(cfg, self.state)
+        self.assertEqual(len(self.ai_calls), 4, '设为 0 时不该被限制次数')
+
+    def test_retry_count_alone_controls_attempts(self):
+        """签到尝试次数完全由站点的重试设置决定，全局没有额外限制。
+
+        统一逻辑前这里还有一层"每站点每天最多尝试几次"，
+        现在已移除 —— 存在两套计数会互相打架（用户指出）。
+        """
+        site = SiteConfig(id='s1', name='S1', ai_enabled=False,
+                          retry_enabled=True, retry_count=3,
+                          retry_interval_minutes=1)
+        cfg = AppConfig()
+        cfg.sites = [site]
+        cfg.ai = AiConfig()
+        r = self.make_runner(cfg=cfg, results={
+            's1': CheckinResult('s1', 'S1', False, 'x', error_kind='timeout')})
+        # 首次 + 3 次重试 = 4 次；此后重试计数清零、按正常调度排下一次
+        for i in range(4):
             self.state.set_next_run_at('s1', self.now_value - 1)
             report = r.run_once(cfg, self.state)
             self.assertEqual(len(report.runs), 1, '第 %d 次应执行' % (i + 1))
 
-        # 第 4 次：当天额度已用完，不该再执行
-        self.state.set_next_run_at('s1', self.now_value - 1)
-        report = r.run_once(cfg, self.state)
-        self.assertEqual(report.runs, [],
-                         '当天尝试次数用完后不该再执行')
-
-        # 第二天自动恢复
-        today = time.strftime('%Y-%m-%d', time.localtime(self.now_value))
-        self.assertTrue(self.state.day_exhausted('s1', today, 3),
-                        '当天计数应已达上限')
-        self.now_value += 86400
-        tomorrow = time.strftime('%Y-%m-%d', time.localtime(self.now_value))
-        self.assertFalse(self.state.day_exhausted('s1', tomorrow, 3),
-                         '第二天应重新计数')
-
     def test_ai_skipped_without_api_key(self):
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=1,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 3})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True, api_key_enc='')
+        cfg.ai = AiConfig(enabled=True, api_key_enc='', ai_after_failures=1)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', False, 'x')})
         self.state.set_next_run_at('s1', self.now_value - 1)
@@ -627,11 +647,12 @@ class TestRunnerAi(RunnerCase):
         self.assertIn('API Key', report.runs[0].ai_note)
 
     def test_daily_limit_enforced(self):
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=1,
+        """每天上限到了就不再调用（即使倍数规则还要求调用）。"""
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 3})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True, max_calls_per_day=1, ai_calls_per_day=1)
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=1, max_calls_per_day=1)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', False, 'x')})
         cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
@@ -640,42 +661,15 @@ class TestRunnerAi(RunnerCase):
         self.state.set_next_run_at('s1', self.now_value - 1)
         report = r.run_once(cfg, self.state)
         self.assertEqual(self.ai_calls, [])
-        self.assertIn('今天已问过', report.runs[0].ai_note)
-
-    def test_global_daily_cap_across_sites(self):
-        """全局每日总量上限：多个站点加起来也不能超。
-
-        防止"很多站点同时坏掉"把额度一次烧光。
-        """
-        a = SiteConfig(id='a', name='A', ai_enabled=True, ai_after_failures=1,
-                       state={'consecutive_failures': 3})
-        b = SiteConfig(id='b', name='B', ai_enabled=True, ai_after_failures=1,
-                       state={'consecutive_failures': 3})
-        cfg = AppConfig()
-        cfg.sites = [a, b]
-        cfg.ai = AiConfig(enabled=True, daily_limit_enabled=False,
-                          ai_calls_per_day=5, global_max_calls_per_day=1)
-        r = self.make_runner(cfg=cfg, results={
-            'a': CheckinResult('a', 'A', False, 'x', error_kind='timeout'),
-            'b': CheckinResult('b', 'B', False, 'x', error_kind='timeout')})
-        cfg.ai.api_key_enc = self.box.encrypt('fake-api-key')
-
-        for sid in ('a', 'b'):
-            self.state.set_next_run_at(sid, self.now_value - 1)
-        report = r.run_once(cfg, self.state)
-        self.assertEqual(len(self.ai_calls), 1,
-                         '全局上限为 1 时只能调用一次')
-        notes = {x.site_id: x.ai_note for x in report.runs}
-        blocked = [v for v in notes.values() if v and '总量上限' in v]
-        self.assertTrue(blocked, '被全局上限挡住的站点应说明原因：%s' % notes)
+        self.assertIn('每天上限', report.runs[0].ai_note)
 
     def test_ai_failure_is_reported_not_swallowed(self):
         from app.deepseek import AiSuggestion
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=1,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 5})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True)
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=1)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', False, 'x')},
             ai=AiSuggestion(False, error='额度用尽'))
@@ -685,51 +679,40 @@ class TestRunnerAi(RunnerCase):
         self.assertIn('额度用尽', report.runs[0].ai_note)
 
 
-    def test_success_clears_day_problem_and_failure_flags(self):
-        """签到成功 -> 清掉"今天的问题站点"标记与 AI 失败计数（用户要求）。
+    def test_success_clears_failure_flags(self):
+        """签到成功 -> 清掉 AI 失败计数与暂停原因（用户要求）。
 
-        逻辑闭环：站点恢复后不该继续背着旧标记，
-        否则卡片上还挂着过期的"今天已停止重试"，用户也不知道它已经好了。
-
-        注意站点必须是启用的：due_sites 会过滤掉停用的站点，
-        所以"停用后靠成功自愈"本身不可能发生 ——
-        被暂停的站点需要用户手动启用（见下面的测试说明）。
+        逻辑闭环：站点恢复后不该继续背着旧标记。
+        被自动暂停的站点不会自己恢复（due_sites 会过滤停用的站点），
+        需要用户手动「启用」——这是刻意的，暂停就是为了停止消耗。
         """
         site = SiteConfig(id='s1', name='S1', ai_enabled=True, enabled=True,
                           state={'consecutive_failures': 2,
                                  'ai_consecutive_failures': 3,
                                  'last_ai_error': '401',
-                                 'ai_failed_at': 1})
+                                 'ai_failed_at': 1,
+                                 'disabled_reason': '手动停用过（残留）'})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True)
+        cfg.ai = AiConfig(enabled=True, ai_after_failures=1)
         r = self.make_runner(cfg=cfg, results={
             's1': CheckinResult('s1', 'S1', True, '签到成功')})
-
-        # 先制造"今天的问题"标记
-        today = time.strftime('%Y-%m-%d', time.localtime(self.now_value))
-        self.state.bump_day_attempts('s1', today)
-        self.state.set_site_flag('s1', 'day_problem', True)
-        self.state.set_site_flag('s1', 'day_problem_date', today)
-        self.state.set_site_flag('s1', 'day_problem_reason', '今天已停止重试')
         self.state.set_next_run_at('s1', self.now_value - 1)
 
         report = r.run_once(cfg, self.state)
 
         self.assertEqual(len(report.runs), 1, '启用的站点应被执行')
         self.assertTrue(report.runs[0].result.success)
-        self.assertFalse(self.state.get_site_flag('s1', 'day_problem'),
-                         '成功应清掉"今天的问题"标记')
         self.assertEqual(site.state.get('ai_consecutive_failures'), 0)
         self.assertEqual(site.state.get('last_ai_error'), '')
+        self.assertNotIn('disabled_reason', site.state)
         self.assertIn('已清除', report.runs[0].ai_note or '')
 
     def test_paused_site_needs_manual_reenable(self):
         """被自动暂停的站点不会自己恢复 —— 这是刻意的（省 token）。
 
         因为 due_sites 会过滤停用的站点，它根本没有"靠成功自愈"的机会。
-        用户修好问题后到「站点」页手动「启用」即可；
-        手动「立即」也会顺带清掉当天的问题标记。
+        用户修好问题后到「站点」页手动「启用」即可。
         """
         site = SiteConfig(id='s1', name='S1', enabled=False,
                           state={'consecutive_failures': 0,
@@ -789,7 +772,7 @@ class TestRunnerPersistence(RunnerCase):
 
     def test_config_changes_persist(self):
         """AI 补丁必须落盘，否则重启后又按旧配置签到。"""
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=1,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           need_browser=False, state={'consecutive_failures': 5})
         cfg = AppConfig()
         cfg.sites = [site]
@@ -811,17 +794,21 @@ class TestAiFailureAutoDisable(RunnerCase):
     """用户要求：AI 调用也失败则自动停止该站点签到，并推送"分析失败"告警。"""
 
     def make(self, ai_result, fail_threshold=2, auto_disable=True,
-             consecutive_failures=5, ai_calls_per_day=99,
-             daily_limit_enabled=False):
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=1,
+             consecutive_failures=5, ai_after_failures=1,
+             max_calls_per_day=0):
+        # 旧的 auto_disable 开关已合并进 fail_threshold：
+        # auto_disable=False 等价于 fail_threshold=0（不限制，永不停用）。
+        if not auto_disable:
+            fail_threshold = 0
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           enabled=True,
                           state={'consecutive_failures': consecutive_failures})
         cfg = AppConfig()
         cfg.sites = [site]
+        # max_calls_per_day=0 表示不限制，方便单独验证"AI 连败"计数逻辑
         cfg.ai = AiConfig(enabled=True, fail_threshold=fail_threshold,
-                          auto_disable=auto_disable, max_calls_per_day=99,
-                          ai_calls_per_day=ai_calls_per_day,
-                          daily_limit_enabled=daily_limit_enabled)
+                          ai_after_failures=ai_after_failures,
+                          max_calls_per_day=max_calls_per_day)
         cfg.notify = NotifyConfig(channels=['pushplus'], mode=NOTIFY_FAIL_ONLY,
                                   pushplus_token='tok')
         r = self.make_runner(cfg=cfg, results={
@@ -843,12 +830,12 @@ class TestAiFailureAutoDisable(RunnerCase):
     def test_disabled_after_threshold(self):
         """AI 连续失败达阈值 -> 停用站点并写明原因。
 
-        新语义下"每天只问一次"，所以这里显式放开每日问询次数，
-        单独验证"AI 本身连续失败"这条计数逻辑。
+        这里把每天上限设为 0（不限制），单独验证"AI 本身连续失败"
+        这条计数逻辑。
         """
         from app.deepseek import AiSuggestion
         r, cfg, site = self.make(AiSuggestion(False, error='401'),
-                                 fail_threshold=2, ai_calls_per_day=9)
+                                 fail_threshold=2, max_calls_per_day=0)
         # 第 1 次 AI 失败
         self.state.set_next_run_at('s1', self.now_value - 1)
         r.run_once(cfg, self.state)
@@ -861,67 +848,6 @@ class TestAiFailureAutoDisable(RunnerCase):
         self.assertEqual(site.state['ai_consecutive_failures'], 2)
         self.assertFalse(site.enabled, 'AI 连续失败达阈值应自动停用站点')
         self.assertIn('自动停止', site.state.get('disabled_reason', ''))
-
-    def test_day_problem_marks_and_notifies(self):
-        """用完当天尝试次数 -> 标记"今天不再试"并通知，但站点仍是启用的。"""
-        from app.deepseek import AiSuggestion
-        alerts = []
-        r, cfg, site = self.make(AiSuggestion(True, analysis='已修'),
-                                 daily_limit_enabled=True,
-                                 consecutive_failures=0)
-        cfg.ai.max_attempts_per_day = 2
-        cfg.ai.ai_calls_per_day = 1
-        r.alert_fn = lambda c, title, body, proxy, _ck=None: alerts.append(
-            (title, body))
-
-        # 第 1 次：未到限额，不通知
-        self.state.set_next_run_at('s1', self.now_value - 1)
-        r.run_once(cfg, self.state)
-        self.assertFalse(self.state.get_site_flag('s1', 'day_problem'))
-        # 第 2 次：用完额度 -> 标记 + 通知
-        site.state['ai_analyzed_for_streak'] = 0
-        self.state.set_next_run_at('s1', self.now_value - 1)
-        report = r.run_once(cfg, self.state)
-        self.assertTrue(self.state.get_site_flag('s1', 'day_problem'),
-                        '用完当天额度应标记为今天的问题站点')
-        self.assertTrue(site.enabled, '第一天不该直接停用，先等第二天')
-        self.assertIn('不再重试', report.runs[0].ai_note)
-        self.assertEqual(len(alerts), 1, '应推送一条"今天已停止重试"通知')
-        self.assertIn('停止重试', alerts[0][0])
-
-        # 第 3 次：当天额度已用完，due_sites 直接过滤，不再执行
-        self.state.set_next_run_at('s1', self.now_value - 1)
-        report2 = r.run_once(cfg, self.state)
-        self.assertEqual(report2.runs, [], '当天不该再执行')
-
-    def test_repeated_day_problem_disables_site(self):
-        """第二天仍然失败 -> 自动暂停站点并通知（用户要求）。"""
-        from app.deepseek import AiSuggestion
-        alerts = []
-        r, cfg, site = self.make(AiSuggestion(True, analysis='已修'),
-                                 daily_limit_enabled=True,
-                                 consecutive_failures=0)
-        cfg.ai.max_attempts_per_day = 1
-        cfg.ai.ai_calls_per_day = 1
-        r.alert_fn = lambda c, title, body, proxy, _ck=None: alerts.append(
-            (title, body))
-
-        # 第一天：用完额度 -> 标记（不停用）
-        self.state.set_next_run_at('s1', self.now_value - 1)
-        r.run_once(cfg, self.state)
-        self.assertTrue(self.state.get_site_flag('s1', 'day_problem'))
-        self.assertTrue(site.enabled)
-        alerts.clear()
-
-        # 第二天：同样用完额度 -> 判定"连续两天修不好" -> 暂停
-        self.now_value += 86400
-        site.state['ai_analyzed_for_streak'] = 0
-        self.state.set_next_run_at('s1', self.now_value - 1)
-        r.run_once(cfg, self.state)
-        self.assertFalse(site.enabled, '连续第二天失败应暂停站点')
-        self.assertIn('连续两天', site.state.get('disabled_reason', ''))
-        self.assertEqual(len(alerts), 1)
-        self.assertIn('已暂停', alerts[0][0])
 
     def test_alert_sent_regardless_of_notify_policy(self):
         """通知策略是"仅成功"时，告警仍然要发出去（系统级事件）。"""
@@ -949,21 +875,34 @@ class TestAiFailureAutoDisable(RunnerCase):
         self.assertEqual(alerts, [], '没有通知渠道就不该尝试发送')
 
     def test_auto_disable_can_be_turned_off(self):
+        """fail_threshold=0 表示不限制连续失败次数：只记录，永不停用。"""
         from app.deepseek import AiSuggestion
         r, cfg, site = self.make(AiSuggestion(False, error='x'),
-                                 fail_threshold=1, auto_disable=False)
+                                 fail_threshold=0)
         self.state.set_next_run_at('s1', self.now_value - 1)
         r.run_once(cfg, self.state)
-        self.assertTrue(site.enabled, '关闭自动停用后不应改状态')
+        self.assertTrue(site.enabled, '设为 0 后不应停用站点')
         self.assertEqual(site.state['ai_consecutive_failures'], 1)
+
+    def test_fail_threshold_zero_never_disables(self):
+        """连续失败很多次也不会停用（每天都失败也照样继续）。"""
+        from app.deepseek import AiSuggestion
+        r, cfg, site = self.make(AiSuggestion(False, error='x'),
+                                 fail_threshold=0)
+        for _ in range(6):
+            site.state['ai_analyzed_for_streak'] = 0   # 跨档，允许再次问 AI
+            self.state.set_next_run_at('s1', self.now_value - 1)
+            r.run_once(cfg, self.state)
+        self.assertTrue(site.enabled, '设为 0 时永远不该自动停用')
+        self.assertGreaterEqual(site.state['ai_consecutive_failures'], 5)
 
     def test_ai_exception_also_counted(self):
         """AI 调用直接抛异常也要计入失败，不能只在返回 not-ok 时才计。"""
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=1,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 9})
         cfg = AppConfig()
         cfg.sites = [site]
-        cfg.ai = AiConfig(enabled=True, fail_threshold=1, auto_disable=True)
+        cfg.ai = AiConfig(enabled=True, fail_threshold=1, ai_after_failures=1)
 
         def boom(site_, result_, ai_cfg, key, proxy):
             raise RuntimeError('连接被重置')
@@ -980,7 +919,7 @@ class TestAiFailureAutoDisable(RunnerCase):
     def test_success_resets_ai_failure_counter(self):
         """AI 分析恢复成功 → 计数清零，避免"历史上失败过就一直算。"。"""
         from app.deepseek import AiSuggestion
-        site = SiteConfig(id='s1', name='S1', ai_enabled=True, ai_after_failures=1,
+        site = SiteConfig(id='s1', name='S1', ai_enabled=True,
                           state={'consecutive_failures': 5,
                                  'ai_consecutive_failures': 3})
         cfg = AppConfig()

@@ -101,7 +101,8 @@ try:
     check('首页含三个标签页', all(t in html for t in ('tab-sites', 'tab-add', 'tab-settings')))
     check('首页含新增站点按钮文案', '开始录制' in html and '结束并保存' in html)
     check('首页含告警测试按钮', '测试"分析失败"告警' in html or '分析失败' in html)
-    check('首页含 AI 失败阈值输入', 'set_aifail' in html and 'set_aiauto' in html)
+    check('首页含 AI 失败阈值输入（已合并为一个数字）',
+          'set_aifail' in html and 'set_aiauto' not in html)
     check('首页含登录界面', 'tab-login' in html and 'doLogin' in html)
 
     # ---- 承接 QD 的 get-cookies 扩展 ----
@@ -150,23 +151,28 @@ try:
     check('列表用结构签名判断是否需要重建',
           'sitesSignature' in html and '_sitesSig' in html)
 
-    # ---- AI 防烧 token：每天尝试/调用上限 ----
-    check('设置页有每日尝试上限开关', 'set_dailylimit' in html and 'swAiLimits' in html)
-    check('设置页可配每天尝试次数', 'set_maxattempt' in html)
-    check('设置页可配每天问 AI 次数', 'set_aiperday' in html)
-    check('设置页可配全局每日总量上限', 'set_aiglobal' in html)
+    # ---- AI：统一逻辑（全局控制调用时机，站点只管重试次数）----
+    check('设置页可配"每几次失败调用一次 AI"',
+          'set_aiafter' in html and 'calcAiCalls' in html)
+    check('设置页可配"每天最多分析几次"（0＝不限制）', 'set_maxai' in html)
+    check('已移除"每日尝试上限"那一层',
+          'set_dailylimit' not in html and 'set_maxattempt' not in html
+          and 'set_aiglobal' not in html and 'set_aiperday' not in html)
+    check('站点表单不再有 AI 失败阈值（改为全局）', "aiN" not in html)
+    check('站点表单说明重试次数决定尝试次数', '失败重试' in html)
     st, body = get('/api/settings')
     stt = json.loads(body) if isinstance(body, bytes) else body
     ai = stt.get('ai') or {}
-    for k in ('daily_limit_enabled', 'max_attempts_per_day', 'ai_calls_per_day',
-              'global_max_calls_per_day'):
+    for k in ('ai_after_failures', 'max_calls_per_day', 'fail_threshold'):
         check('设置接口回传 %s' % k, k in ai, str(ai)[:140])
 
-    # 站点列表要带上"今天的问题"信息，界面才能提示为什么不再试
+    # "站点列表"不该再带已移除的"当天的问题"字段
     st, body = get('/api/sites')
     one = (json.loads(body)['sites'] or [{}])[0]
-    check('站点列表回传 day_problem', 'day_problem' in one, str(one)[:140])
-    check('站点列表回传 day_problem_reason', 'day_problem_reason' in one)
+    check('站点列表已移除 day_problem 字段',
+          'day_problem' not in one, str(one)[:140])
+    check('站点列表回传 retry_count（尝试次数由它决定）',
+          'retry_count' in one)
 
     st, body = get('/api/settings')
     stt = json.loads(body) if isinstance(body, bytes) else body
@@ -211,8 +217,9 @@ try:
     meta = json.loads(body)
     check('元数据含三个内置站点',
           sorted(t['id'] for t in meta['templates']) == ['chiphell', 'nodeseek', 'v2ex'])
-    check('元数据含四个通知渠道',
-          set(meta['channels']) == {'pushplus', 'serverchan', 'wecom', 'telegram'})
+    check('元数据含三个通知渠道（Server 酱已移除）',
+          set(meta['channels']) == {'pushplus', 'wecom', 'telegram'},
+          str(meta.get('channels')))
     check('元数据含代理模式', set(meta['proxy_modes']) == {'inherit', 'direct', 'custom'})
 
     st, body = get('/api/sites')
@@ -226,10 +233,15 @@ try:
         'proxy': 'http://10.0.0.1:7890',
         'notify': {'channels': ['telegram', 'wecom'], 'proxy_mode': 'custom',
                    'proxy_url': 'http://n:1',
-                   'channel_proxy': {'wecom': {'mode': 'direct', 'url': ''}},
+                   # 渠道级代理已改为直接跟随主代理（通知级那层已删）。
+                   # 这里把两个渠道都设为直连，避免冒烟测试真的去连
+                   # 10.0.0.1:7890 这个不存在的代理而卡住超时。
+                   'channel_proxy': {
+                       'wecom': {'mode': 'direct', 'url': ''},
+                       'telegram': {'mode': 'direct', 'url': ''}},
                    'tg_bot_token': 'SECRET-BOT', 'tg_chat_id': '123',
                    'wecom_webhook': 'https://qyapi.weixin.qq.com/SECRET'},
-        'ai': {'api_key': 'sk-SECRET', 'fail_threshold': 3, 'auto_disable': True},
+        'ai': {'api_key': 'sk-SECRET', 'fail_threshold': 3},
         'webdav': {'url': 'https://dav.example.com/dav/', 'password': 'WD-SECRET'},
     })
     st, body = get('/api/settings')

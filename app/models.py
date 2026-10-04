@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -70,6 +71,40 @@ class Step:
         )
 
 
+SITE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\-]{0,63}$')
+
+
+def safe_site_id(raw, fallback_name: str = '') -> str:
+    """把站点标识收敛到安全字符集。
+
+    为什么必须在**数据入口**做：站点 id 会被拼进页面的内联事件属性
+    （`onclick="runSite('ID')"`）。那里是 **JS 字符串上下文**，
+    HTML 实体转义（把 ' 变成 &#39;）不够 —— 浏览器会先把实体解码回 '
+    再交给 JS 解析器，于是 id 里的引号能闭合字符串并注入任意代码。
+    实测：id = `x'),alert(1),('y` 渲染出来点一下就执行。
+
+    所以在写入/读取时就把 id 限制成 [A-Za-z0-9_-]。
+    三条链路（保存、录制、从备份恢复）都经过 from_dict，堵这里最稳。
+
+    非法时**不抛异常**：配置里已经存在脏 id 时抛异常会让整份配置读不出来。
+    改成按名字生成一个合法 id（或退化为 site），并保证非空。
+    """
+    s = str(raw or '').strip()
+    if SITE_ID_RE.match(s):
+        return s
+    base = re.sub(r'[^A-Za-z0-9_\-]+', '-', str(fallback_name or '').strip())
+    base = base.strip('-')[:64]
+    if base and not base[0].isalnum():
+        base = 's' + base
+    if base:
+        return base[:64]
+    # 兜底：取原值里合法字符拼一个（至少保证非空且字符集安全）
+    cleaned = re.sub(r'[^A-Za-z0-9_\-]+', '', s)[:64]
+    if cleaned and cleaned[0].isalnum():
+        return cleaned
+    return ('s' + cleaned)[:64] if cleaned else 'site'
+
+
 @dataclass
 class SiteConfig:
     """单个签到站点的完整配置。"""
@@ -90,6 +125,10 @@ class SiteConfig:
     mode: str = MODE_DAILY
     daily_hour: int = 3
     daily_minute: int = 0
+    # mode=MODE_SUCCESS_BASED 时：距上次签到成功的间隔（分钟）。
+    # 默认 1440 = 24 小时。以前这里是硬编码的 86400 秒，
+    # 界面上显示的"上次成功后 XX 分钟"其实是重试间隔，显示与实际不符。
+    success_interval_minutes: int = 1440
     jitter_enabled: bool = False
     jitter_seconds: int = 3600
     retry_enabled: bool = True
@@ -149,6 +188,7 @@ class SiteConfig:
             mode=self.mode,
             daily_hour=self.daily_hour,
             daily_minute=self.daily_minute,
+            success_interval_minutes=self.success_interval_minutes,
             jitter_enabled=self.jitter_enabled,
             jitter_seconds=self.jitter_seconds,
             retry_enabled=self.retry_enabled,
@@ -201,7 +241,7 @@ class SiteConfig:
         steps = [Step.from_dict(s) if isinstance(s, dict) else s
                  for s in (d.get('steps') or [])]
         return SiteConfig(
-            id=d['id'],
+            id=safe_site_id(d.get('id'), d.get('name')),
             name=d.get('name') or d['id'],
             enabled=bool(d.get('enabled', True)),
             kind=d.get('kind', KIND_TEMPLATE),
@@ -212,6 +252,8 @@ class SiteConfig:
             mode=d.get('mode', MODE_DAILY),
             daily_hour=int(d.get('daily_hour', 3)),
             daily_minute=int(d.get('daily_minute', 0)),
+            success_interval_minutes=max(
+                60, int(d.get('success_interval_minutes', 1440))),
             jitter_enabled=bool(d.get('jitter_enabled', False)),
             jitter_seconds=int(d.get('jitter_seconds', 3600)),
             retry_enabled=bool(d.get('retry_enabled', True)),
@@ -347,13 +389,17 @@ class WebdavConfig:
 class AiConfig:
     """DeepSeek 分析设置（连续失败达到阈值时调用）。
 
-    防烧 token 的完整策略（按用户要求设计）：
-        每天每个站点最多尝试 N 次（max_attempts_per_day）；
-        用完 N 次后当天只问 AI 一次（ai_calls_per_day）；
-        AI 也没解决 -> 标记"问题站点"，当天不再尝试，并通知；
-        第二天重新开始；若第二天 AI 同样没能解决 -> 暂停该站点并通知。
-        另外还有全局每日调用总量上限（global_max_calls_per_day），
-        防止"很多站点同时坏掉"把额度一次烧光。
+    防烧 token 的策略（统一逻辑，各字段各管一件事）：
+        * 签到重试次数完全由【站点设置】的 retry_count 决定；
+        * 全局 ai_after_failures：每连续失败几次调用一次 AI 分析
+          （在它的整数倍处调用）。0 = 不启用 AI 分析。
+        * 全局 max_calls_per_day：每天最多分析几次的**硬上限**，
+          到了这个次数即使倍数规则还要求调用也不调用。0 = 不限制。
+        * 全局 fail_threshold：连续几次"分析本身失败"后暂停该站点。
+          0 = 不限制（永不停用）。
+
+    这样"某个站点会被调用几次 AI"是可以直接算出来的：
+        calls = ceil(重试次数 / ai_after_failures)，再受 max_calls_per_day 封顶。
     """
 
     enabled: bool = True
@@ -361,25 +407,25 @@ class AiConfig:
     base_url: str = 'https://api.deepseek.com'
     model: str = 'deepseek-chat'
     timeout: int = 60
-    # 每天每站点最多分析多少次（防止无限烧 token）
-    max_calls_per_day: int = 20
     # 是否允许 AI 直接改写站点流程（false 时只给建议，需人工确认）
     auto_apply: bool = True
 
-    # --- 调用 AI 本身也失败时的处理 ---
-    # 连续多少次"AI 调用失败"后，自动停止该站点的签到
-    fail_threshold: int = 2
-    # 是否启用"AI 也救不回来就停掉该站点"（并推送通知）
-    auto_disable: bool = True
+    # --- 什么时候调用 AI 分析（全局）---
+    # 每连续失败几次调用一次（在整数倍处），0 = 不启用 AI 分析。
+    # 以前这个值放在每个站点上（site.ai_after_failures），
+    # 用户要求统一成全局设置，站点只负责重试次数。
+    ai_after_failures: int = 3
+    # 每天最多分析几次（全局硬上限）。0 = 不限制。
+    # 达到这个次数后，即使倍数规则还要求调用也不再调用。
+    max_calls_per_day: int = 20
 
-    # --- 每天尝试次数上限（用户要求：避免无限重试把额度烧光）---
-    # 启用后，每个站点每天最多尝试这么多次；用完就等第二天。
-    daily_limit_enabled: bool = True
-    max_attempts_per_day: int = 3
-    # 每天允许问 AI 的次数（默认 1 次：试完 N 次后问一次，问不出结果就等明天）
-    ai_calls_per_day: int = 1
-    # 全局每日调用总量上限（跨所有站点）。0 = 不限制。
-    global_max_calls_per_day: int = 20
+    # --- 调用 AI 本身也失败时的处理 ---
+    # 连续多少次"AI 调用失败"后自动暂停该站点。
+    #   0 = 不限制（每天都失败也照样继续问 AI，站点不会被停用）
+    #   1 = 第一次 AI 失败就暂停
+    # 只用一个数字表达"要不要停用 + 几次后停用"，不再单独设开关 ——
+    # 之前 auto_disable 只是这个数字的开关，语义重复（用户指出）。
+    fail_threshold: int = 2
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -387,9 +433,38 @@ class AiConfig:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'AiConfig':
         base = AiConfig()
+        src = dict(d or {})
+
+        # --- 旧字段迁移（逻辑统一前存在过的那些）---
+        # ai_calls_per_day（每站点每天调用 AI 几次）现在由
+        # ai_after_failures 的倍数 + max_calls_per_day 共同决定。
+        # 旧配置里如果显式设过，就把它当作"每天最多分析几次"的上限，
+        # 这样用户原来的意图（少调用）不会丢。
+        legacy_per_day = src.pop('ai_calls_per_day', None)
+        src.pop('daily_limit_enabled', None)      # 已移除：不再限制每天尝试次数
+        src.pop('max_attempts_per_day', None)     # 已移除：重试次数由站点决定
+        legacy_global = src.pop('global_max_calls_per_day', None)
+        # 更早的版本里 max_calls_per_day 存在过又被删过，语义相同，直接用
+
         for k in base.to_dict():
-            if k in (d or {}):
-                setattr(base, k, d[k])
+            if k in src:
+                setattr(base, k, src[k])
+
+        if legacy_per_day is not None:
+            try:
+                n = int(legacy_per_day)
+            except (TypeError, ValueError):
+                n = None
+            # 只在用户没自己设过上限（仍是默认 20）时迁移，避免覆盖新选择
+            if n is not None and int(base.max_calls_per_day) == 20:
+                base.max_calls_per_day = n
+        elif legacy_global is not None:
+            try:
+                n = int(legacy_global)
+            except (TypeError, ValueError):
+                n = None
+            if n is not None and int(base.max_calls_per_day) == 20:
+                base.max_calls_per_day = n
         return base
 
 
@@ -413,6 +488,12 @@ class AppConfig:
     headless: bool = True
     # 是否允许通过 CDP 连接外部已有的 Chrome（如 NAS 上的 Kasm Chrome）
     remote_cdp_url: str = ''
+    # 站点列表是否已被"显式管理"过（新增/删除站点、或加载过带站点的配置）。
+    # 用途：区分两种"站点为空" ——
+    #   False：全新配置或老配置，从没管理过 → 启动时补上内置站点
+    #   True ：用户主动把站点全删了 → **绝不能**让内置站点复活
+    # 只判断"站点是否为空"分不出这两者，实测过站点会自己回来继续签到。
+    sites_initialized: bool = False
 
     # --- 访问控制 ---
     # 网页界面是否需要登录。
@@ -448,6 +529,7 @@ class AppConfig:
             'browser_path': self.browser_path,
             'headless': self.headless,
             'remote_cdp_url': self.remote_cdp_url,
+            'sites_initialized': bool(self.sites_initialized),
             'auth_required': self.auth_required,
             'auth_password_enc': self.auth_password_enc,
             'session_hashes': list(self.session_hashes or []),
@@ -482,6 +564,10 @@ class AppConfig:
             browser_path=d.get('browser_path', '') or '',
             headless=bool(d.get('headless', True)),
             remote_cdp_url=d.get('remote_cdp_url', '') or '',
+            # 老配置没有这个键 → 看它有没有站点：有站点就说明管过站点列表了。
+            # 两者都没有时保持 False，首次启动仍会补上内置站点（行为不变）。
+            sites_initialized=bool(d.get('sites_initialized'))
+            or bool(d.get('sites')),
             auth_required=bool(d.get('auth_required', True)),
             auth_password_enc=d.get('auth_password_enc', '') or '',
             session_hashes=list(d.get('session_hashes') or []),

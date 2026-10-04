@@ -44,7 +44,109 @@ def _clean_name(name: str) -> str:
 
 
 def _looks_like_name(name: str) -> bool:
-    return bool(name) and bool(_NAME_RE.match(name))
+    if not name or not _NAME_RE.match(name):
+        return False
+    # 排除 HTTP 请求头名/请求方法：它们完全符合 RFC6265 的 token 语法，
+    # 因此单看语法会"合法"地通过，结果把 Host=… / Accept-Language=…
+    # 当成 Cookie 存下去 —— 界面显示"已配置登录"，实际签到必然失败，
+    # 而报错还是"未登录"，非常难查。这里挡掉这类名字。
+    return name.lower() not in _NOT_A_COOKIE_NAME
+
+
+# 绝不该被当成 Cookie 名的东西（HTTP 方法 + 常见请求头名）。
+# 真实站点的 Cookie 名不会叫这些。
+_NOT_A_COOKIE_NAME = frozenset({
+    'get', 'post', 'put', 'head', 'options', 'delete', 'patch', 'trace',
+    'connect', 'host', 'accept', 'accept-encoding', 'accept-language',
+    'accept-charset', 'authority', 'origin', 'referer', 'referrer',
+    'user-agent', 'content-type', 'content-length', 'content-encoding',
+    'connection', 'cache-control', 'pragma', 'upgrade', 'te', 'trailer',
+    'transfer-encoding', 'dnt', 'if-none-match', 'if-modified-since',
+    'http/1.1', 'http/2', 'sec-fetch-dest', 'sec-fetch-mode',
+    'sec-fetch-site', 'sec-fetch-user', 'sec-ch-ua', 'sec-ch-ua-mobile',
+    'sec-ch-ua-platform', 'x-requested-with', 'range', 'via', 'forwarded',
+    'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip', 'cookie', 'path',
+    'domain', 'expires', 'max-age', 'samesite', 'secure', 'httponly',
+})
+
+
+# HTTP 请求行：`GET /path HTTP/1.1`
+_HTTP_REQLINE_RE = re.compile(
+    r'^\s*(?:GET|POST|PUT|HEAD|OPTIONS|DELETE|PATCH|TRACE|CONNECT)\s+\S+'
+    r'\s+HTTP/\d(?:\.\d)?\s*$', re.I | re.M)
+
+
+def looks_like_header_block(text: str) -> bool:
+    """看起来像"整段 HTTP 头"（哪怕没带请求行）吗？
+
+    用户从 DevTools 里复制时，经常只复制 Headers 面板的内容 ——
+    没有 `GET /x HTTP/1.1` 那一行。这种输入里
+    `Host: a.com`、`Accept-Language: zh-CN` 在语法上都是合法的
+    name=value，会被裸串解析器当成 Cookie 存下来（界面显示"已配置登录"，
+    实际没登录，签到必然失败且报错是"未登录"）。
+
+    判定要求**所有**非空行都是 `名字: 值` 形状，且至少两行 ——
+    那样就不可能是一条正常 Cookie 串（`a=1; b=2` 不含冒号）。
+    cURL 命令明显不是这个形状，所以不会被误判。
+    """
+    lines = [l.strip() for l in (text or '').splitlines() if l.strip()]
+    if not lines:
+        return False
+    # 第一行以 `Cookie:` / `cookies:` 开头 → 那就是一个头行，必须按头解析。
+    # 单行的 `Cookie:  session=abc`（冒号后多个空格）如果走裸串解析器，
+    # 会被当成名为 Cookie 的 cookie，真正的 session 反而丢掉。
+    first_name = (lines[0].split(':', 1)[0].strip()
+                  if ':' in lines[0] else '')
+    if first_name.lower() in ('cookie', 'cookies'):
+        return True
+    if len(lines) < 2:
+        return False
+    named = 0
+    for line in lines:
+        if ':' not in line:
+            return False
+        name = line.split(':', 1)[0].strip()
+        # 头名必须是 token 形状；排除 `https://…` 这种带协议的
+        if not _NAME_RE.match(name):
+            return False
+        named += 1
+    return named == len(lines)
+
+
+def looks_like_http_message(text: str) -> bool:
+    """看起来像粘贴了整段 HTTP 报文（带请求行）吗？"""
+    return bool(_HTTP_REQLINE_RE.search(text or ''))
+
+
+def has_cookie_header(text: str) -> bool:
+    """有没有 `Cookie:` / `cookies:` 开头的头行。"""
+    for line in (text or '').splitlines():
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+        if line.split(':', 1)[0].strip().lower() in ('cookie', 'cookies'):
+            return True
+    return False
+
+
+def parse_http_message(text: str) -> Dict[str, str]:
+    """从整段 HTTP 报文里**只**取 Cookie 头；没有就返回空 dict。
+
+    关键是"只取 Cookie 行"，而不是把每一行都当 Cookie ——
+    否则 Host / Accept-Language 会被当成 Cookie 存下来，
+    界面显示"已配置登录"但实际没登录（实测踩过）。
+    """
+    out: Dict[str, str] = {}
+    for line in (text or '').splitlines():
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+        # 头行形如 `Cookie: a=1; b=2`；请求行/响应的 `HTTP/1.1 200` 也会
+        # 被 split 出冒号，所以下面用名字白名单限定为 cookie 头
+        name, value = line.split(':', 1)
+        if name.strip().lower() in ('cookie', 'cookies'):
+            out.update(_parse_pairs(value))
+    return out
 
 
 def parse_curl(text: str) -> Dict[str, str]:
@@ -170,6 +272,23 @@ def parse_cookie_input(text: str) -> Tuple[Dict[str, str], str]:
     if not raw:
         raise CookieParseError('内容是空的，请粘贴 Cookie 或 Copy as cURL 的结果')
 
+    # 0) 头部区内容（DevTools 里"整段复制"很常见）
+    #    必须**先**处理：否则 `Host: a.com` / `Accept-Language: zh-CN`
+    #    这些行在语法上也是合法的 name=value，会被当成 Cookie 存下来 ——
+    #    界面显示"已配置登录"，实际存的是请求头，签到必然失败、
+    #    报错还是"未登录"，极难排查（实测复现过）。
+    #    另外单独一行 `Cookie:  session=abc`（冒号后多个空格）也会被
+    #    裸串解析器误判成名为 Cookie 的键，导致真正的 session 丢失。
+    if looks_like_http_message(raw) or looks_like_header_block(raw):
+        got = parse_http_message(raw)
+        if got:
+            return got, 'HTTP 报文里的 Cookie 头'
+        raise CookieParseError(
+            '这段内容看起来是 HTTP 请求/响应头，但里面**没有 Cookie 行**。'
+            '请确认：① 复制的是已登录状态下的请求；② 请求头里确实有 '
+            'Cookie: 开头的那一行。（不能把 Host、Accept-Language 这些'
+            '当成 Cookie，那样签到只会一直失败。）')
+
     # 1) cURL
     #    注意：如果确认是 cURL 却取不到 cookie 头，必须直接报错。
     #    否则会继续往下走，把 "accept: text/html" 这类**别的请求头**当成 Cookie
@@ -220,8 +339,23 @@ def parse_cookie_input(text: str) -> Tuple[Dict[str, str], str]:
 
 
 def to_cookie_header(cookies: Dict[str, str]) -> str:
-    """把 cookie 字典合成请求用的 Cookie 头字符串。"""
-    return '; '.join('%s=%s' % (k, v) for k, v in (cookies or {}).items())
+    """把 cookie 字典合成请求用的 Cookie 头字符串。
+
+    这里会拒绝含 CR/LF/NUL 的名称或值：那些字符能切断 HTTP 头，
+    构成头注入（请求走私的原料）。Python 的 http.client 目前也会拒绝
+    这类头值，但那是 stdlib 的兜底 —— 不该当作我们自己的防线，
+    而且显式拒绝能给出清晰原因，而不是一个莫名的发送失败。
+    """
+    parts = []
+    for k, v in (cookies or {}).items():
+        name, value = str(k), str(v)
+        for label, s in (('名称', name), ('值', value)):
+            if any(c in s for c in ('\r', '\n', '\x00')):
+                raise CookieParseError(
+                    'Cookie %s里含有换行或空字符，无法安全发送'
+                    '（通常是复制时带入了多余内容）' % label)
+        parts.append('%s=%s' % (name, value))
+    return '; '.join(parts)
 
 
 def to_playwright_cookies(cookies: Dict[str, str], domain: str,

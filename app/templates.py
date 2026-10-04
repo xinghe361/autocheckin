@@ -48,16 +48,23 @@ V2EX = {
     'mission_url': 'https://www.v2ex.com/mission/daily',
     'need_browser': False,
     'verify_ssl': True,
-    # V2EX 的每日领币是两步：先取页面里的 once 令牌，再带令牌请求 /mission/daily/redeem
+    # V2EX 的每日领币是三步：取页面里的 once 令牌 → 带令牌请求 redeem → 再取一次页面确认结果。
     'flow': [
         {'action': 'get', 'url': '{mission_url}'},
         # 令牌是必填的：取不到就说明页面没正常返回（未登录 / 被 Cloudflare 拦截），
         # 继续往下走只会带着字面量 {once} 去请求，结果无法判断、还会误导排查方向。
         {'action': 'extract_regex', 'pattern': r'/mission/daily/redeem\?once=(\d+)',
          'save_as': 'once', 'required': True},
-        {'action': 'post', 'url': 'https://www.v2ex.com/mission/daily/redeem?once={once}'},
+        # 必须是 GET：实测 POST 会返回 405 Method Not Allowed（这个端点只收 GET）。
+        # 这里踩过一次，POST 一直 405，签到永远不会成功。
+        {'action': 'get', 'url': 'https://www.v2ex.com/mission/daily/redeem?once={once}'},
+        # 关键：redeem 返回 302，body 很短，判定靠的是"最后一个响应"。
+        # 若不重新取一次页面，就会去 302 的空 body 里找成功关键词，永远判失败。
+        # 重取之后：已领到 -> 页面出现「每日登录奖励已领取」；
+        # 还能领 -> 页面仍显示「领取 X 铜币」。
+        {'action': 'get', 'url': '{mission_url}'},
     ],
-    'success_keywords': ['已领取', '铜币', '每日登录奖励', '领取成功', '已经领取'],
+    'success_keywords': ['每日登录奖励已领取', '已领取', '领取成功', '已经领取'],
     'fail_keywords': ['需要先登录', '请先登录', '登录以继续'],
     'already_keywords': ['已经领取', '已领取过'],
     'headers': {
@@ -83,6 +90,11 @@ NODESEEK = {
     'flow': [
         {'action': 'post',
          'url': 'https://www.nodeseek.com/api/attendance?random=true'},
+        # 顺带把获得数量与余额抽出来，便于在通知里看到"这次拿了多少、总共多少"。
+        # 不是必需项（extract 失败不影响判定），所以不加 required。
+        {'action': 'extract_regex', 'pattern': r'"gain":\s*(\d+)', 'save_as': 'gain'},
+        {'action': 'extract_regex', 'pattern': r'"current":\s*(\d+)',
+         'save_as': 'current'},
     ],
     # 实测响应长这样：
     #   {"success":true,"message":"运气爆棚，恭喜你签到获得了7个鸡腿","gain":7,"current":408}

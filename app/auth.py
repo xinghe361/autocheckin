@@ -183,9 +183,51 @@ class AuthManager:
         return bool(self.service.load_config().auth_password_enc)
 
     def needs_setup(self) -> bool:
-        """要求认证但还没设口令 → 需要引导用户设置。"""
+        """要求认证但还没设口令 → 需要引导用户设置。
+
+        ⚠️ 判据不能只看"口令字段是否为空"：
+            config.json 因为断电、并发写坏、被别的服务误写而变成空/坏 JSON 时，
+            load_config() 会回退到"要求认证、无口令"的默认配置 —— 于是 setup
+            端点对全网开放，局域网里第一个访问的人就能设口令接管容器，
+            而且会拿默认配置把用户原有的站点/凭据整体覆盖掉（实测过）。
+
+            所以再加一道判据：**数据目录里已经存在 config.json 文件**
+            就说明这台实例早就初始化过了，绝不允许再走"首次设置"。
+            文件存在是文件系统的客观事实，不会因为内容损坏而消失。
+
+        另外 web.py 的 setup 端点还会校验同源与 Content-Type，
+        防止被跨站页面抢先触发。
+        """
         cfg = self.service.load_config()
-        return bool(cfg.auth_required) and not cfg.auth_password_enc
+        if not cfg.auth_required:
+            return False
+        if cfg.auth_password_enc:
+            return False
+        # 配置**存在但读不出来**（损坏/半截/被写成非对象）→ 绝不能开放 setup，
+        # 否则局域网第一个访问者就能设口令接管，还会用默认配置覆盖用户数据。
+        store = getattr(self.service, 'store', None)
+        if getattr(store, 'config_unreadable', False):
+            return False
+        # 文件系统上的**持久证据**：config.json / .broken.* / .unreadable 哨兵
+        # 任一存在，就说明这台实例初始化过 → 不再走首次设置流程。
+        # ⚠️ 这里必须问文件系统而不是只看内存标记：内存标记重启即丢，
+        # 而坏文件会被改名成 .broken.<ts>，只看"config.json 是否存在"
+        # 会在重启后翻成"全新安装" —— 实测可被匿名接管。
+        return not self._config_file_exists()
+
+    def _config_file_exists(self) -> bool:
+        """配置文件是否曾经存在过（含改名后的残留与持久哨兵）。"""
+        try:
+            from .store import was_ever_initialized
+            store = getattr(self.service, 'store', None)
+            path = getattr(store, 'config_path', None)
+            if not path:
+                return False
+            return was_ever_initialized(path)
+        except Exception:                                       # noqa: BLE001
+            # 判定失败时**保守**地认为"已初始化"（返回 True → 不开放 setup）。
+            # fail-open 在这里等于把容器交出去，绝不能那样。
+            return True
 
     def password_matches(self, password: str) -> bool:
         cfg = self.service.load_config()

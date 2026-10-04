@@ -138,9 +138,15 @@ class TestQdDomainLogic(unittest.TestCase):
         self.assertIn('data-site="https://www.nodeseek.com/board"', btn)
         self.assertIn('data-domain="nodeseek.com"', btn)
         self.assertIn('data-name="NodeSeek 试试手气"', btn)
-        # 扩展在 click 事件里读属性，所以必须是个可点击元素且带 onclick 标记
+        # 扩展在 click 事件里读属性，所以必须是个可点击元素。
+        # 注意：这里刻意**不再**把 id 拼进 onclick 字符串 ——
+        # onclick="markCookieImportStart('ID')" 是 JS 字符串上下文，
+        # HTML 实体转义挡不住引号逃逸（浏览器会先解码再交给 JS），
+        # 已改成 data-fact + data-sid 由事件委托处理。
         self.assertTrue(btn.startswith('<button'))
-        self.assertIn('markCookieImportStart', btn)
+        self.assertIn('data-fact="markCookieImport"', btn)
+        self.assertIn('data-sid="nodeseek"', btn)
+        self.assertNotIn('onclick=', btn, '不该再把 id 拼进内联 onclick')
 
     def test_attributes_are_escaped(self):
         """站点名/地址里的引号必须转义，否则会破坏属性、按钮失效。"""

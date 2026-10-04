@@ -24,6 +24,38 @@ MAX_SITE_ID = 64
 # 避免出现含路径分隔符等异常形状的值。
 SITE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\-]{0,%d}$' % (MAX_SITE_ID - 1))
 
+# 容器地址只允许 host[:port]，且字符集收紧。
+# 这个值会进油猴脚本的 JS 字面量，必须挡住引号/斜杠/换行等一切能拼接代码的字符。
+_ORIGIN_HOST_RE = re.compile(
+    r'^(?:(https?)://)?'                      # 可选 scheme
+    r'(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.\-]+)'   # host（含 IPv6 方括号形式）
+    r'(?::(\d{1,5}))?$'                       # 可选端口
+)
+
+
+def _sanitize_origin(raw: str) -> str:
+    """把用户给的容器地址收敛成 `http(s)://host[:port]`，不合法就返回空串。
+
+    为什么不用 urlsplit 直接信任：urlsplit 对 `http://nas';evil()//x`
+    会把 `nas';evil()//x` 当 hostname 保留下来（引号仍在），
+    拼进 JS 照样能闭合字符串。所以这里用白名单字符集重新拼装。
+    """
+    s = (raw or '').strip().strip('/')
+    m = _ORIGIN_HOST_RE.match(s)
+    if not m:
+        return ''
+    scheme, host, port = m.group(1), m.group(2), m.group(3)
+    scheme = (scheme or 'http').lower()
+    if port is not None:
+        try:
+            n = int(port)
+        except ValueError:
+            return ''
+        if not (1 <= n <= 65535):
+            return ''
+        return '%s://%s:%d' % (scheme, host, n)
+    return '%s://%s' % (scheme, host)
+
 
 def validate_site_id(site_id: str) -> str:
     s = (site_id or '').strip()
@@ -52,17 +84,11 @@ class WebApp:
         self.version = version
         self.auth = AUTH.AuthManager(service)
         self.routes: Dict[Tuple[str, str], Callable[[dict, dict], Any]] = {}
-        # 每次请求前由 HTTP 层设置，供认证相关端点读取
-        self._current_token = ''
-        self._current_source = ''
-        # 配套浏览器脚本带来的令牌（请求头 X-AC-Token）
-        self._script_token = ''
-        # 本次请求是否用脚本令牌通过认证
-        self._via_script = False
-        # 本次请求要下发的会话令牌（登录成功时设置，由 HTTP 层写成 Cookie）
-        self._new_token = ''
-        # 本次请求是否要清除会话 Cookie（登出）
-        self._do_logout = False
+        # 每请求上下文放**线程局部**（不是实例字段）。
+        # 为什么：WebApp 是单例，而 HTTP 服务一请求一线程；
+        # 用实例字段存"本次请求的令牌"会让并发请求互相串用，
+        # 实测能让无令牌请求被别人的令牌授权（认证绕过）。
+        self._local = threading.local()
         self._register()
 
     def _public_origin(self, q: Optional[dict] = None) -> str:
@@ -70,6 +96,13 @@ class WebApp:
 
         优先用请求里带的 host（用户在浏览器里访问的那个地址最可靠）；
         没带就退回监听地址与端口。
+
+        ⚠️ 这个值会被拼进油猴脚本的 JS 里（`var CONTAINER = '...';`），
+        所以**必须先校验再使用**：以前直接拿查询参数原样拼接，
+        攻击者构造 `?host=http://nas';<任意JS>//` 就能让用户在 Tampermonkey
+        里装上一个在 v2ex/nodeseek/chiphell 上运行、带 GM_xmlhttpRequest
+        的脚本，用来偷各论坛的 Cookie。
+        现在只接受严格的 host[:port] 形式，并用 json.dumps 生成 JS 字面量。
         """
         q = q or {}
         host = ''
@@ -81,15 +114,23 @@ class WebApp:
                 host = str(v)
                 break
         if host:
-            if host.startswith('http://') or host.startswith('https://'):
-                return host.rstrip('/')
-            return 'http://' + host.strip('/')
+            clean = _sanitize_origin(host)
+            if clean:
+                return clean
+            # 不合法就忽略，退回下面的默认值（不报错：用户手填错了也不该炸）
         import os
         port = os.environ.get('PORT', '28999')
         return 'http://127.0.0.1:%s' % port
 
-    def _require_auth(self, method: str, path: str) -> None:
+    def _require_auth(self, method: str, path: str, req: Dict[str, Any],
+                      token: str = '', script_token: str = '') -> None:
         """未登录时拒绝访问受保护端点。
+
+        ⚠️ 令牌必须**按参数传入**（放在 req 里），绝不能存在 self 上：
+            WebApp 是单例、而 ThreadingHTTPServer 是一请求一线程，
+            把"本次请求的令牌"写在实例字段上会让并发请求互相串用 ——
+            实测一个没有令牌的请求，只要和一个带合法令牌的请求并发，
+            就能被对方的令牌授权而返回 200（确定性复现过）。
 
         两条通过路径：
           1. 网页会话令牌（你自己登录）
@@ -104,12 +145,12 @@ class WebApp:
         if self.auth.needs_setup():
             # 还没设口令：只允许去设置，其它一律拒绝
             raise ApiError('尚未设置访问口令，请先完成初始化', 403)
-        if self.auth.is_valid(self._current_token):
+        if self.auth.is_valid(token):
             return
         # 脚本令牌
-        if self._script_token and self.auth.api_token_valid(self._script_token):
+        if script_token and self.auth.api_token_valid(script_token):
             if (method.upper(), path) in AUTH.SCRIPT_ALLOWED_PATHS:
-                self._via_script = True
+                req['via_script'] = True
                 return
             raise ApiError('该令牌仅允许写入站点 Cookie，不能访问此接口', 403)
         raise ApiError('未登录或登录已失效，请重新登录', 401)
@@ -137,7 +178,8 @@ class WebApp:
 
         @route('POST', '/api/auth/setup')
         def _auth_setup(q, body):
-            # 只在"要求认证但还没设口令"时允许设置，避免被人抢先设一个
+            # 只在"要求认证但还没设口令"时允许设置，避免被人抢先设一个。
+            # needs_setup() 还额外排除了"配置损坏"的情况（那绝不能开放 setup）。
             if not self.auth.needs_setup():
                 raise ApiError('口令已设置，不能重复初始化', 403)
             pw = str(body.get('password') or '')
@@ -145,12 +187,12 @@ class WebApp:
             token = self.auth.login(pw, source='setup')
             if not token:
                 raise ApiError('口令设置后登录失败，请重试', 500)
-            self._new_token = token
+            self.current_request()['new_token'] = token
             return {'ok': True}
 
         @route('POST', '/api/auth/login')
         def _auth_login(q, body):
-            source = (self._current_source or 'unknown')
+            source = (self.current_request().get('source') or 'unknown')
             try:
                 token = self.auth.login(str(body.get('password') or ''),
                                         source=source)
@@ -158,13 +200,14 @@ class WebApp:
                 raise ApiError(str(e), 429) from e
             if not token:
                 raise ApiError('口令不正确', 401)
-            self._new_token = token
+            self.current_request()['new_token'] = token
             return {'ok': True}
 
         @route('POST', '/api/auth/logout')
         def _auth_logout(q, body):
-            self.auth.logout(self._current_token or '')
-            self._do_logout = True
+            ctx = self.current_request()
+            self.auth.logout(ctx.get('token') or '')
+            ctx['do_logout'] = True
             return {'ok': True}
 
         @route('POST', '/api/auth/password')
@@ -186,6 +229,13 @@ class WebApp:
 
         @route('POST', '/api/auth/enable')
         def _auth_enable(q, body):
+            """重新开启访问控制。
+
+            这里**不要求口令**：开启本身不是危险操作（它只会让访问更严）。
+            但要注意它**不会**重新打开"首次设置口令"的入口 ——
+            AuthManager.needs_setup() 要求配置文件不存在，所以
+            "先 enable 让 needs_setup 变真、再抢注口令"这条路走不通。
+            """
             self.auth.enable_auth()
             return {'ok': True}
 
@@ -418,6 +468,11 @@ class WebApp:
             return self.service.restore_key_from_cloud()
 
         # --- 通知测试 ---
+        @route('POST', '/api/ai/models')
+        def _ai_models(q, body):
+            """列出这个 key 可用的 DeepSeek 模型（顺带验证 key）。"""
+            return self.service.list_ai_models(str(body.get('api_key') or ''))
+
         @route('POST', '/api/notify/test')
         def _notify_test(q, body):
             return self.service.test_notify(str(body.get('channel') or ''))
@@ -511,25 +566,18 @@ class WebApp:
                 ac.model = str(a.get('model') or ac.model)
             if 'base_url' in a:
                 ac.base_url = str(a.get('base_url') or ac.base_url)
-            if 'max_calls_per_day' in a and str(a['max_calls_per_day']) != '':
-                ac.max_calls_per_day = int(a['max_calls_per_day'])
             if 'auto_apply' in a:
                 ac.auto_apply = bool(a['auto_apply'])
+            # --- 什么时候调用 AI 分析（统一逻辑）---
+            # 每连续失败几次调用一次；0 = 不启用 AI 分析
+            if 'ai_after_failures' in a and str(a['ai_after_failures']) != '':
+                ac.ai_after_failures = max(0, int(a['ai_after_failures']))
+            # 每天调用次数的硬上限；0 = 不限制
+            if 'max_calls_per_day' in a and str(a['max_calls_per_day']) != '':
+                ac.max_calls_per_day = max(0, int(a['max_calls_per_day']))
+            # AI 分析本身失败：连续几次后暂停该站点（0 = 不限制）
             if 'fail_threshold' in a and str(a['fail_threshold']) != '':
-                ac.fail_threshold = max(1, int(a['fail_threshold']))
-            if 'auto_disable' in a:
-                ac.auto_disable = bool(a['auto_disable'])
-            # --- 每日尝试/调用上限（防烧 token）---
-            if 'daily_limit_enabled' in a:
-                ac.daily_limit_enabled = bool(a['daily_limit_enabled'])
-            if 'max_attempts_per_day' in a and str(a['max_attempts_per_day']) != '':
-                ac.max_attempts_per_day = max(1, int(a['max_attempts_per_day']))
-            if 'ai_calls_per_day' in a and str(a['ai_calls_per_day']) != '':
-                ac.ai_calls_per_day = max(1, int(a['ai_calls_per_day']))
-            if 'global_max_calls_per_day' in a \
-                    and str(a['global_max_calls_per_day']) != '':
-                ac.global_max_calls_per_day = max(
-                    0, int(a['global_max_calls_per_day']))
+                ac.fail_threshold = max(0, int(a['fail_threshold']))
             if a.get('api_key'):
                 ac.api_key_enc = self.service.box.encrypt(str(a['api_key']))
 
@@ -541,13 +589,38 @@ class WebApp:
 
         token/source 由 HTTP 层从 Cookie 与请求头解析后传入。
         script_token 是配套浏览器脚本的令牌（请求头 X-AC-Token）。
+
+        ⚠️ 这里**不使用任何实例字段**保存"本次请求"的状态（令牌、来源、
+        待下发的 Cookie 标志）。WebApp 是单例，而 HTTP 服务是多线程的，
+        用 self 存每请求状态会让并发请求互相串用 —— 实测可绕过认证：
+        一个没有令牌的请求，只要和一个带合法令牌的请求并发，就能被对方的
+        令牌授权而返回 200（确定性复现过）。
+        所以每请求状态全部走局部变量，并在返回值里显式回传给 HTTP 层。
         """
-        self._current_token = token or ''
-        self._current_source = source or ''
-        self._script_token = script_token or ''
-        self._via_script = False
-        self._new_token = ''
-        self._do_logout = False
+        # 每请求独立的上下文（局部变量，不碰 self）
+        req = {
+            'token': token or '',
+            'source': source or '',
+            'script_token': script_token or '',
+            'new_token': '',
+            'do_logout': False,
+        }
+        # ⚠️ 必须**立刻**挂到线程局部：端点处理函数会在执行过程中
+        # 通过 current_request() 往里写（例如登录成功后写 new_token）。
+        # 如果放到 dispatch 末尾才挂，handler 拿到的就是另一个临时字典，
+        # 写入会被丢掉、Set-Cookie 发不出去（踩过这个坑）。
+        # 唯一例外：外层（测试）已经塞了上下文，就不要覆盖它。
+        if getattr(self._local, 'req', None) is None:
+            self._local.req = req
+        else:
+            # 复用外层已挂的上下文（测试/同线程连续请求），但**必须重置**
+            # new_token / do_logout —— 否则同一个 keep-alive 连接的后续请求
+            # 会继承上一个请求的令牌：实测"登录后随便再来一次普通请求"
+            # 会重复下发同一个会话 Cookie，甚至"登出"会把会话又塞回去。
+            req = self._local.req
+            req.update({'token': token or '', 'source': source or '',
+                        'script_token': script_token or '',
+                        'new_token': '', 'do_logout': False})
 
         fn = self.routes.get((method.upper(), path))
         if fn is None:
@@ -559,7 +632,8 @@ class WebApp:
             raise ApiError('未知接口：%s %s' % (method, path), 404)
 
         # 访问控制在这里统一做，避免每个端点各自实现时漏掉
-        self._require_auth(method.upper(), path)
+        self._require_auth(method.upper(), path, req, token or '',
+                           script_token or '')
 
         try:
             out = fn(query or {}, body or {})
@@ -573,10 +647,29 @@ class WebApp:
             # 只给一句可读的话，不把内部路径/异常细节回显给客户端
             raise ApiError('服务器内部错误，请查看容器日志', 500) from e
 
+        # 把本次请求的上下文挂到 **线程局部存储** 上（HTTP 层据此决定是否
+        # 下发/清除 Cookie）。不能用 self.xxx：WebApp 是单例、服务是多线程，
+        # 共享字段会让并发请求互相串用（实测能绕过认证）。
+        # ThreadingHTTPServer 是一请求一线程，所以线程局部 == 请求局部。
+        # （上面的 req 已经挂好了，这里不用再挂，只是保留这个说明。）
         if isinstance(out, Raw):
             return 200, out.content_type, out.data
 
         return 200, 'application/json; charset=utf-8', out
+
+    def current_request(self) -> Dict[str, Any]:
+        """取**本线程**正在处理的请求上下文（没有则返回空 dict）。"""
+        return getattr(self._local, 'req', None) or {}
+
+    @property
+    def _new_token(self) -> str:
+        """本次请求要下发的会话令牌（只读，取自线程局部）。
+
+        保留这个名字只是为了兼容既有调用方/测试。
+        ⚠️ 它**绝不参与认证判定** —— 认证只认 dispatch() 传入的令牌参数；
+        任何"用 self 存令牌再拿来做鉴权"的写法都会在多线程下被绕过。
+        """
+        return self.current_request().get('new_token') or ''
 
 
 class Raw:
@@ -877,7 +970,7 @@ __CONNECTS__
     main();
   }
 })();
-'''.replace('__ORIGIN__', origin) \
+'''.replace('__ORIGIN__', json.dumps(origin, ensure_ascii=False)[1:-1]) \
    .replace('__MATCHES__', match_block) \
    .replace('__CONNECTS__', connects) \
    .replace('__HOST__', _host_of(origin)) \
@@ -954,13 +1047,33 @@ def make_handler(webapp: WebApp, page_html: str):
                        extra_headers)
 
         def _read_body(self) -> dict:
+            # 反走私：这是 HTTP/1.1 keep-alive 服务，前后端如果对"请求体多长"
+            # 解释不一致，残留字节会被当成下一个请求（前置反代时就是请求走私面）。
+            # 三道闸门：
+            #   1) 出现 Transfer-Encoding 直接拒绝（本服务只认 Content-Length）
+            #   2) Content-Length 必须唯一（重复的会被 Message.get 取第一个）
+            #   3) 超长时读掉并关闭连接，不能把 body 留在 socket 里
+            if self.headers.get('Transfer-Encoding'):
+                self.close_connection = True
+                raise ApiError('不支持 Transfer-Encoding，请用 Content-Length', 400)
+            raw_lens = self.headers.get_all('Content-Length') or []
+            if len(raw_lens) > 1:
+                self.close_connection = True
+                raise ApiError('Content-Length 重复', 400)
             try:
-                length = int(self.headers.get('Content-Length') or 0)
+                length = int(raw_lens[0]) if raw_lens else 0
             except (TypeError, ValueError):
-                length = 0
-            if length <= 0:
+                self.close_connection = True
+                raise ApiError('Content-Length 不是合法数字', 400)
+            if length < 0:
+                self.close_connection = True
+                raise ApiError('Content-Length 非法', 400)
+            if length == 0:
                 return {}
             if length > MAX_BODY:
+                # 读掉再丢弃，保证连接上不残留半个 body
+                self._drain(length)
+                self.close_connection = True
                 raise ApiError('请求体过大', 413)
             raw = self.rfile.read(length)
             if not raw:
@@ -968,8 +1081,35 @@ def make_handler(webapp: WebApp, page_html: str):
             try:
                 data = json.loads(raw.decode('utf-8'))
             except ValueError as e:
-                raise ApiError('请求体不是合法 JSON：%s' % e, 400) from e
+                # 不回显 stdlib 的解析细节，只给一句可读的话
+                raise ApiError('请求体不是合法 JSON') from e
             return data if isinstance(data, dict) else {'value': data}
+
+        def _reject_body_on_bodyless_method(self) -> None:
+            """GET/DELETE 带了请求体：排空并关闭连接。
+
+            这类畸形请求是请求走私的原料（前端按自己的规则定 body 长度、
+            后端把"body"当新请求解析）。本服务不处理它们，但要保证
+            残留字节不会留在 keep-alive 连接上被当成下一个请求。
+            """
+            raw_lens = self.headers.get_all('Content-Length') or []
+            if self.headers.get('Transfer-Encoding') or raw_lens:
+                self.close_connection = True
+                try:
+                    n = int(raw_lens[0]) if raw_lens else 0
+                except (TypeError, ValueError):
+                    n = 0
+                if n > 0:
+                    self._drain(n)
+
+        def _drain(self, length: int, limit: int = 8 * 1024 * 1024) -> None:
+            """把连接上剩余的请求体读掉丢弃（最多读 limit 字节，避免被拖死）。"""
+            remaining = min(length, limit)
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
 
         # -- 方法 --
         def do_GET(self):
@@ -998,15 +1138,23 @@ def make_handler(webapp: WebApp, page_html: str):
             token = self._session_token()
             extra = None
             try:
-                body = self._read_body() if method in ('POST', 'PUT') else {}
+                if method in ('POST', 'PUT'):
+                    body = self._read_body()
+                else:
+                    # GET/DELETE 不该带请求体。带了就是畸形请求（走私原料），
+                    # 直接排空并关闭连接，而不是"顺便读掉当正常"。
+                    self._reject_body_on_bodyless_method()
+                    body = {}
                 status, ctype, out = webapp.dispatch(method, path, query, body,
                                                     token=token,
                                                     source=self._client_source(),
                                                     script_token=self._script_token())
-                # 登录成功 → 下发会话 Cookie；登出 → 清除 Cookie
-                if webapp._new_token:
-                    extra = {'Set-Cookie': AUTH.make_cookie(webapp._new_token)}
-                elif webapp._do_logout:
+                # 登录成功 → 下发会话 Cookie；登出 → 清除 Cookie。
+                # 从**本线程**的请求上下文取，不能从共享实例字段取。
+                ctx = webapp.current_request()
+                if ctx.get('new_token'):
+                    extra = {'Set-Cookie': AUTH.make_cookie(ctx['new_token'])}
+                elif ctx.get('do_logout'):
                     extra = {'Set-Cookie': AUTH.clear_cookie()}
                 if ctype.startswith('application/json'):
                     self._send_json(status, out, extra)
@@ -1241,7 +1389,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 <!-- ============ 设置 ============ -->
 <section id="tab-settings" class="hide">
   <div class="card">
-    <h2>网络</h2>
+    <h2>代理设置</h2>
     <label>联网方式</label>
     <div class="radios">
       <label><input type="radio" name="set_pmode" value="direct"
@@ -1282,11 +1430,9 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <h2>通知</h2>
     <div class="row">
       <div><label>通知策略</label><select id="set_nmode"></select></div>
-      <div><label>通知走代理</label><select id="set_nproxy"></select></div>
     </div>
-    <label>通知代理地址（"自定义"时使用）</label>
-    <input id="set_nproxy_url" placeholder="http://10.0.0.1:7890">
-    <div class="hint">每个渠道还能单独覆盖走不走代理（见下）。</div>
+    <div class="hint">通知默认跟随「设置 → 网络」里的主代理；
+      需要单独指定的渠道，可以在下面每个渠道自己那行里选"直连 / 自定义"。</div>
     <div id="chanBox"></div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="b" onclick="testNotify()">发送测试通知</button>
@@ -1300,46 +1446,56 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <label>API Key（留空＝不修改已保存的）</label>
     <input id="set_aikey" type="password" placeholder="sk-…">
     <div class="row">
-      <div><label>模型</label><input id="set_model" placeholder="deepseek-chat"></div>
+      <div><label>模型</label>
+        <select id="set_model">
+          <option value="deepseek-flash">deepseek-flash（快、便宜，推荐）</option>
+          <option value="deepseek-v4-pro">deepseek-v4-pro（更强、更贵）</option>
+        </select></div>
+      <div><label>&nbsp;</label>
+        <button class="b" onclick="listAiModels()">测试连接 / 查看可用模型</button></div>
     </div>
+    <div class="hint" id="set_modelHint" style="margin-top:6px">
+      点右边按钮会真去打一次 DeepSeek 的 <code>/models</code>：既能验证 Key，
+      也会列出<b>你账号真实可用</b>的模型名。<br>
+      ⚠️ 旧名字（如 <code>deepseek-chat</code>）可能仍能调用，但会被服务端
+      <b>静默映射</b>成别的模型 —— 填 chat 实际跑的可能是 flash，价格与能力都不同。
+      升级后请用这个按钮确认一次。<br>
+      每次分析完成后，通知里也会附上<b>服务端实际返回的模型名</b>，可据此核对。
+    </div>
+    <div id="aiModelMsg" class="msg"></div>
 
     <div class="fsec">
-      <h4>每天的尝试与调用上限（控制 token 消耗）</h4>
-      <label class="sw" for="set_dailylimit">
-        <input type="checkbox" id="set_dailylimit" onchange="swAiLimits()">
-        <span class="track"></span><span class="lb">限制每个站点每天的尝试次数</span>
-      </label>
-      <div id="set_dailyBox" style="margin-top:8px">
-        <div class="row">
-          <div><label>每个站点每天最多尝试</label>
-            <input id="set_maxattempt" type="number" value="3"></div>
-          <div><label>每天最多问 AI 几次</label>
-            <input id="set_aiperday" type="number" value="1"></div>
-          <div><label>全部站点每天合计上限（0＝不限）</label>
-            <input id="set_aiglobal" type="number" value="20"></div>
-        </div>
-        <div class="hint" style="margin-top:6px">
-          推荐流程：<b>每天试 3 次 → 第 3 次失败后问 AI 一次</b>；
-          问不出结果就标记为「今天的问题」，当天不再尝试并通知你；
-          <b>第二天重新开始</b>；若第二天仍然失败，就自动暂停该站点并通知。
-          <br>这三道上限保证 token 消耗有明确上界，不会无限重试。
-        </div>
-      </div>
-    </div>
-
-    <div class="fsec">
-      <h4>AI 失败时的处理</h4>
+      <h4>什么情况下调用 AI 分析</h4>
       <div class="row">
-        <div><label>分析连续失败几次后停止该站点签到</label>
-          <input id="set_aifail" type="number" value="2"></div>
-        <div><label>分析也失败时自动停用该站点</label>
-          <select id="set_aiauto">
-            <option value="1">开启（推荐）</option>
-            <option value="0">关闭</option>
-          </select></div>
+        <div><label>每连续失败几次调用一次 AI（0＝不启用 AI）</label>
+          <input id="set_aiafter" type="number" value="3" min="0"
+            oninput="calcAiCalls()"></div>
+        <div><label>每天最多分析几次（0＝不限制）</label>
+          <input id="set_maxai" type="number" value="20" min="0"
+            data-needs-sync="1" data-sid=""></div>
       </div>
-      <div><label>每天最多分析次数（绝对上限）</label>
-        <input id="set_maxai" type="number" value="20"></div>
+      <div class="hint" style="margin-top:6px">
+        <b>签到重试次数由各站点自己的设置决定</b>（「站点」页 → 编辑 → 失败重试），
+        这里只控制<b>什么时候调用 AI</b>：在连续失败次数的<b>整数倍</b>处调用一次。<br>
+        例：站点重试 3 次 → 设为 3 表示"试 3 次后调用一次 AI"；
+        因为一轮最多只有 4 次尝试，所以实际上每天最多调用 1 次。<br>
+        想<b>只调用一次</b>就把它设成<b>大于站点重试次数</b>（站点重试 3 次就设 4）。<br>
+        设为 <b>0</b> ＝ 完全不启用 AI 分析。<br><br>
+        「每天最多分析几次」是<b>硬上限</b>：到了这个次数，即使倍数规则还要求调用
+        也不再调用。设为 <b>0</b> ＝ 不限制（完全由上面的倍数决定）。
+        <span id="set_aicalc"></span>
+      </div>
+    </div>
+
+    <div class="fsec">
+      <h4>AI 分析本身失败时的处理</h4>
+      <div><label>连续几次分析失败后暂停该站点（0＝不限制，永不停用）</label>
+        <input id="set_aifail" type="number" value="2" min="0"></div>
+      <div class="hint" style="margin-top:6px">
+        <b>0</b> = 不限制，分析每次都失败也照样继续、站点不会被停用；<br>
+        <b>1</b> = 第一次分析失败就暂停；<b>2</b>（默认）= 连续两次后暂停。<br>
+        暂停后不会再消耗 AI 额度；修好后到「站点」页手动「启用」。
+      </div>
     </div>
 
     <div class="hint">分析成功后会把建议（新的选择器/关键词/步骤）保存并用于之后的签到。
@@ -1557,6 +1713,29 @@ var OPEN_SITE = '';
 /* 缓存的站点详情（含 headers 与 cookie 元信息） */
 var SITE_CACHE = {};
 
+/* 两种调度模式的说明文案。
+   单独抽成函数而不是写成行内三元：行内三元和字符串拼接混在一起时
+   JS 解析容易出问题（这里踩过一次 "Unexpected token '?'"）。 */
+function modeHintHtml(isDaily){
+  if(isDaily){
+    return '每天在下面设定的时刻签到一次；今天该时刻已过就顺延到明天。';
+  }
+  return '每隔下面设定的间隔签到一次，基准是<b>上一次签到成功的时间</b>'
+    + '（不是固定钟点）。<br>例：今天 03:21 成功、间隔 24 小时 '
+    + '&rarr; 下次明天 03:21 左右。<br>'
+    + '还没成功过的站点：先等一个间隔，然后去尝试第一次签到；'
+    + '第一次成功后，基准就换成那个真实的成功时间。';
+}
+
+/* 把分钟数说成人话：1440 -> "24 小时" */
+function intervalText(minutes){
+  var v = parseInt(minutes || 0, 10);
+  if(!v || v <= 0) return '24 小时';
+  if(v % 60 === 0) return (v/60) + ' 小时';
+  if(v < 60) return v + ' 分钟';
+  return Math.floor(v/60) + ' 小时 ' + (v%60) + ' 分钟';
+}
+
 /* 今天的日期（与后端 _today 的格式一致：YYYY-MM-DD）。
    用于判断"今天已停止重试"这类带日期的标记是否仍然有效。 */
 function todayStr(){
@@ -1637,7 +1816,7 @@ function renderSiteRows(sites){
     var state = s.enabled? '<span class="tag ok">启用</span>'
                          : '<span class="tag">停用</span>';
     var sch = s.mode==='success_based'
-      ? ('上次成功后 ' + s.retry_interval_minutes + ' 分钟')
+      ? ('签到成功后 ' + intervalText(s.success_interval_minutes))
       : ('每天 ' + String(s.daily_hour).padStart(2,'0') + ':' +
          String(s.daily_minute).padStart(2,'0'));
     if(s.jitter_enabled) sch += '（±随机）';
@@ -1655,15 +1834,8 @@ function renderSiteRows(sites){
     var fail = '';
     if(s.consecutive_failures)
       fail += ' <span class="tag err">连败 '+s.consecutive_failures+'</span>';
-    /* 当天的问题标记：告诉用户"为什么今天不再试了"，避免以为功能坏了 */
-    if(s.day_problem && s.day_problem_date === todayStr()){
-      fail += ' <span class="tag err">今天已停止重试</span>';
-    }
     if(s.disabled_reason)
       fail += '<div class="hint" style="color:#c0392b">'+esc(s.disabled_reason)+'</div>';
-    else if(s.day_problem && s.day_problem_date === todayStr() && s.day_problem_reason)
-      fail += '<div class="hint" style="color:#c0392b">'+esc(s.day_problem_reason)
-            + '　（点「立即」可手动重试一次）</div>';
     if(s.ai_consecutive_failures)
       fail += '<div class="hint">AI 分析失败 '+s.ai_consecutive_failures+' 次'
             + (s.last_ai_error? ('：'+esc(s.last_ai_error)) : '') + '</div>';
@@ -1677,12 +1849,12 @@ function renderSiteRows(sites){
       +     ' · <span id="site-'+esc(s.id)+'_next">下次 '+esc(fmtTime(s.next_run_at))
       +     '</span>'+fail+'</div>'
       + '</div><div class="acts">'
-      +   '<button class="b" onclick="runSite(\''+esc(s.id)+'\')">立即</button>'
-      +   '<button class="b" onclick="toggleSite(\''+esc(s.id)+'\','+(s.enabled?0:1)+')">'
-      +     (s.enabled?'停用':'启用')+'</button>'
-      +   '<button class="b'+(open?' pri':'')+'" onclick="toggleEdit(\''+esc(s.id)+'\')">'
-      +     (open?'收起':'编辑')+'</button>'
-      +   '<button class="b danger" onclick="delSite(\''+esc(s.id)+'\')">删除</button>'
+      +   '<button class="b" data-act="run" data-id="'+esc(s.id)+'">立即</button>'
+      +   '<button class="b" data-act="toggle" data-id="'+esc(s.id)+'"'
+      +     ' data-on="'+(s.enabled?0:1)+'">'+(s.enabled?'停用':'启用')+'</button>'
+      +   '<button class="b'+(open?' pri':'')+'" data-act="edit" data-id="'
+      +     esc(s.id)+'">'+(open?'收起':'编辑')+'</button>'
+      +   '<button class="b danger" data-act="del" data-id="'+esc(s.id)+'">删除</button>'
       + '</div></div>'
       + '<div id="form-'+esc(s.id)+'">'+(open? '<div class="hint">加载表单…</div>':'')
       + '</div></div>';
@@ -1690,6 +1862,105 @@ function renderSiteRows(sites){
   $('siteRows').innerHTML = cards || '<div class="mut">还没有站点</div>';
   if(OPEN_SITE) renderSiteForm(OPEN_SITE);
 }
+
+/* 把站点地址渲染成链接，但**只允许 http/https**。
+
+   为什么必须校验协议：esc() 只做 HTML 实体转义，不做协议白名单。
+   站点 homepage 可以被填成（或从录制里带进）`javascript:...`，
+   那样管理员点一下这个链接就会在**本页面同源**下执行脚本 ——
+   可直接调用全部管理接口（改 WebDev 地址、上传加密密钥）。
+   纯文本或非 http(s) 时退化为不可点的文本，避免任何协议执行。 */
+function safeLink(url){
+  var u = String(url == null ? '' : url).trim();
+  if(!/^https?:\/\//i.test(u)){
+    return '<b>' + esc(u || '该网站') + '</b>';
+  }
+  return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">'
+    + esc(u) + '</a>';
+}
+
+/* 把已保存的模型名填进下拉框。
+
+   如果它不在候选里（比如旧配置里的 deepseek-chat），就临时插一个选项并选中 ——
+   既不让用户看不出自己配的是什么，也不擅自把设置改成别的模型。 */
+function setModelSelect(current){
+  var sel = $('set_model');
+  if(!sel) return;
+  var want = (current || '').trim();
+  if(!want) return;
+  var found = false;
+  for(var i = 0; i < sel.options.length; i++){
+    if(sel.options[i].value === want){ found = true; break; }
+  }
+  if(!found){
+    var o = document.createElement('option');
+    o.value = want;
+    o.textContent = want + '（当前已保存，可能已被服务端映射）';
+    sel.appendChild(o);
+  }
+  sel.value = want;
+}
+
+/* 问后端列出可用模型（顺带验证 Key）。 */
+function listAiModels(){
+  show('aiModelMsg', '正在查询…', '');
+  api('POST','/api/ai/models',{api_key: $('set_aikey').value}).then(function(d){
+    if(!d.ok){
+      show('aiModelMsg', '查询失败：' + (d.error || '未知原因'), 'err');
+      return;
+    }
+    var lines = ['Key 有效。你账号可用的模型：'];
+    (d.models || []).forEach(function(m){
+      lines.push('  · ' + m + (m === d.default ? '（默认）' : ''));
+    });
+    if((d.models || []).length === 0){
+      lines.push('  （接口没返回任何模型名，请到 DeepSeek 控制台确认账号状态）');
+    }
+    var cur = ($('set_model') || {}).value || '';
+    lines.push('');
+    lines.push('当前选择：' + (cur || '(未选择)'));
+    if(d.models && d.models.length && d.models.indexOf(cur) < 0){
+      lines.push('⚠️ 当前选择不在可用清单里。它可能仍能调用（被服务端映射），');
+      lines.push('   但建议从上面清单里选一个明确的模型名。');
+    }
+    show('aiModelMsg', lines.join('\n'), 'ok');
+  }).catch(function(e){ show('aiModelMsg', e.message, 'err'); });
+}
+
+/* 卡片按钮的点击处理：用事件委托 + data 属性，而不是把 id 拼进
+   onclick 字符串。
+
+   为什么必须这样：onclick="runSite('ID')" 里 ID 处于 **JS 字符串上下文**，
+   HTML 实体转义（esc 把 ' 变成 &#39;）挡不住 —— 浏览器会先把实体解码回 '
+   再交给 JS 解析器，于是 id 里的引号能闭合字符串并注入代码。
+   实测 id = `x'),alert(1),('y` 点一下就执行。
+   data-id="..." 是纯 HTML 属性上下文，esc() 在那里是完备的。 */
+document.addEventListener('click', function(e){
+  var btn = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
+  if(!btn) return;
+  var act = btn.getAttribute('data-act');
+  var sid = btn.getAttribute('data-id') || '';
+  if(act === 'run') runSite(sid);
+  else if(act === 'toggle') toggleSite(sid, btn.getAttribute('data-on') === '1');
+  else if(act === 'edit') toggleEdit(sid);
+  else if(act === 'del') delSite(sid);
+});
+
+/* 站点表单里各按钮的点击处理（同上：不把 id 拼进 onclick） */
+document.addEventListener('click', function(e){
+  var btn = e.target && e.target.closest ? e.target.closest('[data-fact]') : null;
+  if(!btn) return;
+  var fact = btn.getAttribute('data-fact');
+  var sid = btn.getAttribute('data-sid') || '';
+  if(fact === 'cookieHelper') openCookieHelper(sid);
+  else if(fact === 'saveCookie') saveCookie(sid);
+  else if(fact === 'checkCookie') checkCookie(sid);
+  else if(fact === 'clearCookie') clearCookie(sid);
+  else if(fact === 'addHeader') addHeaderRow(sid);
+  else if(fact === 'saveSite') saveSite(sid);
+  else if(fact === 'cancel') toggleEdit(sid);
+  else if(fact === 'markCookieImport') markCookieImportStart(sid);
+});
 
 /* 展开 / 收起某个站点的编辑表单（其他站点自动下推） */
 function toggleEdit(id){
@@ -1722,15 +1993,42 @@ function swGlobalProxy(){
   if(box) box.style.display = on ? '' : 'none';
   if(inp) inp.disabled = !on;
 }
-/* 每日尝试/调用上限：关掉总开关时把子项也禁用，避免误以为还在生效 */
-function swAiLimits(){
-  var on = !!($('set_dailylimit') && $('set_dailylimit').checked);
-  ['set_maxattempt', 'set_aiperday', 'set_aiglobal'].forEach(function(id){
-    var el = $(id);
-    if(el) el.disabled = !on;
+/* 估算"这个站点每天会被调用几次 AI"，让用户不用自己算。
+
+   一轮签到的最多尝试次数 = 重试次数 + 1（首次 + 重试）。
+   倍数规则下，调用次数 = floor(最大尝试次数 / N)，
+   再受"每天最多分析几次"封顶。
+   注意这只是估算：站点若签到成功就不会再调用 AI。 */
+function calcAiCalls(){
+  var el = $('set_aicalc');
+  if(!el) return;
+  var after = parseInt(($('set_aiafter')||{}).value || '0', 10);
+  var cap = parseInt(($('set_maxai')||{}).value || '0', 10);
+  if(isNaN(after)) after = 0;
+  if(isNaN(cap)) cap = 0;
+
+  // 取所有站点里最大的"重试次数"，给出一个上界提示
+  var maxRetry = 0;
+  (SITE_CACHE && Object.keys(SITE_CACHE) || []).forEach(function(k){
+    var s = SITE_CACHE[k] || {};
+    var rc = parseInt(s.retry_count, 10);
+    if(!isNaN(rc) && rc > maxRetry) maxRetry = rc;
   });
-  var box = $('set_dailyBox');
-  if(box) box.style.opacity = on ? '1' : '0.45';
+  if(after <= 0){
+    el.innerHTML = '<br><b>当前：不启用 AI 分析。</b>';
+    return;
+  }
+  if(!maxRetry){
+    el.innerHTML = '<br>展开某个站点后可以看到按它的重试次数算出的调用次数。';
+    return;
+  }
+  var attempts = maxRetry + 1;                 // 首次 + 重试
+  var calls = Math.floor(attempts / after);
+  if(cap > 0 && calls > cap) calls = cap;
+  el.innerHTML = '<br>以重试 ' + maxRetry + ' 次为例：一轮最多尝试 ' + attempts
+    + ' 次 → 每天最多调用 AI <b>' + calls + '</b> 次'
+    + (calls === 0 ? '（因为这个倍数在一轮里到不了，若失败会跨轮累计）' : '')
+    + '。';
 }
 
 /* 站点表单里的同款逻辑 */
@@ -1765,10 +2063,49 @@ function refreshAutoRefHint(){
     : '（当前：不自动刷新）';
 }
 
-function _sw(id, label, on, onchange){  return '<label class="sw'+(on?'':' off')+'" for="'+id+'">'
+function _sw(id, label, on, sid){
+  /* 第 4 个参数 sid：站点 id（全局开关传空字符串）。
+     不再把 id 拼进内联 onchange —— 内联事件属性里的 JS 字符串上下文
+     用 HTML 实体转义挡不住引号逃逸（浏览器会先解码再交给 JS 解析）。
+     改为打 data-* 标记，由下面的委托监听统一处理。 */
+  return '<label class="sw'+(on?'':' off')+'" for="'+id+'">'
     + '<input type="checkbox" id="'+id+'"'+(on?' checked':'')
-    + ' onchange="'+onchange+'">'
+    + ' data-needs-sync="1" data-sid="'+esc(sid == null ? '' : sid)+'">'
     + '<span class="track"></span><span class="lb">'+esc(label)+'</span></label>';
+}
+
+/* 需要"值一变就重算显隐"的控件统一由这里处理（事件委托，捕获阶段）。
+   用 data-needs-sync 标记，彻底避免 data → 内联事件的拼接。 */
+document.addEventListener('change', function(e){
+  var el = e.target;
+  if(!el || !el.getAttribute) return;
+  if(!el.getAttribute('data-needs-sync')) return;
+  var sid = el.getAttribute('data-sid') || '';
+  if(sid){
+    swSync(sid);
+    swSiteProxy(sid);
+    swSyncRadios(sid);
+  } else {
+    /* 全局控件：代理方式单选 / AI 上限输入框。
+       ⚠️ 原来的 swAiLimits() 已随"每日尝试上限"一起删除，这里忘了改，
+       导致每次勾选站点开关都抛 ReferenceError（控制台报错、用户以为坏了）。
+       全局这些控件对应的是 calcAiCalls() 与 swGlobalProxy()。 */
+    swGlobalProxy();
+    calcAiCalls();
+  }
+}, true);
+document.addEventListener('input', function(e){
+  var el = e.target;
+  if(!el || !el.getAttribute) return;
+  if(!el.getAttribute('data-needs-sync')) return;
+  var sid = el.getAttribute('data-sid') || '';
+  if(sid) swSync(sid); else calcAiCalls();
+}, true);
+
+/* 站点表单里三组单选（运行方式/签到时间/联网方式）切换后重算显隐 */
+function swSyncRadios(id){
+  swSync(id);
+  swSiteProxy(id);
 }
 
 /* 自定义请求头：一行一个 key/value */
@@ -1849,7 +2186,7 @@ function siteFormHtml(s, c){
   +     '<div><label>站点名称</label><input id="'+p+'name" value="'+esc(s.name)+'"></div>'
   +     '<div><label>主页地址</label><input id="'+p+'home" value="'+esc(s.homepage)+'"></div>'
   +   '</div>'
-  +   _sw(p+'enabled','启用签到', s.enabled, "swSync('"+id+"')")
+  +   _sw(p+'enabled','启用签到', s.enabled, id)
   +   '<div class="fgrid" style="margin-top:4px">'
   +     '<div><label>运行方式</label><select id="'+p+'browser">'
   +       '<option value="0"'+(s.need_browser?'':' selected')+'>纯请求（推荐，快且省资源）</option>'
@@ -1865,25 +2202,31 @@ function siteFormHtml(s, c){
   + '<div class="fsec"><h4>签到时间</h4>'
   +   '<div class="radios">'
   +     '<label><input type="radio" name="'+p+'mode" value="daily"'
-  +       (isDaily?' checked':'')+' onchange="swSync(\''+id+'\')">每天固定时刻</label>'
+  +       (isDaily?' checked':'')+' data-needs-sync="1" data-sid="'+esc(id)+'">每天固定时刻</label>'
   +     '<label><input type="radio" name="'+p+'mode" value="success_based"'
-  +       (isDaily?'':' checked')+' onchange="swSync(\''+id+'\')">上次成功后间隔</label>'
+  +       (isDaily?'':' checked')+' data-needs-sync="1" data-sid="'+esc(id)+'">'
+  +       '以【上次签到成功时间】为基准</label>'
   +   '</div>'
+  +   '<div class="hint" style="margin:6px 0 0">' + modeHintHtml(isDaily) + '</div>'
   +   '<div class="fgrid" style="margin-top:6px">'
   +     '<div id="'+p+'dailyBox"><label>时刻（24 小时制）</label>'
   +       '<span class="inline"><input type="number" id="'+p+'hour" min="0" max="23" value="'
   +         s.daily_hour+'"> : <input type="number" id="'+p+'min" min="0" max="59" value="'
   +         String(s.daily_minute).padStart(2,'0')+'"></span></div>'
+  +     '<div id="'+p+'ivalBox"><label>间隔（分钟，1440＝24 小时）</label>'
+  +       '<input type="number" id="'+p+'ival" min="60" max="10080" value="'
+  +         (s.success_interval_minutes||1440)+'">'
+  +       '<div class="hint" id="'+p+'ivalHint"></div></div>'
   +     '<div><label>随机延迟上限（分钟）</label>'
   +       '<span class="inline"><input type="number" id="'+p+'jitter" min="0" max="720" value="'
   +         Math.round((s.jitter_seconds||0)/60)+'"></span>'
   +       '<div class="hint">在设定时刻前后随机浮动，避免每天同一秒请求</div></div>'
   +   '</div>'
-  +   _sw(p+'jitterOn','启用随机延迟', s.jitter_enabled, "swSync('"+id+"')")
+  +   _sw(p+'jitterOn','启用随机延迟', s.jitter_enabled, id)
   + '</div>'
 
   + '<div class="fsec"><h4>失败重试</h4>'
-  +   _sw(p+'retryOn','失败后重试', s.retry_enabled, "swSync('"+id+"')")
+  +   _sw(p+'retryOn','失败后重试', s.retry_enabled, id)
   +   '<div class="fgrid" style="margin-top:6px">'
   +     '<div><label>重试次数</label><input type="number" id="'+p+'rc" min="0" max="10" value="'
   +       s.retry_count+'"></div>'
@@ -1893,11 +2236,11 @@ function siteFormHtml(s, c){
   + '</div>'
 
   + '<div class="fsec"><h4>AI 分析</h4>'
-  +   _sw(p+'aiOn','连续失败后让 AI 分析原因', s.ai_enabled, "swSync('"+id+"')")
-  +   '<div class="fgrid" style="margin-top:6px">'
-  +     '<div><label>连续失败几次后分析</label>'
-  +       '<input type="number" id="'+p+'aiN" min="1" max="20" value="'
-  +       s.ai_after_failures+'"></div>'
+  +   _sw(p+'aiOn','这个站点允许调用 AI 分析', s.ai_enabled, id)
+  +   '<div class="hint" style="margin:6px 0 0">'
+  +     '调用时机（每失败几次调用一次）和每天次数上限都是<b>全局设置</b>，'
+  +     '在「设置 → DeepSeek」里改。这里只决定这个站点允不允许被分析。<br>'
+  +     '签到重试次数用上面的「失败重试」——那才是决定"一天试几次"的地方。'
   +   '</div>'
   + '</div>'
 
@@ -1918,7 +2261,8 @@ function siteFormHtml(s, c){
   +     '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;'
   +       'margin-bottom:8px">'
   +       qdButtonHtml(s)
-  +       '<button type="button" class="b" onclick="openCookieHelper(\''+id+'\')">'
+  +       '<button type="button" class="b" data-fact="cookieHelper"'
+  +         ' data-sid="'+esc(id)+'">'
   +         '📖 怎么用？</button>'
   +     '</div>'
   +     '<div class="tip" style="margin-bottom:8px">'
@@ -1930,21 +2274,19 @@ function siteFormHtml(s, c){
   +       '或者手动粘贴：Copy as cURL 的整段、a=1; b=2 这样的 Cookie 串、'
   +       'DevTools 里一行一个的键值列表、cookies.txt"></textarea>'
   +     '<div class="tip">'
-  +       '<b>手动粘贴怎么拿：</b>用你自己的浏览器打开 '
-  +       '<a href="'+esc(s.homepage||'#')+'" target="_blank" rel="noopener">'
-  +       esc(s.homepage||'该网站')+'</a> 并登录 → 按 <b>F12</b> → '
+  +       '<b>手动粘贴怎么拿：</b>用你自己的浏览器打开 ' + safeLink(s.homepage) + ' 并登录 → 按 <b>F12</b> → '
   +       '<b>Network</b> 标签 → 按 <b>F5</b> 刷新 → 点列表里第一条请求 → '
   +       '<b>右键 → Copy → Copy as cURL</b> → 把整段粘到上面的框里。<br>'
   +       '不用自己整理格式，粘进来会自动提取。'
   +       '注意 <b>document.cookie 拿不到 HttpOnly 的登录字段</b>，所以别用控制台。'
   +     '</div>'
   +     '<div class="formfoot">'
-  +       '<button type="button" class="b pri" onclick="saveCookie(\''+id+'\')">'
-  +         '保存 Cookie</button>'
-  +       '<button type="button" class="b" onclick="checkCookie(\''+id+'\')">'
-  +         '检查是否有效</button>'
-  +       '<button type="button" class="b danger" onclick="clearCookie(\''+id+'\')">'
-  +         '清除</button>'
+  +       '<button type="button" class="b pri" data-fact="saveCookie"'
+  +         ' data-sid="'+esc(id)+'">保存 Cookie</button>'
+  +       '<button type="button" class="b" data-fact="checkCookie"'
+  +         ' data-sid="'+esc(id)+'">检查是否有效</button>'
+  +       '<button type="button" class="b danger" data-fact="clearCookie"'
+  +         ' data-sid="'+esc(id)+'">清除</button>'
   +       '<span class="grow"></span>'
   +     '</div>'
   +     '<div id="'+p+'ckmsg" class="msg"></div>'
@@ -1957,13 +2299,13 @@ function siteFormHtml(s, c){
   +   '<div class="radios">'
   +     '<label><input type="radio" name="'+p+'pmode" value="inherit"'
   +       (sitePmode==='inherit'?' checked':'')
-  +       ' onchange="swSiteProxy(\''+id+'\')">跟随全局设置</label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'">跟随全局设置</label>'
   +     '<label><input type="radio" name="'+p+'pmode" value="direct"'
   +       (sitePmode==='direct'?' checked':'')
-  +       ' onchange="swSiteProxy(\''+id+'\')">强制直连</label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'">强制直连</label>'
   +     '<label><input type="radio" name="'+p+'pmode" value="custom"'
   +       (sitePmode==='custom'?' checked':'')
-  +       ' onchange="swSiteProxy(\''+id+'\')">用这个代理</label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'">用这个代理</label>'
   +   '</div>'
   +   '<div id="'+p+'proxyBox" style="margin-top:8px;'
   +     (sitePmode==='custom'?'':'display:none')+'">'
@@ -1977,12 +2319,15 @@ function siteFormHtml(s, c){
   +   '<div class="hint" style="margin:0 0 6px">有些站点的接口会校验来源，'
   +     '缺了会返回 403。内置站点已预置好，一般不用改。</div>'
   +   '<div id="'+p+'hdr">'+headerRows(s.headers)+'</div>'
-  +   '<button type="button" class="b" onclick="addHeaderRow(\''+id+'\')">+ 增加一行</button>'
+  +   '<button type="button" class="b" data-fact="addHeader"'
+  +     ' data-sid="'+esc(id)+'">+ 增加一行</button>'
   + '</div>'
 
   + '<div class="formfoot">'
-  +   '<button type="button" class="b pri" onclick="saveSite(\''+id+'\')">保存</button>'
-  +   '<button type="button" class="b" onclick="toggleEdit(\''+id+'\')">取消</button>'
+  +   '<button type="button" class="b pri" data-fact="saveSite"'
+  +     ' data-sid="'+esc(id)+'">保存</button>'
+  +   '<button type="button" class="b" data-fact="cancel"'
+  +     ' data-sid="'+esc(id)+'">取消</button>'
   +   '<span class="grow"></span>'
   +   '<span class="hint" style="margin:0">ID：'+esc(id)+'</span>'
   + '</div>'
@@ -2003,11 +2348,22 @@ function swSync(id){
   var rOn = $(p+'retryOn');
   set($(p+'rc'), !!(rOn&&rOn.checked)); set($(p+'ri'), !!(rOn&&rOn.checked));
   lb(rOn, !!(rOn&&rOn.checked));
-  var aOn = $(p+'aiOn'); set($(p+'aiN'), !!(aOn&&aOn.checked)); lb(aOn, !!(aOn&&aOn.checked));
+  var aOn = $(p+'aiOn'); lb(aOn, !!(aOn&&aOn.checked));
   var daily = document.querySelector('input[name="'+p+'mode"][value="daily"]');
   var isDaily = !!(daily && daily.checked);
   set($(p+'hour'), isDaily); set($(p+'min'), isDaily);
   var box = $(p+'dailyBox'); if(box) box.style.opacity = isDaily? '1':'0.45';
+  /* 间隔输入只在"以成功时间为基准"模式下有意义 */
+  set($(p+'ival'), !isDaily);
+  var ibox = $(p+'ivalBox'); if(ibox) ibox.style.opacity = isDaily? '0.45':'1';
+  /* 实时把分钟换算成"几小时"，避免用户对着 1440 猜 */
+  var hint = $(p+'ivalHint');
+  if(hint){
+    var v = parseInt(($(p+'ival')||{}).value || '1440', 10);
+    if(isNaN(v) || v <= 0){ hint.textContent = ''; }
+    else if(v % 60 === 0){ hint.textContent = '＝ ' + (v/60) + ' 小时'; }
+    else { hint.textContent = '＝ ' + Math.floor(v/60) + ' 小时 ' + (v%60) + ' 分钟'; }
+  }
 }
 
 function addHeaderRow(id){
@@ -2053,8 +2409,8 @@ function saveSite(id){
     retry_enabled: $(p+'retryOn').checked,
     retry_count: parseInt($(p+'rc').value||'0',10),
     retry_interval_minutes: parseInt($(p+'ri').value||'30',10),
+    success_interval_minutes: Math.max(60, parseInt($(p+'ival').value||'1440',10)),
     ai_enabled: $(p+'aiOn').checked,
-    ai_after_failures: parseInt($(p+'aiN').value||'3',10),
     notify: $(p+'notify').value,
     proxy_mode: radioValue(p+'pmode') || 'inherit',
     proxy_url: ($(p+'proxy') ? $(p+'proxy').value.trim() : ''),
@@ -2173,7 +2529,7 @@ function qdButtonHtml(s){
     + ' data-site="' + esc(url) + '"'
     + ' data-domain="' + esc(root) + '"'
     + ' data-name="' + esc(s.name) + '"'
-    + ' onclick="markCookieImportStart(\'' + esc(s.id) + '\')">'
+    + ' data-fact="markCookieImport" data-sid="' + esc(s.id) + '">'
     + '⚡ 从浏览器读取 Cookie</button>';
 }
 
@@ -2570,23 +2926,20 @@ function loadSettings(){
     $('set_nmode').innerHTML = (META.notify_modes||[]).map(function(m){
       return '<option value="'+esc(m)+'"'+(m===n.mode?' selected':'')+'>'+esc(m)+'</option>';
     }).join('');
-    $('set_nproxy').innerHTML = (META.proxy_modes||[]).map(function(m){
-      return '<option value="'+esc(m)+'"'+(m===n.proxy_mode?' selected':'')+'>'
-        + esc(m==='inherit'?'跟随主代理':(m==='direct'?'直连':'自定义'))+'</option>';
-    }).join('');
-    $('set_nproxy_url').value = n.proxy_url || '';
     $('set_aikey').value = '';
-    $('set_model').value = (d.ai && d.ai.model) || 'deepseek-chat';
-    $('set_maxai').value = (d.ai && d.ai.max_calls_per_day) || 20;
-    $('set_aifail').value = (d.ai && d.ai.fail_threshold) || 2;
-    $('set_aiauto').value = (d.ai && d.ai.auto_disable === false) ? '0' : '1';
+    /* 模型用下拉框。若已保存的值不在候选里（例如旧配置里的 deepseek-chat），
+       临时插一个选项并选中，避免把用户的设置悄悄改掉。 */
+    setModelSelect(d.ai && d.ai.model);
+    $('set_aifail').value = (d.ai && d.ai.fail_threshold !== undefined
+                             ? d.ai.fail_threshold : 2);
     var ai = (d.ai || {});
-    $('set_dailylimit').checked = (ai.daily_limit_enabled !== false);
-    $('set_maxattempt').value = ai.max_attempts_per_day || 3;
-    $('set_aiperday').value = (ai.ai_calls_per_day === undefined ? 1 : ai.ai_calls_per_day);
-    $('set_aiglobal').value = (ai.global_max_calls_per_day === undefined
-                               ? 20 : ai.global_max_calls_per_day);
-    swAiLimits();
+    /* 每连续失败几次调用一次 AI；0 = 不启用 */
+    $('set_aiafter').value = (ai.ai_after_failures === undefined
+                              ? 3 : ai.ai_after_failures);
+    /* 每天调用次数的硬上限；0 = 不限制 */
+    $('set_maxai').value = (ai.max_calls_per_day === undefined
+                            ? 20 : ai.max_calls_per_day);
+    calcAiCalls();
     $('set_wdurl').value = (d.webdav && d.webdav.url) || '';
     $('set_wduser').value = (d.webdav && d.webdav.username) || '';
     $('set_wdpw').value = '';
@@ -2669,11 +3022,11 @@ function restoreKey(){
 }
 
 function renderChannels(n, d){
-  var labels = {pushplus:'pushplus', serverchan:'Server酱', wecom:'企业微信机器人',
+  /* Server 酱已按要求移除，所以这里只有三个渠道 */
+  var labels = {pushplus:'pushplus', wecom:'企业微信机器人',
                 telegram:'Telegram'};
   var fields = {
     pushplus:  {key:'pushplus_token',  ph:'token', masked:n.pushplus_token_masked},
-    serverchan:{key:'serverchan_key',  ph:'SCT…',  masked:n.serverchan_key_masked},
     wecom:     {key:'wecom_webhook',   ph:'https://qyapi.weixin.qq.com/…'},
     telegram:  {key:'tg_bot_token',    ph:'bot token，另填 chat id',
                 masked:n.tg_bot_token_masked}
@@ -2695,7 +3048,7 @@ function renderChannels(n, d){
           + 'placeholder="chat id" value="">') : '')
       + '<label>该渠道走代理</label>'
       + '<select class="chProxy" data-ch="'+esc(ch)+'">'
-      + '<option value=""'+(cp.mode?'':' selected')+'>跟随全局</option>'
+      + '<option value=""'+(cp.mode?'':' selected')+'>跟随主代理</option>'
       + '<option value="direct"'+(cp.mode==='direct'?' selected':'')+'>直连</option>'
       + '<option value="custom"'+(cp.mode==='custom'?' selected':'')+'>自定义</option>'
       + '</select>'
@@ -2707,8 +3060,7 @@ function renderChannels(n, d){
 }
 
 function collectNotify(){
-  var n = {mode: $('set_nmode').value, proxy_mode: $('set_nproxy').value,
-           proxy_url: $('set_nproxy_url').value.trim(),
+  var n = {mode: $('set_nmode').value,
            channels: [], channel_proxy: {}};
   document.querySelectorAll('.chOn').forEach(function(cb){
     if(cb.checked) n.channels.push(cb.dataset.ch);
@@ -2737,13 +3089,9 @@ function saveSettings(){
     webdav: {url: $('set_wdurl').value.trim(), username: $('set_wduser').value.trim(),
              password: $('set_wdpw').value, backup_key: $('set_wdkey').checked},
     ai: {api_key: $('set_aikey').value, model: $('set_model').value.trim(),
-         max_calls_per_day: parseInt($('set_maxai').value||'20', 10),
-         fail_threshold: parseInt($('set_aifail').value||'2', 10),
-         auto_disable: $('set_aiauto').value === '1',
-         daily_limit_enabled: $('set_dailylimit').checked,
-         max_attempts_per_day: parseInt($('set_maxattempt').value||'3', 10),
-         ai_calls_per_day: parseInt($('set_aiperday').value||'1', 10),
-         global_max_calls_per_day: parseInt($('set_aiglobal').value||'0', 10)}
+         ai_after_failures: parseInt($('set_aiafter').value||'0', 10),
+         max_calls_per_day: parseInt($('set_maxai').value||'0', 10),
+         fail_threshold: parseInt($('set_aifail').value||'0', 10)}
   };
   api('POST','/api/settings', body).then(function(){
     show('setMsg','已保存。','ok'); refreshAll(); loadSettings();

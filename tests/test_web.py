@@ -351,24 +351,54 @@ class TestSettingsWrite(WebCase):
     def test_ai_settings_saved(self):
         self.json('POST', '/api/settings', {'ai': {
             'api_key': 'sk-x', 'model': 'deepseek-reasoner',
-            'max_calls_per_day': 5, 'auto_apply': False}})
+            'ai_after_failures': 4, 'max_calls_per_day': 5,
+            'auto_apply': False}})
         cfg = self.svc.load_config()
         self.assertEqual(cfg.ai.model, 'deepseek-reasoner')
+        self.assertEqual(cfg.ai.ai_after_failures, 4)
         self.assertEqual(cfg.ai.max_calls_per_day, 5)
         self.assertFalse(cfg.ai.auto_apply)
         self.assertEqual(self.svc.box.decrypt(cfg.ai.api_key_enc), 'sk-x')
 
-    def test_ai_failure_handling_settings_saved(self):
-        """AI 也失败时的处理方式要能通过界面配置。"""
-        self.json('POST', '/api/settings', {'ai': {
-            'fail_threshold': 3, 'auto_disable': False}})
-        cfg = self.svc.load_config()
-        self.assertEqual(cfg.ai.fail_threshold, 3)
-        self.assertFalse(cfg.ai.auto_disable)
+    def test_ai_after_failures_zero_means_disabled(self):
+        """每几次失败调用一次 = 0 表示不启用 AI 分析。"""
+        self.json('POST', '/api/settings', {'ai': {'ai_after_failures': 0}})
+        self.assertEqual(self.svc.load_config().ai.ai_after_failures, 0)
 
-    def test_fail_threshold_minimum_enforced(self):
+    def test_max_calls_per_day_zero_means_unlimited(self):
+        """每天最多分析几次 = 0 表示不限制。"""
+        self.json('POST', '/api/settings', {'ai': {'max_calls_per_day': 0}})
+        self.assertEqual(self.svc.load_config().ai.max_calls_per_day, 0)
+
+    def test_legacy_per_site_daily_fields_are_dropped(self):
+        """已删除的"每日尝试/调用上限"字段不该让配置读不出来。"""
+        from app.models import AiConfig
+        back = AiConfig.from_dict({
+            'daily_limit_enabled': True, 'max_attempts_per_day': 3,
+            'ai_calls_per_day': 2, 'global_max_calls_per_day': 10})
+        # ai_calls_per_day 的意图迁移到"每天最多分析几次"
+        self.assertEqual(back.max_calls_per_day, 2)
+        self.assertFalse(hasattr(back, 'max_attempts_per_day'))
+        self.assertFalse(hasattr(back, 'daily_limit_enabled'))
+
+    def test_legacy_global_cap_migrated_if_no_per_site_value(self):
+        from app.models import AiConfig
+        back = AiConfig.from_dict({'global_max_calls_per_day': 7})
+        self.assertEqual(back.max_calls_per_day, 7)
+
+    def test_ai_failure_handling_settings_saved(self):
+        """AI 失败处理只由 fail_threshold 一个数字控制（0 = 不限制）。"""
+        self.json('POST', '/api/settings', {'ai': {'fail_threshold': 3}})
+        self.assertEqual(self.svc.load_config().ai.fail_threshold, 3)
+
+    def test_fail_threshold_zero_means_unlimited(self):
+        """0 是合法值，表示不限制连续失败次数（不再被夹到 1）。"""
         self.json('POST', '/api/settings', {'ai': {'fail_threshold': 0}})
-        self.assertGreaterEqual(self.svc.load_config().ai.fail_threshold, 1)
+        self.assertEqual(self.svc.load_config().ai.fail_threshold, 0)
+
+    def test_negative_fail_threshold_clamped_to_zero(self):
+        self.json('POST', '/api/settings', {'ai': {'fail_threshold': -5}})
+        self.assertEqual(self.svc.load_config().ai.fail_threshold, 0)
 
     def test_alert_test_endpoint_requires_channel(self):
         with self.assertRaises(WB.ApiError) as ctx:
