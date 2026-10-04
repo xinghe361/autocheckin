@@ -1,0 +1,97 @@
+name: build-and-publish
+
+# 需要配置（Settings → Secrets and variables → Actions）：
+#
+#   Secrets（密钥，加密存储）：
+#     DOCKERHUB_USERNAME   Docker Hub 用户名
+#     DOCKERHUB_TOKEN      Docker Hub 访问令牌（不是登录密码）
+#
+#   Variables（普通变量，可选但建议）：
+#     DOCKERHUB_USERNAME   同上（明文即可）
+#
+# 为什么建议同时配 Variables：
+#   下面的 docker/metadata-action 需要一个"镜像名"。
+#   GitHub Actions 不允许在 with: 里直接使用 secrets 之外的表达式拼接镜像名，
+#   而 secrets 在 metadata-action 的 images 字段里也不保证可用。
+#   所以镜像名优先取 vars.DOCKERHUB_USERNAME；没配就回退到 secrets 同名值。
+#
+# 触发方式：推一个 tag（如 v1.0.0），或在 Actions 页面手动运行。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  # 优先用仓库变量；没有则用同名 secret
+  DH_USER: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+
+      - name: 运行单测
+        run: python -m unittest discover -s tests -v
+
+      - name: 构建前自检
+        run: python build_image.py --check
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 检查凭据是否已配置
+        run: |
+          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "::error::缺少 DOCKERHUB_USERNAME 或 DOCKERHUB_TOKEN，请在仓库 Secrets 里配置后再运行。"
+            exit 1
+          fi
+          echo "凭据已配置，镜像将推送到 $DH_USER/autocheckin"
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 生成标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DH_USER }}/autocheckin
+          tags: |
+            type=ref,event=tag
+            # 注意：这里不能用 type=raw,value=latest,enable={{is_default_branch}}。
+            # 推 tag 时 checkout 出来的 ref 是 tag 而不是分支，
+            # is_default_branch 会是 false，于是 latest 永远不会生成。
+            # 所以显式判断"是 tag 推送，或就在默认分支上"。
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' || github.ref_name == github.event.repository.default_branch }}
+            type=sha,format=short
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

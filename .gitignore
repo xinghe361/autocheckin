@@ -1,0 +1,37 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# 绝不提交运行数据与密钥
+data/
+*.key
+secret.key
+config.json
+state.json
+*.log
+.broken.*
+
+# 本地测试残留。
+# 注意：这里刻意不用 `*.out.txt` 这种全局规则 —— 它会把 docs/ 下可能需要的
+# 实测输出一起挡掉（踩过这个坑）。只挡仓库根目录下的临时产物。
+/_test_*.zip
+/_dump*/
+/_realtest*
+/_probe*
+/*.out.txt
+
+# 临时文件。
+# 我提交时用过信息文件、审计输出、调试输出，误提交过三次（_commitmsg.txt、
+# _cmsg.txt、_dbg.txt）。这里把"仓库根目录下以 _ 开头的文件"整体挡掉，
+# 免得反复踩同一个坑。注意用 / 锚定根目录，避免误伤 docs/ 下的正常文件。
+/_
+/_*.txt
+/_*.py
+/_*.json
+/verify_*.py
+/fix_*.py

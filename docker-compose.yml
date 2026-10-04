@@ -1,0 +1,138 @@
+# 自动签到 · 极空间 NAS 部署示例
+#
+# 两种网络模式，**推荐用 host 模式**（见下方说明）。
+#
+# ============================================================
+#  方式 A：host 网络模式（推荐，镜像内默认端口已是 28999）
+# ============================================================
+services:
+  autocheckin:
+    image: xinghe361/autocheckin:latest
+    container_name: autocheckin
+    restart: unless-stopped
+    # host 模式下容器直接用宿主网络：
+    #   · 容器内部监听什么端口，宿主上就是什么端口（不需要也不允许 ports 映射）
+    #   · 镜像内默认已监听 28999，所以启动后直接访问 http://NAS的IP:28999/
+    network_mode: host
+    # 安全加固（建议保留）
+    #   no-new-privileges：限制容器内进程提权，对本程序没有副作用
+    security_opt:
+      - no-new-privileges:true
+    # /dev/shm 大小。Docker 默认只给 64MB，Chromium 渲染缓冲容易用满而崩溃。
+    shm_size: "256m"
+    volumes:
+      # 数据目录：配置、加密密钥、运行状态都在这里。
+      #
+      # 这里用"命名卷"，也就是完全不用填任何路径：Docker 自己找地方存。
+      # 镜像里声明了 VOLUME ["/data"]，所以极空间创建容器时会在
+      # 【装载路径】栏自动填好 /data（容器内那侧），你只需决定宿主侧怎么存。
+      - autocheckin-data:/data
+      #
+      # ---------------------------------------------------------------
+      # 想改成"自己指定文件夹"（数据可见、能直接备份），把上面那行换成：
+      #
+      #     - /你的数据目录/autocheckin:/data
+      #
+      # 例如极空间上形如 - /data_XXXXXXXX/data/autocheckin:/data
+      # （盘符是"每块磁盘一个"，每台机器可能不同；也可以在界面里点
+      #   「添加文件夹」用文件管理器选，连路径都不用打）
+      #
+      # ⚠️ 不要填成 /data/... ：那通常是系统分区，空间很小，
+      #    写满可能影响整台 NAS 的运行。请选实际磁盘上的目录。
+      #
+      # 两种方式的取舍：
+      #   命名卷  = 零配置，但数据藏在 Docker 自己的目录里，
+      #            文件管理器看不见，备份要用下面的命令。
+      #   指定文件夹 = 多填一个路径，但数据在共享文件夹里，看得见、能直接复制、
+      #            系统重装也跟着一起备份。这里存的是站点密码与加密密钥，
+      #            丢了要全部重配 —— 所以也可以先用命名卷，再定期导出备份。
+      #
+      # 备份命名卷（导出成 tar.gz 放到 /tmp，之后自己挪走）：
+      #   docker run --rm -v autocheckin-data:/data -v /tmp:/backup \
+      #     alpine tar czf /backup/autocheckin-data.tar.gz -C /data .
+      #
+      # 恢复命名卷：
+      #   docker run --rm -v autocheckin-data:/data -v /tmp:/backup \
+      #     alpine tar xzf /backup/autocheckin-data.tar.gz -C /data
+    environment:
+      TZ: Asia/Shanghai
+      # 内部端口。镜像默认就是 28999；改这里的话访问地址也要跟着改。
+      PORT: "28999"
+      # 全局代理：所有站点与浏览器统一走它。
+      # 也可以在网页「设置 → 网络」里改，两者等效（网页设置优先）。
+      PROXY: "http://你的代理地址:7890"
+      DATA_DIR: /data
+      LOG_LEVEL: info
+      # 加密密钥：建议自己生成固定值，这样重建容器/换机后已保存的密码仍能解开。
+      #   生成: docker run --rm 你的镜像 python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
+      # 不想自己管密钥，也可以在网页「凭据加密密钥」里把它备份到 WebDAV。
+      # AUTOCHECKIN_KEY: "在这里填入生成的密钥"
+
+# 命名卷声明。上面用了 autocheckin-data:/data，就必须在这里声明它，
+# 否则 compose 会把它当成"外部卷"而报错。
+# 如果你改成了指定文件夹（把上面那行换成 /绝对路径:/data），这个 volumes 段可以删掉。
+volumes:
+  autocheckin-data:
+
+# ============================================================
+#  方式 B：桥接模式 + 端口映射（如果你不想要 host 模式）
+# ============================================================
+# 把上面的配置注释掉，用下面这份：
+#
+# services:
+#   autocheckin:
+#     image: xinghe361/autocheckin:latest
+#     container_name: autocheckin
+#     restart: unless-stopped
+#     ports:
+#       # 宿主端口 : 容器内端口。想换宿主端口只改冒号左边即可。
+#       - "28999:28999"
+#     security_opt:
+#       - no-new-privileges:true
+#     shm_size: "256m"
+#     volumes:
+#       - autocheckin-data:/data
+#     environment:
+#       TZ: Asia/Shanghai
+#       PORT: "28999"
+#       PROXY: "http://你的代理地址:7890"
+#       DATA_DIR: /data
+
+# ============================================================
+#  可选加固：以非 root 运行
+# ============================================================
+#   services:
+#     autocheckin:
+#       user: "1000:1000"
+#       security_opt:
+#         - no-new-privileges:true
+#
+# 需要先把宿主机数据目录的属主改成 1000，否则启动会权限拒绝：
+#
+#   sudo chown -R 1000:1000 /你的数据目录/autocheckin
+#
+# 注意：非 root 之后 Chromium 自带沙箱无法开启（其辅助程序需要 root + setuid），
+# 所以"非 root + 开沙箱 + 免配置"三者最多满足两个。
+
+# ============================================================
+#  为什么推荐 host 模式
+# ============================================================
+# 1. 少一层 NAT，出网更直接；也不容易和宿主上已有服务抢端口（只要内部端口选得对）
+# 2. 28999 这个默认端口是特意选的：8080 等常用端口在 NAS 上经常已被占用，
+#    host 模式下撞端口会直接 "Address already in use"
+# 3. host 模式下浏览器与网络行为更接近"直接在 NAS 上跑"，排查问题更简单
+#
+# ============================================================
+#  可选：复用已有的 Chrome 容器
+# ============================================================
+# 若 NAS 上已经跑着带调试端口的 Chrome，可以让本服务连它，省掉镜像内的浏览器。
+# 注意：Chrome 的调试端口通常只绑在它自己容器的 127.0.0.1 上，
+# 要连上必须共享它的网络命名空间：
+#
+#   services:
+#     autocheckin:
+#       network_mode: "container:你的chrome容器名"
+#
+# 这样本服务的端口就无法对外暴露（Web 界面只能在那个容器的桌面里访问），
+# 所以一般仍推荐用镜像内置浏览器。确实需要时：
+#   在网页「设置 → 网络 → 连接已有 Chrome」里填 http://127.0.0.1:9222

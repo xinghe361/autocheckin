@@ -1,0 +1,7 @@
+# 运行依赖（刻意保持精简）
+#
+# playwright 既提供 Python API，也提供镜像里预装的 Chromium 驱动。
+# 官方基础镜像已包含浏览器与全部系统依赖，所以这里不需要额外装 apt 包。
+playwright==1.48.0
+# 凭据加密（Fernet = AES-128-CBC + HMAC）
+cryptography==43.0.3
