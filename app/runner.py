@@ -83,11 +83,13 @@ class Runner:
                  now_fn: Callable[[], int] = None, rng: random.Random = None,
                  checkin_fn: Callable = None, analyze_fn: Callable = None,
                  notify_fn: Callable = None, alert_fn: Callable = None,
-                 version: str = ''):
+                 version: str = '', global_proxy_mode: str = ''):
         self.store = store
         self.box = box                  # SecretBox，用于解出站点密码/API Key
         self.browser = browser
         self.proxy = proxy
+        # 全局代理模式（direct/custom）：决定 inherit 的站点最终走不走代理
+        self.global_proxy_mode = global_proxy_mode or ''
         self.now_fn = now_fn or (lambda: int(time.time()))
         self.rng = rng or random.Random()
         self.checkin_fn = checkin_fn or _default_checkin
@@ -98,6 +100,16 @@ class Runner:
         self.version = version
 
     # ------------------------------------------------------------------
+    def _proxy_for(self, site: SiteConfig) -> str:
+        """这个站点最终该走哪个代理（空串=直连）。
+
+        站点可以单独设置：跟随全局 / 强制直连 / 用独立代理。
+        单独抽出来是因为它决定"这个站点走不走代理"，
+        排查"为什么这个站点连不上"时第一个要看的就是它。
+        """
+        from .models import resolve_site_proxy
+        return resolve_site_proxy(site, self.proxy, self.global_proxy_mode)
+
     def _password_of(self, site: SiteConfig) -> str:
         """取站点密码。
 
@@ -212,8 +224,8 @@ class Runner:
                 run.notified = self.notify_fn(result, cfg.notify, self.proxy)
                 return run
 
-        result = self.checkin_fn(site, self.proxy, password, self.browser,
-                                 cookie)
+        result = self.checkin_fn(site, self._proxy_for(site), password,
+                                 self.browser, cookie)
 
         # 结果回写到调度状态（成功清连败，失败累加）
         next_at = plan_next(sched, now, result.success, self.rng)

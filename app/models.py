@@ -116,6 +116,13 @@ class SiteConfig:
     # 这里按站点配置，回放时合并进请求头。
     headers: Dict[str, str] = field(default_factory=dict)
 
+    # --- 站点级代理策略 ---
+    # inherit = 跟随全局设置（默认）
+    # direct  = 这个站点强制直连（比如国内站点不需要代理）
+    # custom  = 这个站点用 proxy_url 里的地址
+    proxy_mode: str = PROXY_INHERIT
+    proxy_url: str = ''
+
     # --- 凭据（加密后存） ---
     username: str = ''
     password_enc: str = ''
@@ -218,6 +225,8 @@ class SiteConfig:
             success_keywords=list(d.get('success_keywords') or []),
             fail_keywords=list(d.get('fail_keywords') or []),
             headers=dict(d.get('headers') or {}),
+            proxy_mode=str(d.get('proxy_mode') or PROXY_INHERIT),
+            proxy_url=str(d.get('proxy_url') or ''),
             username=d.get('username', ''),
             password_enc=d.get('password_enc', ''),
             cookie_enc=d.get('cookie_enc', ''),
@@ -228,6 +237,38 @@ class SiteConfig:
             cookie_error=d.get('cookie_error', '') or '',
             state=dict(d.get('state') or {}),
         )
+
+
+def resolve_site_proxy(site: 'SiteConfig', global_proxy: str,
+                       global_mode: str = PROXY_DIRECT) -> str:
+    """算出某个站点最终该用哪个代理地址。
+
+    返回空串表示直连。规则：
+        inherit -> 跟随全局（全局是 direct 就用空；是 custom 就用全局地址）
+        direct  -> 强制直连（返回空串）
+        custom  -> 用站点自己的 proxy_url
+
+    单独抽成函数是因为它决定"这个站点走不走代理"，
+    是排查"为什么这个站点连不上"时第一个要看的东西，
+    必须只有一处实现、可单测。
+    """
+    mode = (site.proxy_mode or PROXY_INHERIT).strip().lower()
+    if mode == PROXY_DIRECT:
+        return ''
+    if mode == PROXY_CUSTOM:
+        return (site.proxy_url or '').strip()
+    # inherit
+    if (global_mode or '').strip().lower() == PROXY_DIRECT:
+        return ''
+    return (global_proxy or '').strip()
+
+
+def effective_global_proxy(proxy: str, mode: str) -> str:
+    """全局代理的实际生效值：模式为直连时一律返回空串。"""
+    if (mode or '').strip().lower() == PROXY_DIRECT:
+        return ''
+    return (proxy or '').strip()
+
 
 
 @dataclass
@@ -339,7 +380,13 @@ class AppConfig:
     """全局配置。"""
 
     version: int = 1
-    # 全局代理（用户已做分流，所有站点统一走它）
+    # 全局代理开关：'direct' = 全部直连（不需要填地址）；
+    #              'custom' = 走下面填的代理地址。
+    # 为什么把"直连"也做成显式选项：以前只靠"地址留空"表示直连，
+    # 用户从模板复制来的占位符地址会被当成真实代理，报错还是
+    # "域名解析失败"，看起来像 DNS 故障（实测踩过）。
+    proxy_mode: str = PROXY_DIRECT
+    # 全局代理地址（proxy_mode='custom' 时才使用）
     proxy: str = ''
     timezone: str = 'Asia/Shanghai'
     # 内置浏览器可执行文件路径；留空则自动探测
@@ -377,6 +424,7 @@ class AppConfig:
     def to_dict(self, include_secrets: bool = True) -> Dict[str, Any]:
         d = {
             'version': self.version,
+            'proxy_mode': self.proxy_mode,
             'proxy': self.proxy,
             'timezone': self.timezone,
             'browser_path': self.browser_path,
@@ -402,9 +450,16 @@ class AppConfig:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'AppConfig':
+        # 旧配置没有 proxy_mode：有地址就视为"走代理"，没地址就直连。
+        # 这样升级后行为不变，不会突然把已有代理关掉。
+        raw_proxy = d.get('proxy', '') or ''
+        mode = d.get('proxy_mode')
+        if not mode:
+            mode = PROXY_CUSTOM if raw_proxy.strip() else PROXY_DIRECT
         return AppConfig(
             version=int(d.get('version', 1)),
-            proxy=d.get('proxy', '') or '',
+            proxy_mode=str(mode),
+            proxy=raw_proxy,
             timezone=d.get('timezone', 'Asia/Shanghai'),
             browser_path=d.get('browser_path', '') or '',
             headless=bool(d.get('headless', True)),

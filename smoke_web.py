@@ -128,9 +128,30 @@ try:
     m = re.search(r'AUTO_REFRESH_MS\s*=\s*(\d+)', html)
     if m:
         ms = int(m.group(1))
-        check('自动刷新间隔已放长（>=60 秒）', ms >= 60000, 'AUTO_REFRESH_MS=%d' % ms)
+        check('自动刷新间隔为 60 秒', ms == 60000, 'AUTO_REFRESH_MS=%d' % ms)
     else:
         check('自动刷新间隔有命名常量（便于调整）', False, '没找到 AUTO_REFRESH_MS')
+
+    # ---- 代理：全局"直连/走代理" + 站点级三选一 ----
+    check('设置页有全局联网方式单选', 'name="set_pmode"' in html
+          and 'value="direct"' in html and 'value="custom"' in html)
+    check('设置页按模式显隐代理地址框', 'set_proxyBox' in html and 'swGlobalProxy' in html)
+    check('站点表单有站点级代理三选一',
+          "value=\\\"inherit\\\"" in html or 'value="inherit"' in html)
+    check('站点表单按模式显隐独立代理地址', 'swSiteProxy' in html)
+
+    # 刷新时不该重建 DOM（这是"动不动就刷新"的根治）
+    check('列表用结构签名判断是否需要重建',
+          'sitesSignature' in html and '_sitesSig' in html)
+
+    st, body = get('/api/settings')
+    stt = json.loads(body) if isinstance(body, bytes) else body
+    check('设置接口回传 proxy_mode', 'proxy_mode' in stt, str(stt)[:120])
+
+    st, body = get('/api/sites')
+    one = (json.loads(body)['sites'] or [{}])[0]
+    check('站点列表回传 proxy_mode', 'proxy_mode' in one, str(one)[:120])
+    check('站点列表回传 proxy_url', 'proxy_url' in one)
 
     # 用 HTML 解析器确认脚本闭合正常
     from html.parser import HTMLParser

@@ -449,8 +449,14 @@ class WebApp:
     # ------------------------------------------------------------------
     def _apply_settings(self, cfg, body: Dict[str, Any]) -> None:
         """把界面提交的设置写进配置；空字符串表示"不修改"凭据。"""
+        if 'proxy_mode' in body:
+            mode = str(body.get('proxy_mode') or '').lower()
+            cfg.proxy_mode = mode if mode in ('direct', 'custom') else 'direct'
         if 'proxy' in body:
             cfg.proxy = str(body.get('proxy') or '')
+        # 选了"直连"却还留着地址：不报错，但地址不参与生效
+        # （effective_global_proxy 会按模式返回空串）。
+        # 界面那边会把地址框隐藏起来，所以正常不会出现这种情况。
         if 'headless' in body:
             cfg.headless = bool(body['headless'])
         if 'remote_cdp_url' in body:
@@ -1225,9 +1231,20 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 <section id="tab-settings" class="hide">
   <div class="card">
     <h2>网络</h2>
-    <label>全局代理（所有站点与浏览器统一走它）</label>
-    <input id="set_proxy" placeholder="http://10.0.0.1:7890（留空＝直连）">
-    <div class="hint">代理已做分流时，填代理地址即可；不填则直连。</div>
+    <label>联网方式</label>
+    <div class="radios">
+      <label><input type="radio" name="set_pmode" value="direct"
+        onchange="swGlobalProxy()">直连（不走代理）</label>
+      <label><input type="radio" name="set_pmode" value="custom"
+        onchange="swGlobalProxy()">走代理</label>
+    </div>
+    <div id="set_proxyBox" style="margin-top:10px">
+      <label>代理地址</label>
+      <input id="set_proxy" placeholder="http://10.0.0.1:7890">
+      <div class="hint">填了才生效。留空或选「直连」都表示不走代理。</div>
+    </div>
+    <div class="hint">个别站点可以单独设置走不走代理 —— 到「站点」页点该站点的
+      「编辑」，在「联网方式」里改。</div>
     <div class="row">
       <div><label>浏览器无头模式</label>
         <select id="set_headless"><option value="1">开启（推荐）</option>
@@ -1491,67 +1508,159 @@ function cookieTag(s){
   return '<span class="tag ok">已配置登录</span>';
 }
 
-function loadSites(){
+/* 站点列表的结构快照。
+   为什么需要它：loadSites 原来每次都 `innerHTML = ...` 把整个列表
+   （连同打开的编辑表单）销毁重建 —— 即使数据没变也一样。
+   后果是页面闪烁、输入焦点丢失、已打开的 select 被关掉、滚动位置重置。
+   用户反馈的"动不动就刷新、填不了"就是这个原因。
+   现在只有结构真的变了才重建；只是"下次运行时间"这类变动就地更新。 */
+var _sitesSig = '';
+/* 用户主动操作（切换编辑、恢复备份等）后要强制重建一次。
+   GET /api/sites 里的 next_run_at 每次都变，所以不能拿它算签名。 */
+var _forceSitesRefresh = false;
+
+var VOLATILE_FIELDS = ['next_run_at', 'last_success_at', 'cookie_checked_at'];
+
+function sitesSignature(sites){
+  var stable = (sites||[]).map(function(s){
+    var c = {};
+    for(var k in s){
+      if(Object.prototype.hasOwnProperty.call(s,k) && VOLATILE_FIELDS.indexOf(k)<0){
+        c[k] = s[k];
+      }
+    }
+    return c;
+  });
+  return JSON.stringify(stable);
+}
+
+function loadSites(force){
+  if(force) _forceSitesRefresh = true;
   api('GET','/api/sites').then(function(d){
-    var cards = (d.sites||[]).map(function(s){
-      var open = (OPEN_SITE === s.id);
-      var state = s.enabled? '<span class="tag ok">启用</span>'
-                           : '<span class="tag">停用</span>';
-      var sch = s.mode==='success_based'
-        ? ('上次成功后 ' + s.retry_interval_minutes + ' 分钟')
-        : ('每天 ' + String(s.daily_hour).padStart(2,'0') + ':' +
-           String(s.daily_minute).padStart(2,'0'));
-      if(s.jitter_enabled) sch += '（±随机）';
-      var badges = '';
-      if(s.need_browser) badges += ' <span class="tag">浏览器</span>';
-      if(!s.verify_ssl) badges += ' <span class="tag">放宽证书</span>';
-      if(s.kind==='custom') badges += ' <span class="tag">自建</span>';
-      if(s.step_count) badges += ' <span class="tag">'+s.step_count+' 步</span>';
-      if(s.headers && Object.keys(s.headers).length)
-        badges += ' <span class="tag">自定义头 '+Object.keys(s.headers).length+'</span>';
+    var sites = d.sites || [];
+    var sig = sitesSignature(sites);
+    var same = (sig === _sitesSig) && !_forceSitesRefresh;
 
-      var fail = '';
-      if(s.consecutive_failures)
-        fail += ' <span class="tag err">连败 '+s.consecutive_failures+'</span>';
-      if(s.disabled_reason)
-        fail += '<div class="hint" style="color:#c0392b">'+esc(s.disabled_reason)+'</div>';
-      if(s.ai_consecutive_failures)
-        fail += '<div class="hint">AI 分析失败 '+s.ai_consecutive_failures+' 次'
-              + (s.last_ai_error? ('：'+esc(s.last_ai_error)) : '') + '</div>';
-
-      var html = '<div class="site'+(open?' open':'')+'" id="site-'+esc(s.id)+'">'
-        + '<div class="hd"><div>'
-        +   '<div class="nm">'+esc(s.name)+' '+cookieTag(s)+'</div>'
-        +   '<div class="meta">'+esc(s.id)+badges+'</div>'
-        +   '<div class="meta">'+state+' · '+esc(sch)
-        +     ' · 下次 '+esc(fmtTime(s.next_run_at))+fail+'</div>'
-        + '</div><div class="acts">'
-        +   '<button class="b" onclick="runSite(\''+esc(s.id)+'\')">立即</button>'
-        +   '<button class="b" onclick="toggleSite(\''+esc(s.id)+'\','+(s.enabled?0:1)+')">'
-        +     (s.enabled?'停用':'启用')+'</button>'
-        +   '<button class="b'+(open?' pri':'')+'" onclick="toggleEdit(\''+esc(s.id)+'\')">'
-        +     (open?'收起':'编辑')+'</button>'
-        +   '<button class="b danger" onclick="delSite(\''+esc(s.id)+'\')">删除</button>'
-        + '</div></div>'
-        + '<div id="form-'+esc(s.id)+'">'+(open? '<div class="hint">加载表单…</div>':'')
-        + '</div></div>';
-      return html;
-    }).join('');
-    $('siteRows').innerHTML = cards || '<div class="mut">还没有站点</div>';
-    if(OPEN_SITE) renderSiteForm(OPEN_SITE);
+    if(same){
+      /* 结构没变：只就地更新"下次运行"和登录状态标签，
+         绝不碰 DOM 结构 —— 正在编辑的表单、焦点、滚动位置全都保住。 */
+      sites.forEach(function(s){
+        var el = $('site-'+s.id+'_next');
+        if(el) el.textContent = '下次 ' + fmtTime(s.next_run_at);
+      });
+      updateCookieTags(sites);
+      return;
+    }
+    _sitesSig = sig;
+    _forceSitesRefresh = false;
+    renderSiteRows(sites);
   }).catch(function(e){
     $('siteRows').innerHTML = '<div class="err">'+esc(e.message)+'</div>';
   });
 }
 
+/* 就地刷新卡片上的登录状态标签（不重建 DOM） */
+function updateCookieTags(sites){
+  sites.forEach(function(s){
+    var el = $('site-'+s.id+'_ck');
+    if(el) el.innerHTML = cookieTag(s);
+  });
+}
+
+function renderSiteRows(sites){
+  var cards = sites.map(function(s){
+    var open = (OPEN_SITE === s.id);
+    var state = s.enabled? '<span class="tag ok">启用</span>'
+                         : '<span class="tag">停用</span>';
+    var sch = s.mode==='success_based'
+      ? ('上次成功后 ' + s.retry_interval_minutes + ' 分钟')
+      : ('每天 ' + String(s.daily_hour).padStart(2,'0') + ':' +
+         String(s.daily_minute).padStart(2,'0'));
+    if(s.jitter_enabled) sch += '（±随机）';
+    var badges = '';
+    if(s.need_browser) badges += ' <span class="tag">浏览器</span>';
+    if(!s.verify_ssl) badges += ' <span class="tag">放宽证书</span>';
+    if(s.kind==='custom') badges += ' <span class="tag">自建</span>';
+    if(s.step_count) badges += ' <span class="tag">'+s.step_count+' 步</span>';
+    if(s.headers && Object.keys(s.headers).length)
+      badges += ' <span class="tag">自定义头 '+Object.keys(s.headers).length+'</span>';
+    var pm = s.proxy_mode || 'inherit';
+    if(pm === 'direct') badges += ' <span class="tag">直连</span>';
+    else if(pm === 'custom') badges += ' <span class="tag">独立代理</span>';
+
+    var fail = '';
+    if(s.consecutive_failures)
+      fail += ' <span class="tag err">连败 '+s.consecutive_failures+'</span>';
+    if(s.disabled_reason)
+      fail += '<div class="hint" style="color:#c0392b">'+esc(s.disabled_reason)+'</div>';
+    if(s.ai_consecutive_failures)
+      fail += '<div class="hint">AI 分析失败 '+s.ai_consecutive_failures+' 次'
+            + (s.last_ai_error? ('：'+esc(s.last_ai_error)) : '') + '</div>';
+
+    return '<div class="site'+(open?' open':'')+'" id="site-'+esc(s.id)+'">'
+      + '<div class="hd"><div>'
+      +   '<div class="nm">'+esc(s.name)+' <span id="site-'+esc(s.id)+'_ck">'
+      +     cookieTag(s)+'</span></div>'
+      +   '<div class="meta">'+esc(s.id)+badges+'</div>'
+      +   '<div class="meta">'+state+' · '+esc(sch)
+      +     ' · <span id="site-'+esc(s.id)+'_next">下次 '+esc(fmtTime(s.next_run_at))
+      +     '</span>'+fail+'</div>'
+      + '</div><div class="acts">'
+      +   '<button class="b" onclick="runSite(\''+esc(s.id)+'\')">立即</button>'
+      +   '<button class="b" onclick="toggleSite(\''+esc(s.id)+'\','+(s.enabled?0:1)+')">'
+      +     (s.enabled?'停用':'启用')+'</button>'
+      +   '<button class="b'+(open?' pri':'')+'" onclick="toggleEdit(\''+esc(s.id)+'\')">'
+      +     (open?'收起':'编辑')+'</button>'
+      +   '<button class="b danger" onclick="delSite(\''+esc(s.id)+'\')">删除</button>'
+      + '</div></div>'
+      + '<div id="form-'+esc(s.id)+'">'+(open? '<div class="hint">加载表单…</div>':'')
+      + '</div></div>';
+  }).join('');
+  $('siteRows').innerHTML = cards || '<div class="mut">还没有站点</div>';
+  if(OPEN_SITE) renderSiteForm(OPEN_SITE);
+}
+
 /* 展开 / 收起某个站点的编辑表单（其他站点自动下推） */
 function toggleEdit(id){
   OPEN_SITE = (OPEN_SITE === id) ? '' : id;
+  /* 用户主动操作：强制重建一次，让展开状态立刻生效 */
+  _forceSitesRefresh = true;
+  _formDirty = false;
+  _pendingSitesRefresh = false;
   loadSites();
 }
 
-function _sw(id, label, on, onchange){
-  return '<label class="sw'+(on?'':' off')+'" for="'+id+'">'
+/* 单选组的小工具：按名字取/设值。
+   表单里多处用到（联网方式、签到时间），统一在此实现。 */
+function radioValue(name){
+  var el = document.querySelector('input[name="'+name+'"]:checked');
+  return el ? el.value : '';
+}
+function setRadio(name, value){
+  var list = document.querySelectorAll('input[name="'+name+'"]');
+  for(var i = 0; i < list.length; i++){
+    list[i].checked = (list[i].value === value);
+  }
+}
+/* 代理地址框只在选「走代理」时可用，避免"选了直连却还留着旧地址"的困惑 */
+function swGlobalProxy(){
+  var mode = radioValue('set_pmode');
+  var box = $('set_proxyBox');
+  var inp = $('set_proxy');
+  var on = (mode === 'custom');
+  if(box) box.style.display = on ? '' : 'none';
+  if(inp) inp.disabled = !on;
+}
+/* 站点表单里的同款逻辑 */
+function swSiteProxy(id){
+  var p = 'f_'+id+'_';
+  var mode = radioValue(p+'pmode');
+  var box = $(p+'proxyBox');
+  var on = (mode === 'custom');
+  if(box) box.style.display = on ? '' : 'none';
+}
+
+function _sw(id, label, on, onchange){  return '<label class="sw'+(on?'':' off')+'" for="'+id+'">'
     + '<input type="checkbox" id="'+id+'"'+(on?' checked':'')
     + ' onchange="'+onchange+'">'
     + '<span class="track"></span><span class="lb">'+esc(label)+'</span></label>';
@@ -1604,6 +1713,9 @@ function flushCookieMsg(id){
 function siteFormHtml(s, c){
   var id = s.id, p = 'f_'+id+'_';
   var isDaily = (s.mode !== 'success_based');
+  /* 站点级代理模式。老数据可能是空串，当作"跟随全局"处理 */
+  var sitePmode = s.proxy_mode || 'inherit';
+  if(['inherit','direct','custom'].indexOf(sitePmode) < 0) sitePmode = 'inherit';
 
   /* ---- 登录状态区 ---- */
   var ckStatus;
@@ -1734,6 +1846,28 @@ function siteFormHtml(s, c){
   +   '</div>'
   + '</div>'
 
+  + '<div class="fsec"><h4>联网方式</h4>'
+  +   '<div class="hint" style="margin:0 0 4px">这个站点单独走不走代理。'
+  +     '国内站点一般直连即可；被墙或被污染的域名需要走代理。</div>'
+  +   '<div class="radios">'
+  +     '<label><input type="radio" name="'+p+'pmode" value="inherit"'
+  +       (sitePmode==='inherit'?' checked':'')
+  +       ' onchange="swSiteProxy(\''+id+'\')">跟随全局设置</label>'
+  +     '<label><input type="radio" name="'+p+'pmode" value="direct"'
+  +       (sitePmode==='direct'?' checked':'')
+  +       ' onchange="swSiteProxy(\''+id+'\')">强制直连</label>'
+  +     '<label><input type="radio" name="'+p+'pmode" value="custom"'
+  +       (sitePmode==='custom'?' checked':'')
+  +       ' onchange="swSiteProxy(\''+id+'\')">用这个代理</label>'
+  +   '</div>'
+  +   '<div id="'+p+'proxyBox" style="margin-top:8px;'
+  +     (sitePmode==='custom'?'':'display:none')+'">'
+  +     '<label>代理地址</label>'
+  +     '<input id="'+p+'proxy" placeholder="http://10.0.0.1:7890" value="'
+  +       esc(s.proxy_url||'')+'">'
+  +   '</div>'
+  + '</div>'
+
   + '<div class="fsec"><h4>自定义请求头</h4>'
   +   '<div class="hint" style="margin:0 0 6px">有些站点的接口会校验来源，'
   +     '缺了会返回 403。内置站点已预置好，一般不用改。</div>'
@@ -1817,6 +1951,8 @@ function saveSite(id){
     ai_enabled: $(p+'aiOn').checked,
     ai_after_failures: parseInt($(p+'aiN').value||'3',10),
     notify: $(p+'notify').value,
+    proxy_mode: radioValue(p+'pmode') || 'inherit',
+    proxy_url: ($(p+'proxy') ? $(p+'proxy').value.trim() : ''),
     headers: collectHeaders(id)
   };
   api('POST','/api/site',patch).then(function(){
@@ -2190,7 +2326,12 @@ function currentEditId(){
   return s ? s.id.replace('site-', '') : '';
 }
 
-/* 定时刷新走到这里：有未保存改动就跳过，不让用户白填 */
+/* 定时/手动刷新。
+   保护策略分两层：
+     1. 数据没变 -> loadSites 直接跳过 DOM 重建（主要防线，见 loadSites）
+     2. 数据变了但用户正在编辑 -> 记下待办，先不重建，
+        避免把填到一半的内容冲掉；编辑结束（保存/取消）后再补刷新
+   这样既不会"动不动就刷新"，也不会因为怕刷新而丢掉数据变化。 */
 function refreshAll(){
   loadOverview();
   if(formIsOpen() && (_formDirty || formHasEdits())){
@@ -2199,8 +2340,8 @@ function refreshAll(){
     var el = $('f_'+id+'_ckmsg');
     if(el && !el.textContent){
       show('f_'+id+'_ckmsg',
-           '检测到你正在编辑，已暂停自动刷新，内容不会被冲掉。'
-           + '保存或取消后自动恢复。', '');
+           '检测到你正在编辑，已暂停刷新列表，内容不会被冲掉。'
+           + '保存或取消后会自动刷新。', '');
     }
     return;
   }
@@ -2315,6 +2456,9 @@ function loadSettings(){
   api('GET','/api/settings').then(function(d){
     SETTINGS = d;
     $('set_proxy').value = d.proxy || '';
+    /* 代理模式：没填地址时默认显示「直连」 */
+    setRadio('set_pmode', d.proxy_mode || (d.proxy ? 'custom' : 'direct'));
+    swGlobalProxy();
     $('set_headless').value = d.headless ? '1' : '0';
     $('set_cdp').value = d.remote_cdp_url || '';
     var n = d.notify || {};
@@ -2473,6 +2617,7 @@ function collectNotify(){
 
 function saveSettings(){
   var body = {
+    proxy_mode: radioValue('set_pmode') || 'direct',
     proxy: $('set_proxy').value.trim(),
     headless: $('set_headless').value === '1',
     remote_cdp_url: $('set_cdp').value.trim(),
@@ -2524,12 +2669,13 @@ function restoreNow(){
 
 /* ---------------- 启动 ---------------- */
 boot();
-/* 自动刷新间隔。
-   原来是 30 秒，用户反馈"还没填完就被刷新，填不了"，所以：
-     1. 放长到 120 秒
-     2. refreshAll 内部会在有未保存改动时自动跳过（见上面的 refreshAll）
-   想改回更快，把下面的 120000 调小即可。 */
-var AUTO_REFRESH_MS = 120000;
+/* 定时刷新。
+   现在刷新本身是安全的：loadSites 会在数据没变时完全跳过 DOM 重建，
+   所以固定的 60 秒刷新不会再把正在填的表单冲掉。
+   只有数据真的变了（比如调度跑完、连败计数变化）才重建，
+   而且重建时也会把已展开的表单恢复出来。
+   （用户要求：间隔改 60 秒；"动不动就刷新"的问题由上面的守卫解决） */
+var AUTO_REFRESH_MS = 60000;
 setInterval(function(){
   if($('mainBody').className === '') refreshAll();
 }, AUTO_REFRESH_MS);

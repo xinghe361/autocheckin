@@ -75,9 +75,15 @@ class Service:
         cfg = self.store.load_config()
         if not cfg.sites:
             cfg.sites = builtin_sites()
-        # 环境变量里的代理优先于配置文件（方便 compose 统一控制）
+        # 环境变量里的代理优先于配置文件（方便 compose 统一控制）。
+        # 注意：只有配置里还没设代理时才顶上去，否则会覆盖掉用户在
+        # 网页「设置 → 网络」里的选择（网页改完却"不生效"就是这么来的）。
+        from .models import PROXY_CUSTOM, PROXY_INHERIT
         if self.proxy and not cfg.proxy:
             cfg.proxy = self.proxy
+            if (cfg.proxy_mode or '').lower() in ('', PROXY_INHERIT,
+                                                 'direct', 'none'):
+                cfg.proxy_mode = PROXY_CUSTOM
         return cfg
 
     def save_config(self, cfg: AppConfig) -> None:
@@ -86,8 +92,13 @@ class Service:
     def make_runner(self, cfg: AppConfig) -> Runner:
         if self._runner_factory:
             return self._runner_factory(self)
+        # 全局代理：模式为"直连"时一律传空串。
+        # 这样"选了直连但地址栏还留着旧地址"也不会意外走代理。
+        from .models import effective_global_proxy
         return Runner(self.store, box=self.box, browser=self.browser,
-                      proxy=cfg.proxy or self.proxy, version=self.version)
+                      proxy=effective_global_proxy(cfg.proxy, cfg.proxy_mode),
+                      version=self.version,
+                      global_proxy_mode=cfg.proxy_mode)
 
     def load_state(self) -> RuntimeState:
         return self.store.load_state()
@@ -132,6 +143,9 @@ class Service:
                 'cookie_status': int(s.cookie_status or 0),
                 'cookie_updated_at': int(s.cookie_updated_at or 0),
                 'headers': dict(s.headers or {}),
+                # 站点级代理策略：界面要显示"直连 / 独立代理"标签
+                'proxy_mode': s.proxy_mode or 'inherit',
+                'proxy_url': s.proxy_url or '',
                 # AI 相关状态：便于界面解释"为什么这个站点不跑了"
                 'ai_consecutive_failures': int(st.get('ai_consecutive_failures') or 0),
                 'last_ai_error': st.get('last_ai_error') or '',
@@ -155,9 +169,12 @@ class Service:
         if 'name' in data and data['name']:
             site.name = str(data['name'])
         for k in ('homepage', 'template', 'kind', 'mode', 'notify',
-                  'notify_override'):
+                  'notify_override', 'proxy_mode'):
             if k in data and data[k] is not None:
                 setattr(site, k, str(data[k]))
+        # 站点级独立代理地址（只在 proxy_mode='custom' 时生效）
+        if 'proxy_url' in data and data['proxy_url'] is not None:
+            site.proxy_url = str(data['proxy_url'])
         for k in ('enabled', 'need_browser', 'verify_ssl', 'jitter_enabled',
                   'retry_enabled', 'ai_enabled'):
             if k in data and data[k] is not None:
@@ -630,9 +647,13 @@ class Service:
     def overview(self) -> Dict[str, Any]:
         cfg = self.load_config()
         state = self.load_state()
+        from .models import effective_global_proxy
+        eff = effective_global_proxy(cfg.proxy, cfg.proxy_mode)
         return {
             'version': self.version,
-            'proxy_configured': bool(cfg.proxy or self.proxy),
+            # 是否"真的"在走代理：模式为直连时，哪怕地址栏还留着旧地址也算未启用
+            'proxy_configured': bool(eff),
+            'proxy_mode': cfg.proxy_mode,
             'site_count': len(cfg.sites),
             'enabled_count': sum(1 for s in cfg.sites if s.enabled),
             'notify_channels': notify_mod.configured_channels(cfg.notify),
