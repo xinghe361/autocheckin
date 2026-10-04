@@ -39,8 +39,34 @@ WebDAV 备份，以及**录制你的操作**来新增任意站点。
 
 ### 1. 用 Compose 启动（推荐 host 网络模式）
 
-在极空间 Docker 界面新建「编排 / Compose」，粘贴 [docker-compose.yml](docker-compose.yml)，
-把 `image` 换成你自己的镜像名，启动。
+在极空间 Docker 界面新建「编排 / Compose」，粘贴 [docker-compose.yml](docker-compose.yml)
+的内容，启动。核心就这几行：
+
+```yaml
+services:
+  autocheckin:
+    image: xinghe361/autocheckin:latest
+    container_name: autocheckin
+    restart: unless-stopped
+    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    shm_size: "256m"
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=28999
+      - DATA_DIR=/data
+      - PROXY=http://你的代理地址:7890
+    volumes:
+      - ./data:/data
+```
+
+> **`./data` 是相对路径**，相对 compose 文件所在目录。也就是说数据会落在
+> 与 compose 文件同级的 `data/` 文件夹里 —— 整个文件夹可以整体搬走，
+> 不会像命名卷那样藏在 Docker 自己的目录里。
+>
+> ⚠️ **容器侧必须写 `/data`**（要和 `DATA_DIR` 一致）。
+> 写成 `/app/data` 的话数据会写进容器内部，**重建容器就全丢**。
 
 **两种模式对比**：
 
@@ -62,26 +88,32 @@ WebDAV 备份，以及**录制你的操作**来新增任意站点。
 | 镜像 | `xinghe361/autocheckin:latest` |
 | 网络 | **host** |
 | 端口 | 不需要填（host 模式） |
-| 卷 | **装载路径栏会自动填好 `/data`**，你不用打；想指定文件夹就点「添加文件夹」选一个 |
-| 环境 | `TZ=Asia/Shanghai`、`PROXY=http://你的代理:7890` |
+| 卷 | **容器侧填 `/data`**（装载路径栏会自动填好）；宿主侧点「添加文件夹」选一个目录 |
+| 环境 | `TZ=Asia/Shanghai`、`PORT=28999`、`DATA_DIR=/data`、`PROXY=http://你的代理:7890` |
 
-> **关于数据目录（安装时最省事的做法）**
+> **关于数据目录**
 >
-> 镜像里声明了 `VOLUME ["/data"]`，所以极空间创建容器时**会在「装载路径」栏自动填好 `/data`**。
-> 你有两种选择：
+> 镜像里声明了 `VOLUME ["/data"]`，所以**容器侧（装载路径）会自动填好 `/data`**，
+> 你不用打。要决定的是**宿主侧放在哪**：
 >
-> | 做法 | 要不要操作 | 数据在哪 |
+> | 做法 | 数据在哪 | 适合 |
 > |---|---|---|
-> | **不添加任何挂载** | 什么都不用做 | Docker 的命名卷里（自动创建） |
-> | **点「添加文件夹」选一个目录** | 选一次文件夹 | 你自己的共享文件夹里 |
+> | Compose 里用 `./data:/data` | 与 compose 文件同级的 `data/` 目录 | 想整体搬走、直接看得到 |
+> | 点「添加文件夹」选一个目录 | 你自己的共享文件夹里 | 想放到某块特定数据盘 |
+> | 不添加挂载 | Docker 命名卷里（自动创建） | 完全不想管 |
 >
-> **推荐选文件夹**：这里存的是站点密码、加密密钥和签到状态，
-> 放在共享文件夹里文件管理器能看见、能直接复制备份、系统重装也跟着备份。
+> **都行**，因为容器里 `DATA_DIR=/data`，只要卷挂到 `/data` 就落盘。
 >
-> ⚠️ **不要选 `/data/...`**：那是系统分区，空间很小，写满会影响整台 NAS。
-> 极空间的盘符是"每块磁盘一个"（形如 `/data_XXXXXXXX/data/`），用界面选目录最稳妥。
+> ⚠️ **两个容易犯的错**：
+> 1. **宿主侧别选 `/data/...`** —— 那是系统分区，空间很小
+>    （实测该 NAS 的 `/` 只剩几百 MB），写满会影响整台 NAS。
+>    极空间的盘符是"每块磁盘一个"（形如 `/data_XXXXXXXX/data/`）。
+> 2. **容器侧别写成 `/app/data`** —— 那和 `DATA_DIR=/data` 不是同一个目录，
+>    数据会写进容器内部，**容器一重建就全丢**。
+>    （容器里代码在 `/app/app`，很容易顺手写错。）
 >
-> 命名卷的备份命令写在 [docker-compose.yml](docker-compose.yml) 的注释里。
+> 用命名卷时的备份命令写在 [docker-compose.yml](docker-compose.yml) 注释里；
+> 用 `./data` 的话直接复制那个文件夹即可。
 
 ### 2. 打开网页界面
 

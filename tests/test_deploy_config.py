@@ -52,18 +52,94 @@ class TestComposeFile(unittest.TestCase):
     def test_data_volume_mounts_to_data(self):
         """必须把某个卷挂到容器内 /data —— 镜像声明的就是 /data。
 
-        允许两种写法：
-          * 命名卷   autocheckin-data:/data   （零配置，Docker 自己管）
-          * 绑定挂载 /绝对路径:/data          （数据可见、方便备份）
-        但容器内那侧必须是 /data，否则数据不落盘、重启就全丢。
+        允许三种写法：
+          * 命名卷      autocheckin-data:/data   （零配置，Docker 自己管）
+          * 绝对路径绑定 /绝对路径:/data          （数据放到指定磁盘）
+          * 相对路径绑定 ./data:/data            （随 compose 文件走，可整体搬走）
+        但【容器内那侧必须是 /data】，否则数据不落盘、容器一重建就全丢。
+        踩过的坑：容器里代码在 /app/app，很容易顺手写成 /app/data，
+        那样数据写进镜像层，重建即丢。
         """
-        named = re.search(r'-\s+([A-Za-z0-9_.-]+):(/data)\b', self.body)
-        bind = re.search(r'-\s+(/[^\s:]+):(/data)\b', self.body)
-        self.assertTrue(named or bind,
-                        'compose 里必须有卷挂载到容器内 /data')
-        if bind:
-            self.assertTrue(bind.group(1).startswith('/'),
-                            '绑定挂载的宿主侧应为绝对路径')
+        mounts = re.findall(r'-\s+(\S+?):(/[^\s:]+)', self.body)
+        targets = [t for _, t in mounts]
+        self.assertIn('/data', targets,
+                      'compose 里必须有卷挂载到容器内 /data，'
+                      '当前挂载目标：%s' % (targets or '无'))
+        for src, tgt in mounts:
+            if tgt == '/data':
+                self.assertTrue(src.startswith('/') or src.startswith('./')
+                                or src.startswith('../'),
+                                '宿主侧写法异常：%s' % src)
+
+    def test_data_dir_matches_mount_point(self):
+        """DATA_DIR 必须与挂载的容器侧路径一致。
+
+        不一致时程序会把数据写到别处（镜像层），表现为"配置重启就没了"。
+        """
+        m = re.search(r'DATA_DIR[=:]\s*["\']?([^"\'\s]+)', self.body)
+        if not m:
+            self.skipTest('compose 里没有显式 DATA_DIR（用镜像默认值）')
+        mounts = [t for _, t in re.findall(r'-\s+(\S+?):(/[^\s:]+)', self.body)]
+        self.assertIn(m.group(1), mounts,
+                      'DATA_DIR=%s 与挂载点 %s 不一致'
+                      % (m.group(1), mounts))
+
+    def test_relative_bind_mount_is_supported(self):
+        """相对路径绑定挂载（./data:/data）必须能通过校验。
+
+        这是用户明确要的用法：数据放在 compose 文件旁边，
+        整个文件夹可以整体搬走，不会像命名卷那样藏在 Docker 目录里。
+        """
+        sample = (
+            'services:\n'
+            '  autocheckin:\n'
+            '    image: x:latest\n'
+            '    volumes:\n'
+            '      - ./data:/data\n'
+            '    environment:\n'
+            '      - DATA_DIR=/data\n'
+        )
+        vols = re.findall(r'-\s+(\S+?):(/[^\s:]+)', sample)
+        self.assertEqual(vols, [('./data', '/data')],
+                         '相对路径绑定挂载没被正确解析：%s' % vols)
+
+    def test_validator_rejects_wrong_mount_target(self):
+        """把数据挂到 /app/data 必须被判为错误 —— 那是本项目最易犯的错。
+
+        注意：判定必须只针对 volumes 段，不能拿全文去正则。
+        踩过的坑：PROXY=http://192.168.1.1:7890 这种值会被 `- x:y` 的宽正则
+        误当成挂载项，导致检查得出莫名其妙的结论。
+        """
+        # 复刻校验脚本的做法：只取 volumes: 段里的列表项
+        def mounts_in(text):
+            lines = text.splitlines()
+            out, inside, base = [], False, 0
+            for line in lines:
+                if not line.strip() or line.lstrip().startswith('#'):
+                    continue
+                indent = len(line) - len(line.lstrip(' '))
+                if line.strip() == 'volumes:':
+                    inside, base = True, indent
+                    continue
+                if inside:
+                    if indent <= base:
+                        break
+                    out.extend(re.findall(r'(\S+?):(/\S+)', line.strip()))
+            return out
+
+        good = mounts_in(self.text)
+        self.assertIn(('./data', '/data'), good,
+                      '当前 compose 的 volumes 段解析结果异常：%s' % good)
+        self.assertEqual([t for _, t in good], ['/data'],
+                         '容器侧应只挂 /data：%s' % good)
+
+        bad_text = self.text.replace('./data:/data', './data:/app/data')
+        self.assertNotEqual(bad_text, self.text, '样例替换没生效，测试失效')
+        bad = mounts_in(bad_text)
+        self.assertNotIn('/data', [t for _, t in bad],
+                         '替换后不该再有 /data 目标：%s' % bad)
+        self.assertIn(('./data', '/app/data'), bad,
+                      '替换后应能解析出 /app/data：%s' % bad)
 
     def test_named_volume_is_declared_at_top_level(self):
         """用了命名卷就必须在顶层 volumes 里声明，否则 compose 报错。
@@ -83,8 +159,15 @@ class TestComposeFile(unittest.TestCase):
                 % name)
 
     def test_essential_env_vars(self):
-        for key in ('TZ:', 'PORT:', 'DATA_DIR:'):
-            self.assertIn(key, self.body, '缺少环境变量 %s' % key)
+        """三个必需的环境变量都要在。
+
+        支持两种 YAML 写法（都是合法的，模板里用的是列表形式）：
+            KEY: value
+            - KEY=value
+        """
+        for key in ('TZ', 'PORT', 'DATA_DIR'):
+            found = (key + ':' in self.body) or (key + '=' in self.body)
+            self.assertTrue(found, '缺少环境变量 %s' % key)
 
     def test_no_credentials_embedded(self):
         """配置文件里不能有任何真实凭据（只检查通用凭据形态）。
