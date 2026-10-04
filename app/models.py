@@ -345,14 +345,23 @@ class WebdavConfig:
 
 @dataclass
 class AiConfig:
-    """DeepSeek 分析设置（连续失败达到阈值时调用）。"""
+    """DeepSeek 分析设置（连续失败达到阈值时调用）。
+
+    防烧 token 的完整策略（按用户要求设计）：
+        每天每个站点最多尝试 N 次（max_attempts_per_day）；
+        用完 N 次后当天只问 AI 一次（ai_calls_per_day）；
+        AI 也没解决 -> 标记"问题站点"，当天不再尝试，并通知；
+        第二天重新开始；若第二天 AI 同样没能解决 -> 暂停该站点并通知。
+        另外还有全局每日调用总量上限（global_max_calls_per_day），
+        防止"很多站点同时坏掉"把额度一次烧光。
+    """
 
     enabled: bool = True
     api_key_enc: str = ''
     base_url: str = 'https://api.deepseek.com'
     model: str = 'deepseek-chat'
     timeout: int = 60
-    # 每天最多分析多少次（防止无限烧 token）
+    # 每天每站点最多分析多少次（防止无限烧 token）
     max_calls_per_day: int = 20
     # 是否允许 AI 直接改写站点流程（false 时只给建议，需人工确认）
     auto_apply: bool = True
@@ -362,6 +371,15 @@ class AiConfig:
     fail_threshold: int = 2
     # 是否启用"AI 也救不回来就停掉该站点"（并推送通知）
     auto_disable: bool = True
+
+    # --- 每天尝试次数上限（用户要求：避免无限重试把额度烧光）---
+    # 启用后，每个站点每天最多尝试这么多次；用完就等第二天。
+    daily_limit_enabled: bool = True
+    max_attempts_per_day: int = 3
+    # 每天允许问 AI 的次数（默认 1 次：试完 N 次后问一次，问不出结果就等明天）
+    ai_calls_per_day: int = 1
+    # 全局每日调用总量上限（跨所有站点）。0 = 不限制。
+    global_max_calls_per_day: int = 20
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

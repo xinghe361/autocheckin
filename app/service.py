@@ -103,6 +103,18 @@ class Service:
     def load_state(self) -> RuntimeState:
         return self.store.load_state()
 
+    @staticmethod
+    def _today_attempts(site_id: str, st: Dict[str, Any]) -> int:
+        """今天这个站点已经尝试了几次（给界面显示"3/3"这种进度）。"""
+        day = (st or {}).get('day') or {}
+        today = time.strftime('%Y-%m-%d')
+        if day.get('date') != today:
+            return 0
+        try:
+            return int(day.get('attempts') or 0)
+        except (TypeError, ValueError):
+            return 0
+
     # ------------------------------------------------------------ 站点
     def list_sites(self) -> List[Dict[str, Any]]:
         """站点列表（含下一次运行时间与连败状态，供界面展示）。"""
@@ -146,6 +158,11 @@ class Service:
                 # 站点级代理策略：界面要显示"直连 / 独立代理"标签
                 'proxy_mode': s.proxy_mode or 'inherit',
                 'proxy_url': s.proxy_url or '',
+                # 当天的问题标记：界面要显示"今天已停止重试"及原因
+                'day_problem': bool(st.get('day_problem')),
+                'day_problem_date': st.get('day_problem_date') or '',
+                'day_problem_reason': st.get('day_problem_reason') or '',
+                'day_attempts': self._today_attempts(s.id, st),
                 # AI 相关状态：便于界面解释"为什么这个站点不跑了"
                 'ai_consecutive_failures': int(st.get('ai_consecutive_failures') or 0),
                 'last_ai_error': st.get('last_ai_error') or '',
@@ -332,8 +349,17 @@ class Service:
 
     # ------------------------------------------------------------ 运行
     def run_now(self, site_id: Optional[str] = None) -> Dict[str, Any]:
-        """立即执行（单个站点或全部到期站点）。"""
+        """立即执行（单个站点或全部到期站点）。
+
+        指定单个站点时，清掉它的"今天已停止重试"标记与当天计数 ——
+        手动点「立即」是个明确意图，不该被自动限流挡住
+        （否则用户会以为功能坏了）。
+        """
         cfg = self.load_config()
+        if site_id:
+            state = self.load_state()
+            state.clear_day_problem(str(site_id))
+            self.store.save_state(state)
         runner = self.make_runner(cfg)
         report = runner.run_once(cfg, only_site=site_id)
         return {

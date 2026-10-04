@@ -157,15 +157,34 @@ class Runner:
         return time.strftime('%Y-%m-%d', time.localtime(now))
 
     # ------------------------------------------------------------------
+    def _daily_limit(self, cfg: AppConfig) -> int:
+        """每个站点每天的尝试次数上限（0 = 不限制）。"""
+        ai = cfg.ai
+        if not getattr(ai, 'daily_limit_enabled', True):
+            return 0
+        try:
+            return max(0, int(getattr(ai, 'max_attempts_per_day', 3) or 3))
+        except (TypeError, ValueError):
+            return 3
+
     def due_sites(self, cfg: AppConfig, state: RuntimeState,
                   now: int) -> List[SiteConfig]:
-        """到点且启用的站点。"""
+        """到点且启用的站点。
+
+        额外过滤"今天已用完尝试次数"的站点 —— 用户要求：
+        每天每个站点最多试 N 次，用完就等第二天，
+        避免一直重试、一直问 AI 把额度烧光。
+        """
+        today = self._today(now)
+        limit = self._daily_limit(cfg)
         out = []
         for site in cfg.sites:
             if not site.enabled:
                 continue
             nxt = state.next_run_at(site.id)
             if nxt and nxt > now:
+                continue
+            if state.day_exhausted(site.id, today, limit):
                 continue
             out.append(site)
         return out
@@ -227,6 +246,11 @@ class Runner:
         result = self.checkin_fn(site, self._proxy_for(site), password,
                                  self.browser, cookie)
 
+        # 记一次"今天的尝试"。用完当天额度后就不再排下一次尝试
+        # （due_sites 会过滤掉），避免一直重试。
+        today = self._today(now)
+        attempts = state.bump_day_attempts(site.id, today)
+
         # 结果回写到调度状态（成功清连败，失败累加）
         next_at = plan_next(sched, now, result.success, self.rng)
         site.apply_schedule_state(sched)
@@ -235,10 +259,32 @@ class Runner:
         run = SiteRun(site_id=site.id, site_name=site.name, result=result,
                       next_run_at=next_at)
 
-        # 连续失败达到阈值 → 请 AI 分析，成功后按新方案执行
+        # 签到成功 -> 清掉"今天的问题站点"与"已暂停"标记。
+        # 这是逻辑闭环：站点恢复后不该继续背着之前的失败标记，
+        # 否则用户会看到"今天已停止重试"这类过期提示，也不知道它已经好了。
+        if result.success:
+            self._clear_problem_flags(site, cfg, state, now, run)
+
+        # 连续失败达到阈值 → 请 AI 分析（每天只问一次，见 _maybe_analyze）
         if not result.success and should_ask_ai(sched):
             run.ai_used = True
             run.ai_note = self._maybe_analyze(site, cfg, state, result, now)
+
+        # 当天额度用完：标记为"今天的问题站点"，通知一次，然后今天不再试。
+        # 第二天 due_sites 会重新放行（day 记录按日期重置）。
+        #
+        # 注意判断条件用的是【日期】而不是 day_problem 这个布尔标记：
+        # 布尔标记第二天仍然为 True，会让"第二天还失败就暂停"的逻辑永远走不到
+        # （这里踩过一次）。
+        limit = self._daily_limit(cfg)
+        today_str = self._today(now)
+        already_marked_today = (
+            state.get_site_flag(site.id, 'day_problem_date') == today_str)
+        if (not result.success and limit and attempts >= limit
+                and not already_marked_today):
+            self._mark_day_problem(site, cfg, state, result, now, attempts, limit)
+            run.ai_note = (run.ai_note + '｜' if run.ai_note else '') + \
+                '今天已尝试 %d 次，不再重试；明天会重新开始' % attempts
 
         # 通知（按策略）
         notify_cfg = cfg.notify
@@ -246,18 +292,139 @@ class Runner:
 
         return run
 
+    def _clear_problem_flags(self, site: SiteConfig, cfg: AppConfig,
+                             state: RuntimeState, now: int, run) -> None:
+        """签到成功后清掉问题标记与 AI 失败计数。
+
+        用户要求：签到成功之后就清除"问题站点"和"暂停"标记。
+
+        说明一个边界：被自动**暂停**（site.enabled=False）的站点不会走到这里，
+        因为 due_sites 会过滤掉停用的站点 —— 它没有"靠成功自愈"的机会。
+        这是刻意的：暂停的目的就是停止消耗，包括不再试、不再问 AI。
+        用户修好后到「站点」页手动「启用」即可。
+        这里清掉的是"当天的问题"标记和 AI 失败计数，
+        让恢复后的站点不再背着过期状态（卡片上不会残留"今天已停止重试"）。
+        """
+        cleared = []
+
+        # 1) 当天的问题标记
+        if state.get_site_flag(site.id, 'day_problem'):
+            cleared.append('今天的问题标记')
+        state.clear_day_problem(site.id)
+
+        # 2) AI 连败计数
+        site.state = dict(site.state or {})
+        if int(site.state.get('ai_consecutive_failures') or 0) > 0:
+            cleared.append('AI 失败计数')
+        site.state['ai_consecutive_failures'] = 0
+        site.state['last_ai_error'] = ''
+        site.state.pop('ai_failed_at', None)
+
+        # 3) 暂停原因（站点仍是启用状态时才会残留，比如用户已手动启用过）
+        if site.state.get('disabled_reason'):
+            cleared.append('暂停标记')
+            site.state.pop('disabled_reason', None)
+            site.state.pop('disabled_at', None)
+
+        if cleared and run is not None:
+            note = '已清除：%s' % '、'.join(cleared)
+            run.ai_note = (run.ai_note + '｜' if run.ai_note else '') + note
+
+    def _mark_day_problem(self, site: SiteConfig, cfg: AppConfig,
+                          state: RuntimeState, result: CheckinResult,
+                          now: int, attempts: int, limit: int) -> None:
+        """标记"今天不再尝试"并推送通知。第二天自动解除。
+
+        如果昨天也发生过同样的事（说明连续两个自然日都修不好），
+        就直接暂停该站点 —— 这是用户要求的"第二天还不行就停掉并通知"。
+        """
+        prev_date = state.get_site_flag(site.id, 'day_problem_date')
+        today = self._today(now)
+        repeated = bool(prev_date) and prev_date != today
+
+        state.set_site_flag(site.id, 'day_problem', True)
+        state.set_site_flag(site.id, 'day_problem_at', int(now))
+        state.set_site_flag(site.id, 'day_problem_date', today)
+        reason = ('今天已尝试 %d 次仍未成功（上限 %d 次），'
+                  '今天不再重试，明天自动重新开始' % (attempts, limit))
+        state.set_site_flag(site.id, 'day_problem_reason', reason)
+
+        # 连续第二天修不好 -> 暂停该站点
+        if repeated and getattr(cfg.ai, 'auto_disable', True) and site.enabled:
+            site.enabled = False
+            site.state['disabled_reason'] = (
+                '连续两天（%s 起）自动修复均失败，已于 %s 暂停；'
+                '请检查站点配置或登录 Cookie 后再手动启用'
+                % (prev_date, time.strftime('%Y-%m-%d %H:%M',
+                                            time.localtime(now))))
+            site.state['disabled_at'] = int(now)
+            if notify_mod.has_any_channel(cfg.notify):
+                body = '\n'.join([
+                    '站点：%s（%s）' % (site.name, site.id),
+                    '失败原因：%s' % (result.message or '未知'),
+                    '',
+                    '连续两天每天尝试 %d 次、并请 AI 分析一次，均未解决，'
+                    '已自动暂停该站点。' % limit,
+                    '不会再消耗 AI 额度。',
+                    '',
+                    '处理建议：检查登录 Cookie 是否失效、或站点是否改版；',
+                    '修好后到「站点」页手动「启用」即可。',
+                ])
+                try:
+                    self.alert_fn(cfg.notify, '自动签到 · 站点已暂停', body,
+                                  self.proxy)
+                except Exception:                               # noqa: BLE001
+                    pass
+            return
+
+        if notify_mod.has_any_channel(cfg.notify):
+            body = '\n'.join([
+                '站点：%s（%s）' % (site.name, site.id),
+                '失败原因：%s' % (result.message or '未知'),
+                '',
+                reason + '。',
+                '如果这个站点已失效，可以到「站点」页停用它；',
+                '若明天仍失败，会自动暂停它并再通知你。',
+            ])
+            try:
+                self.alert_fn(cfg.notify, '自动签到 · 今日已停止重试', body,
+                              self.proxy)
+            except Exception:                                   # noqa: BLE001
+                pass
+
     def _maybe_analyze(self, site: SiteConfig, cfg: AppConfig, state: RuntimeState,
                        result: CheckinResult, now: int) -> str:
         """调用 AI 分析；成功则把补丁写回站点配置。
 
+        token 防护（三层，按用户要求）：
+          1. 每天每站点最多问 AI `ai_calls_per_day` 次（默认 1 次）
+          2. 每天每站点尝试次数上限由 due_sites 把关（默认 3 次）
+          3. 全局每日调用总量上限（默认 20 次），防止多站点同时坏掉烧光额度
         连续 AI 失败达到阈值 → 自动停止该站点签到并推送告警（用户要求）。
+
+        另外实现用户要求的"第二天还是不行就暂停"：
+        如果昨天也被标记为"当天的问题站点"，而今天用完额度、AI 同样没能解决，
+        说明这个站点已经持续两个自然日无法自动修复 -> 暂停它并通知。
         """
         today = self._today(now)
-        calls_today = state.ai_calls_today(site.id, today)
-        if calls_today >= max(1, int(cfg.ai.max_calls_per_day or 20)):
-            return 'AI 分析已达今日上限，跳过'
         if not cfg.ai.enabled:
             return ''
+
+        # ① 每天每站点只问一次（默认）：问过就不再问，等第二天
+        per_day = max(1, int(getattr(cfg.ai, 'ai_calls_per_day', 1) or 1))
+        calls_today = state.ai_calls_today(site.id, today)
+        if calls_today >= per_day:
+            return 'AI 分析今天已问过（每天 %d 次），不再重复；明天再试' % per_day
+        # 保留原来的绝对上限作为第二重保护
+        hard = max(1, int(cfg.ai.max_calls_per_day or 20))
+        if calls_today >= hard:
+            return 'AI 分析已达今日上限，跳过'
+
+        # ③ 全局每日总量上限
+        gcap = int(getattr(cfg.ai, 'global_max_calls_per_day', 20) or 0)
+        if gcap > 0 and state.ai_calls_total_today(today) >= gcap:
+            return ('今天全部站点的 AI 分析已达总量上限（%d 次），'
+                    '不再调用；明天恢复' % gcap)
 
         api_key = self._api_key(cfg)
         if not api_key:
@@ -274,6 +441,7 @@ class Runner:
             self._record_ai_failure(site, cfg, state, 'AI 调用异常：%s' % e, now)
 
         state.bump_ai_calls(site.id, today)
+        state.mark_day_ai_done(site.id, today)
         # 不论是否成功都标记这一档已分析，避免每次失败都重复请求
         sched = site.to_schedule()
         mark_ai_analyzed(sched)

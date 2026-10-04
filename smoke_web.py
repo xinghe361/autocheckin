@@ -125,12 +125,18 @@ try:
     # 而它会重渲染整个站点卡片，把表单里的内容替换掉。
     check('页面有"正在编辑"保护标记', '_formDirty' in html and 'formHasEdits' in html)
     check('自动刷新会跳过未保存的表单', '检测到你正在编辑' in html)
-    m = re.search(r'AUTO_REFRESH_MS\s*=\s*(\d+)', html)
-    if m:
-        ms = int(m.group(1))
-        check('自动刷新间隔为 60 秒', ms == 60000, 'AUTO_REFRESH_MS=%d' % ms)
-    else:
-        check('自动刷新间隔有命名常量（便于调整）', False, '没找到 AUTO_REFRESH_MS')
+    # 自动刷新默认关闭：站点数据只在"用户操作"或"调度跑完"时才变，
+    # 而调度一般凌晨跑，填表单时定时刷新只会打断填写。
+    check('自动刷新默认关闭',
+          'AUTO_REFRESH_KEY' in html and 'autoRefreshMs' in html
+          and "'0'" in html)
+    check('自动刷新频率存在浏览器本地（不进后端配置）',
+          'localStorage' in html and 'applyAutoRefresh' in html)
+    check('设置页有自动刷新开关', 'set_autoref' in html
+          and 'toggleAutoRefresh' in html)
+    check('不再是无条件定时刷新',
+          'setInterval(function(){\n  if($(\'mainBody\').className === \'\') refreshAll();\n}, 60000);'
+          not in html)
 
     # ---- 代理：全局"直连/走代理" + 站点级三选一 ----
     check('设置页有全局联网方式单选', 'name="set_pmode"' in html
@@ -143,6 +149,24 @@ try:
     # 刷新时不该重建 DOM（这是"动不动就刷新"的根治）
     check('列表用结构签名判断是否需要重建',
           'sitesSignature' in html and '_sitesSig' in html)
+
+    # ---- AI 防烧 token：每天尝试/调用上限 ----
+    check('设置页有每日尝试上限开关', 'set_dailylimit' in html and 'swAiLimits' in html)
+    check('设置页可配每天尝试次数', 'set_maxattempt' in html)
+    check('设置页可配每天问 AI 次数', 'set_aiperday' in html)
+    check('设置页可配全局每日总量上限', 'set_aiglobal' in html)
+    st, body = get('/api/settings')
+    stt = json.loads(body) if isinstance(body, bytes) else body
+    ai = stt.get('ai') or {}
+    for k in ('daily_limit_enabled', 'max_attempts_per_day', 'ai_calls_per_day',
+              'global_max_calls_per_day'):
+        check('设置接口回传 %s' % k, k in ai, str(ai)[:140])
+
+    # 站点列表要带上"今天的问题"信息，界面才能提示为什么不再试
+    st, body = get('/api/sites')
+    one = (json.loads(body)['sites'] or [{}])[0]
+    check('站点列表回传 day_problem', 'day_problem' in one, str(one)[:140])
+    check('站点列表回传 day_problem_reason', 'day_problem_reason' in one)
 
     st, body = get('/api/settings')
     stt = json.loads(body) if isinstance(body, bytes) else body

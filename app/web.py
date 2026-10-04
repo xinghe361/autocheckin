@@ -519,6 +519,17 @@ class WebApp:
                 ac.fail_threshold = max(1, int(a['fail_threshold']))
             if 'auto_disable' in a:
                 ac.auto_disable = bool(a['auto_disable'])
+            # --- 每日尝试/调用上限（防烧 token）---
+            if 'daily_limit_enabled' in a:
+                ac.daily_limit_enabled = bool(a['daily_limit_enabled'])
+            if 'max_attempts_per_day' in a and str(a['max_attempts_per_day']) != '':
+                ac.max_attempts_per_day = max(1, int(a['max_attempts_per_day']))
+            if 'ai_calls_per_day' in a and str(a['ai_calls_per_day']) != '':
+                ac.ai_calls_per_day = max(1, int(a['ai_calls_per_day']))
+            if 'global_max_calls_per_day' in a \
+                    and str(a['global_max_calls_per_day']) != '':
+                ac.global_max_calls_per_day = max(
+                    0, int(a['global_max_calls_per_day']))
             if a.get('api_key'):
                 ac.api_key_enc = self.service.box.encrypt(str(a['api_key']))
 
@@ -1245,6 +1256,19 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     </div>
     <div class="hint">个别站点可以单独设置走不走代理 —— 到「站点」页点该站点的
       「编辑」，在「联网方式」里改。</div>
+    <div class="fsec">
+      <h4>页面自动刷新</h4>
+      <label class="sw" for="set_autoref">
+        <input type="checkbox" id="set_autoref" onchange="toggleAutoRefresh()">
+        <span class="track"></span><span class="lb">定时刷新站点列表</span>
+      </label>
+      <div class="hint" style="margin-top:6px">
+        <b>默认关闭</b>（推荐）：填表单时不会被刷新打断。
+        需要时点「刷新」按钮即可。<br>
+        打开后在编辑表单期间仍会自动跳过刷新，不会冲掉你填的内容。
+        <span id="set_autorefHint"></span>
+      </div>
+    </div>
     <div class="row">
       <div><label>浏览器无头模式</label>
         <select id="set_headless"><option value="1">开启（推荐）</option>
@@ -1277,17 +1301,47 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <input id="set_aikey" type="password" placeholder="sk-…">
     <div class="row">
       <div><label>模型</label><input id="set_model" placeholder="deepseek-chat"></div>
-      <div><label>每天最多分析次数</label><input id="set_maxai" type="number" value="20"></div>
     </div>
-    <div class="row">
-      <div><label>分析连续失败几次后停止该站点签到</label>
-        <input id="set_aifail" type="number" value="2"></div>
-      <div><label>分析也失败时自动停用该站点</label>
-        <select id="set_aiauto">
-          <option value="1">开启（推荐）</option>
-          <option value="0">关闭</option>
-        </select></div>
+
+    <div class="fsec">
+      <h4>每天的尝试与调用上限（控制 token 消耗）</h4>
+      <label class="sw" for="set_dailylimit">
+        <input type="checkbox" id="set_dailylimit" onchange="swAiLimits()">
+        <span class="track"></span><span class="lb">限制每个站点每天的尝试次数</span>
+      </label>
+      <div id="set_dailyBox" style="margin-top:8px">
+        <div class="row">
+          <div><label>每个站点每天最多尝试</label>
+            <input id="set_maxattempt" type="number" value="3"></div>
+          <div><label>每天最多问 AI 几次</label>
+            <input id="set_aiperday" type="number" value="1"></div>
+          <div><label>全部站点每天合计上限（0＝不限）</label>
+            <input id="set_aiglobal" type="number" value="20"></div>
+        </div>
+        <div class="hint" style="margin-top:6px">
+          推荐流程：<b>每天试 3 次 → 第 3 次失败后问 AI 一次</b>；
+          问不出结果就标记为「今天的问题」，当天不再尝试并通知你；
+          <b>第二天重新开始</b>；若第二天仍然失败，就自动暂停该站点并通知。
+          <br>这三道上限保证 token 消耗有明确上界，不会无限重试。
+        </div>
+      </div>
     </div>
+
+    <div class="fsec">
+      <h4>AI 失败时的处理</h4>
+      <div class="row">
+        <div><label>分析连续失败几次后停止该站点签到</label>
+          <input id="set_aifail" type="number" value="2"></div>
+        <div><label>分析也失败时自动停用该站点</label>
+          <select id="set_aiauto">
+            <option value="1">开启（推荐）</option>
+            <option value="0">关闭</option>
+          </select></div>
+      </div>
+      <div><label>每天最多分析次数（绝对上限）</label>
+        <input id="set_maxai" type="number" value="20"></div>
+    </div>
+
     <div class="hint">分析成功后会把建议（新的选择器/关键词/步骤）保存并用于之后的签到。
       若分析本身也连续失败，会停止该站点签到，并推送一条"分析失败"告警。</div>
   </div>
@@ -1394,7 +1448,7 @@ function switchTab(name){
   ['sites','add','settings'].forEach(function(t){
     $('tab-'+t).className = (t === name) ? '' : 'hide';
   });
-  if(name === 'settings') loadSettings();
+  if(name === 'settings'){ loadSettings(); loadAutoRefreshSetting(); }
 }
 document.querySelectorAll('#mainNav button[data-tab]').forEach(function(b){
   b.onclick = function(){ switchTab(b.dataset.tab); };
@@ -1434,6 +1488,8 @@ function showMain(){
   refreshAll();
   /* 挂上对 QD「Cookies获取助手」扩展的监听（只挂一次） */
   listenQdExtension();
+  /* 恢复用户上次选择的自动刷新设置（默认关闭） */
+  applyAutoRefresh();
 }
 
 function doLogin(){
@@ -1501,8 +1557,16 @@ var OPEN_SITE = '';
 /* 缓存的站点详情（含 headers 与 cookie 元信息） */
 var SITE_CACHE = {};
 
-function cookieTag(s){
-  if(!s.has_cookie) return '<span class="tag err">未配置登录</span>';
+/* 今天的日期（与后端 _today 的格式一致：YYYY-MM-DD）。
+   用于判断"今天已停止重试"这类带日期的标记是否仍然有效。 */
+function todayStr(){
+  var d = new Date();
+  var m = String(d.getMonth() + 1).padStart(2, '0');
+  var day = String(d.getDate()).padStart(2, '0');
+  return d.getFullYear() + '-' + m + '-' + day;
+}
+
+function cookieTag(s){  if(!s.has_cookie) return '<span class="tag err">未配置登录</span>';
   if(s.cookie_status===2) return '<span class="tag err">登录已失效</span>';
   if(s.cookie_status===1) return '<span class="tag ok">登录有效</span>';
   return '<span class="tag ok">已配置登录</span>';
@@ -1591,8 +1655,15 @@ function renderSiteRows(sites){
     var fail = '';
     if(s.consecutive_failures)
       fail += ' <span class="tag err">连败 '+s.consecutive_failures+'</span>';
+    /* 当天的问题标记：告诉用户"为什么今天不再试了"，避免以为功能坏了 */
+    if(s.day_problem && s.day_problem_date === todayStr()){
+      fail += ' <span class="tag err">今天已停止重试</span>';
+    }
     if(s.disabled_reason)
       fail += '<div class="hint" style="color:#c0392b">'+esc(s.disabled_reason)+'</div>';
+    else if(s.day_problem && s.day_problem_date === todayStr() && s.day_problem_reason)
+      fail += '<div class="hint" style="color:#c0392b">'+esc(s.day_problem_reason)
+            + '　（点「立即」可手动重试一次）</div>';
     if(s.ai_consecutive_failures)
       fail += '<div class="hint">AI 分析失败 '+s.ai_consecutive_failures+' 次'
             + (s.last_ai_error? ('：'+esc(s.last_ai_error)) : '') + '</div>';
@@ -1651,6 +1722,17 @@ function swGlobalProxy(){
   if(box) box.style.display = on ? '' : 'none';
   if(inp) inp.disabled = !on;
 }
+/* 每日尝试/调用上限：关掉总开关时把子项也禁用，避免误以为还在生效 */
+function swAiLimits(){
+  var on = !!($('set_dailylimit') && $('set_dailylimit').checked);
+  ['set_maxattempt', 'set_aiperday', 'set_aiglobal'].forEach(function(id){
+    var el = $(id);
+    if(el) el.disabled = !on;
+  });
+  var box = $('set_dailyBox');
+  if(box) box.style.opacity = on ? '1' : '0.45';
+}
+
 /* 站点表单里的同款逻辑 */
 function swSiteProxy(id){
   var p = 'f_'+id+'_';
@@ -1658,6 +1740,29 @@ function swSiteProxy(id){
   var box = $(p+'proxyBox');
   var on = (mode === 'custom');
   if(box) box.style.display = on ? '' : 'none';
+}
+
+/* 设置页的"定时刷新"开关。存在浏览器本地，不进后端配置。 */
+function toggleAutoRefresh(){
+  var el = $('set_autoref');
+  var on = !!(el && el.checked);
+  setAutoRefresh(on ? 60000 : 0);
+  refreshAutoRefHint();
+}
+
+function loadAutoRefreshSetting(){
+  var el = $('set_autoref');
+  if(el) el.checked = autoRefreshMs() > 0;
+  refreshAutoRefHint();
+}
+
+function refreshAutoRefHint(){
+  var el = $('set_autorefHint');
+  if(!el) return;
+  var ms = autoRefreshMs();
+  el.textContent = ms > 0
+    ? ('（当前：每 ' + Math.round(ms / 1000) + ' 秒刷新一次）')
+    : '（当前：不自动刷新）';
 }
 
 function _sw(id, label, on, onchange){  return '<label class="sw'+(on?'':' off')+'" for="'+id+'">'
@@ -2475,6 +2580,13 @@ function loadSettings(){
     $('set_maxai').value = (d.ai && d.ai.max_calls_per_day) || 20;
     $('set_aifail').value = (d.ai && d.ai.fail_threshold) || 2;
     $('set_aiauto').value = (d.ai && d.ai.auto_disable === false) ? '0' : '1';
+    var ai = (d.ai || {});
+    $('set_dailylimit').checked = (ai.daily_limit_enabled !== false);
+    $('set_maxattempt').value = ai.max_attempts_per_day || 3;
+    $('set_aiperday').value = (ai.ai_calls_per_day === undefined ? 1 : ai.ai_calls_per_day);
+    $('set_aiglobal').value = (ai.global_max_calls_per_day === undefined
+                               ? 20 : ai.global_max_calls_per_day);
+    swAiLimits();
     $('set_wdurl').value = (d.webdav && d.webdav.url) || '';
     $('set_wduser').value = (d.webdav && d.webdav.username) || '';
     $('set_wdpw').value = '';
@@ -2627,7 +2739,11 @@ function saveSettings(){
     ai: {api_key: $('set_aikey').value, model: $('set_model').value.trim(),
          max_calls_per_day: parseInt($('set_maxai').value||'20', 10),
          fail_threshold: parseInt($('set_aifail').value||'2', 10),
-         auto_disable: $('set_aiauto').value === '1'}
+         auto_disable: $('set_aiauto').value === '1',
+         daily_limit_enabled: $('set_dailylimit').checked,
+         max_attempts_per_day: parseInt($('set_maxattempt').value||'3', 10),
+         ai_calls_per_day: parseInt($('set_aiperday').value||'1', 10),
+         global_max_calls_per_day: parseInt($('set_aiglobal').value||'0', 10)}
   };
   api('POST','/api/settings', body).then(function(){
     show('setMsg','已保存。','ok'); refreshAll(); loadSettings();
@@ -2669,16 +2785,38 @@ function restoreNow(){
 
 /* ---------------- 启动 ---------------- */
 boot();
-/* 定时刷新。
-   现在刷新本身是安全的：loadSites 会在数据没变时完全跳过 DOM 重建，
-   所以固定的 60 秒刷新不会再把正在填的表单冲掉。
-   只有数据真的变了（比如调度跑完、连败计数变化）才重建，
-   而且重建时也会把已展开的表单恢复出来。
-   （用户要求：间隔改 60 秒；"动不动就刷新"的问题由上面的守卫解决） */
-var AUTO_REFRESH_MS = 60000;
-setInterval(function(){
-  if($('mainBody').className === '') refreshAll();
-}, AUTO_REFRESH_MS);
+/* 站点列表的自动刷新：默认【关闭】，避免打断填写。
+ *
+ * 为什么默认关：站点数据只有两种情况会变
+ *   1. 用户自己的操作（保存、启停、立即执行、删除）—— 这些分支本来就会刷新
+ *   2. 后台调度器跑完签到 —— 会改"下次运行时间"与连败计数
+ * 而调度是按用户设定的时刻跑的（一般凌晨），填表单时基本不会正好在跑。
+ * 所以定时刷新收益小、干扰大（表单被重建、焦点丢失、填到一半没了）。
+ *
+ * 默认用 localStorage 记住，不占用后端配置。想开就在「设置 → 网络」里勾上。
+ * 即使开着，编辑中的表单也会被跳过（见 refreshAll），不会冲掉内容。
+ */
+var AUTO_REFRESH_KEY = 'ac_auto_refresh_ms';
+var AUTO_REFRESH_TIMER = null;
+
+function autoRefreshMs(){
+  var v = parseInt(localStorage.getItem(AUTO_REFRESH_KEY) || '0', 10);
+  return isNaN(v) ? 0 : v;
+}
+
+function setAutoRefresh(ms){
+  localStorage.setItem(AUTO_REFRESH_KEY, String(ms || 0));
+  applyAutoRefresh();
+}
+
+function applyAutoRefresh(){
+  if(AUTO_REFRESH_TIMER){ clearInterval(AUTO_REFRESH_TIMER); AUTO_REFRESH_TIMER = null; }
+  var ms = autoRefreshMs();
+  if(ms <= 0) return;                    /* 0 = 关闭 */
+  AUTO_REFRESH_TIMER = setInterval(function(){
+    if($('mainBody').className === '') refreshAll();
+  }, ms);
+}
 </script>
 </body>
 </html>

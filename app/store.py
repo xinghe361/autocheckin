@@ -132,6 +132,75 @@ class RuntimeState:
         self.ai_calls[site_id] = rec
         return rec['count']
 
+    def ai_calls_total_today(self, today: str) -> int:
+        """今天所有站点合计调用了多少次 AI（用于全局上限）。"""
+        total = 0
+        for rec in (self.ai_calls or {}).values():
+            if isinstance(rec, dict) and rec.get('date') == today:
+                try:
+                    total += int(rec.get('count') or 0)
+                except (TypeError, ValueError):
+                    pass
+        return total
+
+    # -- 每日尝试预算 ---------------------------------------------------
+    # 用户要求：每个站点每天最多试 N 次，用完就等第二天，
+    # 避免"一直重试、一直问 AI"把 token 额度烧光。
+    def day_attempts(self, site_id: str, today: str) -> int:
+        rec = self.site(site_id).get('day') or {}
+        if rec.get('date') != today:
+            return 0
+        try:
+            return int(rec.get('attempts') or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def bump_day_attempts(self, site_id: str, today: str) -> int:
+        st = self.site(site_id)
+        rec = st.get('day') or {}
+        if rec.get('date') != today:
+            # 新的一天：计数与"当天已问过 AI"一起清零
+            rec = {'date': today, 'attempts': 0, 'ai_done': False}
+        rec['attempts'] = int(rec.get('attempts') or 0) + 1
+        st['day'] = rec
+        return rec['attempts']
+
+    def day_ai_done(self, site_id: str, today: str) -> bool:
+        """今天这个站点是否已经问过 AI 了。"""
+        rec = self.site(site_id).get('day') or {}
+        return rec.get('date') == today and bool(rec.get('ai_done'))
+
+    def mark_day_ai_done(self, site_id: str, today: str) -> None:
+        st = self.site(site_id)
+        rec = st.get('day') or {}
+        if rec.get('date') != today:
+            rec = {'date': today, 'attempts': 0}
+        rec['ai_done'] = True
+        st['day'] = rec
+
+    def day_exhausted(self, site_id: str, today: str, limit: int) -> bool:
+        """今天这个站点是否已用完尝试次数。"""
+        if limit <= 0:
+            return False
+        return self.day_attempts(site_id, today) >= limit
+
+    def clear_day_problem(self, site_id: str) -> None:
+        """清掉"当天不再尝试"的标记（用户手动操作时用）。"""
+        st = self.site(site_id)
+        st.pop('day', None)
+        for k in ('day_problem', 'day_problem_reason', 'day_problem_at'):
+            st.pop(k, None)
+
+    # -- 站点级别的通用标记 ---------------------------------------------
+    def get_site_flag(self, site_id: str, key: str, default: Any = None) -> Any:
+        return self.site(site_id).get(key, default)
+
+    def set_site_flag(self, site_id: str, key: str, value: Any) -> None:
+        self.site(site_id)[key] = value
+
+    def clear_site_flag(self, site_id: str, key: str) -> None:
+        self.site(site_id).pop(key, None)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'sites': self.sites,
