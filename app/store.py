@@ -235,13 +235,33 @@ class RuntimeState:
 
     @staticmethod
     def from_dict(d: Optional[Dict[str, Any]]) -> 'RuntimeState':
-        d = d or {}
+        # state.json 也可能被写坏（半截 JSON、手改错、被别的程序覆盖成 list）。
+        # 这里全部类型收敛：读不出来就用默认，**绝不抛异常** ——
+        # 否则 load_state 会在启动阶段炸掉，容器起不来，
+        # 用户看到的现象就是"换了镜像但版本没变"（真正在跑的还是旧容器）。
+        if not isinstance(d, dict):
+            d = {}
+
+        def _num(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
+
+        sites = d.get('sites')
+        sites = {str(k): dict(v) for k, v in sites.items()
+                 if isinstance(v, dict)} if isinstance(sites, dict) else {}
+        ai_calls = d.get('ai_calls')
+        ai_calls = {str(k): dict(v) for k, v in ai_calls.items()
+                    if isinstance(v, dict)} if isinstance(ai_calls, dict) else {}
+        meta = d.get('meta')
+        meta = dict(meta) if isinstance(meta, dict) else {}
         return RuntimeState(
-            sites=dict(d.get('sites') or {}),
-            ai_calls=dict(d.get('ai_calls') or {}),
-            last_run_at=int(d.get('last_run_at') or 0),
-            last_backup_at=int(d.get('last_backup_at') or 0),
-            meta=dict(d.get('meta') or {}),
+            sites=sites,
+            ai_calls=ai_calls,
+            last_run_at=_num(d.get('last_run_at')),
+            last_backup_at=_num(d.get('last_backup_at')),
+            meta=meta,
         )
 
 

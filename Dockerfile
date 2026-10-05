@@ -1,16 +1,30 @@
 # 自动签到镜像
 #
-# 基础镜像说明：用 Playwright 官方镜像，它已经装好 Chromium 及其全部系统依赖
-# （libnss3 / libatk / 字体等）。自己从 slim 镜像装浏览器要处理一堆依赖和字体问题，
-# 而且容易在中文页面上出现方块字。这里直接用官方镜像最省事、最稳。
+# ============================================================================
+# 为什么用 python:3.12-slim 而不是 Playwright 官方镜像（重要）
+# ============================================================================
+# 以前基于 mcr.microsoft.com/playwright/python，它自带 Chromium/Firefox/WebKit
+# 与全部系统依赖，镜像很大。后来发现：
 #
-# 为什么默认在镜像内自带浏览器，而不是复用外部 Chrome：
-#   Chrome 的远程调试端口通常只绑在它自己容器内的 127.0.0.1 上，外部连不进去；
-#   要连上必须共享它的网络命名空间（network_mode: "container:xxx"），
-#   而那样本容器的端口就无法映射出来 —— Web 界面会失联。
-#   所以镜像内自带浏览器最省事；同时保留 remote_cdp_url 配置项，
-#   如果你愿意接受上面的限制，也可以在设置里改成连接外部 Chrome。
-FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
+#   1) 内置的三个站点（V2EX / NodeSeek / Chiphell）全部走**纯 HTTP 请求**，
+#      need_browser=False，根本用不到浏览器。
+#   2) "从浏览器读取 Cookie"用的是 QD 的 get-cookies 扩展，跑在**用户自己的
+#      浏览器**里；"录制签到步骤"也是把脚本注入到用户浏览器的 iframe 里。
+#      两者都不需要容器内浏览器。
+#   3) 只有"录制的自定义站点"才需要浏览器（录制产出的 click/fill/goto 步骤
+#      无法用纯请求回放，纯请求只支持 get/post/extract_regex）。
+#
+# 而在后面层里 `rm -rf` 浏览器**并不会减小镜像体积** —— 那些文件仍在基础
+# 镜像的层里，拉取时照样要下载。实测：浏览器所在层 616MB 原封不动。
+# 真正减小的唯一办法是**不用带浏览器的基础镜像**。
+#
+# 所以这里换成 python:3.12-slim：
+#     镜像从约 2.2GB 降到约 0.2GB
+# 代价：录制的自定义站点会明确报"需要浏览器但不可用"（内置站点不受影响）。
+# 如果你确实要用浏览器路径，把 bases 换回 Playwright 镜像并加上
+# `playwright install chromium` 即可（见 README）。
+# ============================================================================
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -20,28 +34,17 @@ ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data \
     LOG_LEVEL=info
 
-# 只用 Python 部分，Node/npm 在这里没用，顺手清掉减小体积
-RUN rm -rf /usr/lib/node_modules /usr/bin/node /usr/bin/npm /usr/bin/npx \
-           /root/.npm /root/.cache 2>/dev/null || true
-
-# 清掉用不到的浏览器内核，显著减小体积。
-#
-# Playwright 官方镜像默认带三种内核，但本项目只用 Chromium：
-#   chromium-1140  542M  ← 唯一需要的
-#   firefox-1465   238M  ← 用不到
-#   webkit-2083    254M  ← 用不到
-#   ffmpeg-1010    4.9M  ← 那是录屏用的，本项目不录视频
-# 实测清掉后省约 497M（镜像 2.21GB -> 约 1.71GB）。
-#
-# 注意：这里只删浏览器二进制，**保留 playwright 的 Python 包与系统依赖**，
-# 所以 chromium 仍能正常启动（已验证）。
-# 另外 chromium_headless_shell 只在 1.49+ 存在，这里用通配删以免版本变化后失效。
+# tzdata 不能省：程序用 time.tzset() 应用 TZ，而 slim 镜像默认**没有**
+# 系统时区库 —— 不装的话 TZ=Asia/Shanghai 不生效，签到时间会差 8 小时。
+# 顺带装上 ca-certificates（HTTPS 校验需要根证书）。
+# 装完立刻清 apt 缓存，避免把包索引打进镜像。
 RUN set -eux; \
-    rm -rf /ms-playwright/firefox-* \
-           /ms-playwright/webkit-* \
-           /ms-playwright/ffmpeg-* \
-           /ms-playwright/chromium_headless_shell-*; \
-    ls -d /ms-playwright/* | sed 's/^/保留: /'
+    apt-get update; \
+    apt-get install -y --no-install-recommends tzdata ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    # tzdata 在非交互环境下可能不写 /etc/localtime，显式设一次
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime; \
+    echo $TZ > /etc/timezone
 
 WORKDIR /app
 

@@ -212,12 +212,67 @@ class TestDockerfile(unittest.TestCase):
         self.assertNotIn(':latest', base, '基础镜像不该用 latest')
         self.assertIn(':', base, '基础镜像应固定 tag')
 
+    def test_base_image_has_no_browser(self):
+        """基础镜像不该再带回浏览器。
+
+        为什么值得钉住：以前用 Playwright 官方镜像（自带 3 个浏览器约 1.5GB），
+        而内置三个站点全部走纯 HTTP 请求，根本用不到浏览器。
+        关键教训：**在后面层里 `rm -rf` 浏览器不会减小镜像体积** ——
+        文件仍留在基础镜像的层里，拉取照样下载（实测浏览器所在层
+        616MB 原封不动）。所以瘦身只能靠"不用带浏览器的基础镜像"。
+        一旦有人把 FROM 改回 Playwright 镜像，体积会悄悄涨回 2GB+。
+        """
+        # 只看 FROM 指令（注释里会解释"为什么不用 Playwright 镜像"，
+        # 那是要保留的说明，不能一起判掉 —— 我第一版就误报了）
+        froms = re.findall(r'^\s*FROM\s+(\S+)', self.text, re.M)
+        self.assertTrue(froms, '缺少 FROM 指令')
+        for base in froms:
+            self.assertNotIn('playwright', base.lower(),
+                             '基础镜像不该是 Playwright 镜像：%s' % base)
+        self.assertTrue(any('python:3.12-slim' in f for f in froms),
+                        '基础镜像应为 python:3.12-slim（不带浏览器）')
+
+    def test_tzdata_and_ca_certificates_installed(self):
+        """必须装 tzdata 与根证书。
+
+        程序用 time.tzset() 应用 TZ，而 slim 镜像默认**没有**系统时区库 ——
+        不装 tzdata 的话 TZ=Asia/Shanghai 不生效，签到时间整体差 8 小时。
+        """
+        self.assertIn('tzdata', self.text,
+                      '缺 tzdata 会导致时区不生效（签到时间差 8 小时）')
+        self.assertIn('ca-certificates', self.text,
+                      '缺根证书会导致 HTTPS 校验失败')
+
     def test_dependencies_pinned(self):
         req = read('requirements.txt')
         for line in req.splitlines():
             line = line.strip()
             if line and not line.startswith('#'):
                 self.assertIn('==', line, '依赖未固定版本：%s' % line)
+
+    def test_playwright_kept_but_no_browser_in_image(self):
+        """playwright 包保留（为 9222 接外部 Chrome 的接口），但镜像不带浏览器。
+
+        为什么两者要分开：
+          * 包（约 36MB）带来"连接外部 Chrome（CDP）"的能力 ——
+            配好 remote_cdp_url，录制的自定义站点仍能回放
+          * 浏览器二进制（600MB+）内置站点根本用不到
+        所以只留包、不留浏览器。这条测试防止有人"顺手"把浏览器装回来
+        （比如加 `playwright install chromium` 或装一堆浏览器系统依赖）。
+        """
+        req = read('requirements.txt')
+        body = '\n'.join(l for l in req.splitlines()
+                         if not l.strip().startswith('#'))
+        self.assertIn('playwright', body.lower(),
+                      'playwright 包应保留（提供 CDP 接口）')
+        # 只看**非注释行**：注释里会解释"想要浏览器时该怎么做"，
+        # 那是要保留的说明，不能一起判掉（我又踩了这个误报）
+        code = '\n'.join(l for l in self.text.splitlines()
+                         if not l.strip().startswith('#'))
+        for bad in ('playwright install', 'playwright_install',
+                    'apt-get install chromium', 'libnss3', 'libatk'):
+            self.assertNotIn(bad, code.lower(),
+                             'Dockerfile 的构建步骤里不该把浏览器装回来：%s' % bad)
 
 
 class TestBrowserRuntime(unittest.TestCase):

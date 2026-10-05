@@ -63,8 +63,21 @@ class TestBuildSettings(EnvCase):
         s = M.build_settings([])
         self.assertEqual(s.port, 9999)
         self.assertEqual(s.data_dir, '/custom/data')
-        self.assertEqual(s.proxy, 'http://env:1')
         self.assertEqual(s.timezone, 'UTC')
+
+    def test_proxy_env_is_ignored(self):
+        """代理只能从网页设置来 —— 环境变量 PROXY 必须被忽略。
+
+        为什么：两处都能设就会互相打架，而"网页里改完却不生效"是最难查的
+        一类问题。现在只有一个权威来源，行为可预测。
+        """
+        os.environ['PROXY'] = 'http://from-env:1'
+        s = M.build_settings([])
+        self.assertEqual(s.proxy, '',
+                         '环境变量 PROXY 不该再影响代理配置')
+        # 但 --proxy 命令行参数保留（调试用）
+        s2 = M.build_settings(['--proxy', 'http://from-cli:2'])
+        self.assertEqual(s2.proxy, 'http://from-cli:2')
 
     def test_bad_env_port_falls_back(self):
         os.environ['PORT'] = 'not-a-number'

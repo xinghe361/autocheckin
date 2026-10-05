@@ -1,0 +1,105 @@
+# 站点模板插件
+
+把"支持哪些站点"从镜像里解耦出来：**加一个 JSON 文件就多一个可选站点，不用重建镜像。**
+
+## 怎么用
+
+1. 复制一份 `example.json`，改 `id` / `name` / `homepage` / `flow`
+2. 把文件放进容器的数据目录：
+
+   ```
+   <你的数据目录>/templates/<id>.json
+   ```
+
+   也就是 NAS 上 `.../autocheckin/templates/` 里（和 `config.json` 同一个目录）
+3. 打开网页「设置 → 可选站点」→ 点「重新扫描」
+4. 在列表里**选中**它 → 它才成为你实际签到的站点
+
+> 只有**选中的**才会出现在站点里。没选中的只是"可选"，不会去签到。
+> 已加入的站点会标记为「已加入」，重复点不会重复添加。
+
+## 文件格式
+
+```jsonc
+{
+  "id": "mysite",                  // 必填。小写字母/数字开头，只含 a-z 0-9 _ -
+  "name": "我的站点",               // 必填。界面上显示的名字
+  "homepage": "https://a.b/",      // 必填。必须 http/https 开头
+  "mission_url": "https://a.b/checkin",   // 可选。签到页地址
+  "need_browser": false,           // 用了 click/fill/goto 等动作时必须为 true
+  "verify_ssl": true,              // 可选，默认 true
+
+  // 必填。按顺序执行，至少一步。只支持这些动作：
+  //   纯请求：get / post / extract_regex
+  //   浏览器：goto / click / fill / wait / wait_for / extract / assert_text
+  "flow": [
+    { "action": "get", "url": "{mission_url}" },
+    { "action": "extract_regex", "pattern": "once=(\\d+)",
+      "save_as": "once", "required": true },
+    { "action": "get", "url": "https://a.b/do?once={once}" }
+  ],
+
+  // 判定关键词（按已领 > 失败 > 成功 的优先级）
+  "success_keywords": ["签到成功"],
+  "fail_keywords": ["请先登录"],
+  "already_keywords": ["今天已签到"],
+
+  "headers": { "User-Agent": "..." },   // 可选。有些站点缺 Origin/Referer 会 403
+  "note": "界面上显示的说明"              // 可选
+}
+```
+
+### 可用的占位符
+
+`flow` 的 `url` / `pattern`，以及 `headers` 的值里可以用：
+
+| 占位符 | 含义 |
+|---|---|
+| `{homepage}` | 站点的 `homepage` |
+| `{mission_url}` | `mission_url`（没填就用 `homepage`）|
+| `{cookie}` | 该站点保存的 Cookie 头 |
+| `{username}` / `{password}` | 站点设置里填的账号密码 |
+| `{<save_as>}` | 前面某步 `extract_regex` 提取到的值 |
+
+## 一个文件放多个模板
+
+`templates/` 下的 JSON 也可以是一个数组，一次定义多个模板：
+
+```json
+[ { "id": "a", ... }, { "id": "b", ... } ]
+```
+
+## 覆盖内置模板
+
+如果插件用了和内联模板相同的 `id`（`v2ex` / `nodeseek` / `chiphell`），
+**插件优先**。所以在站点改版、判定关键词失效时，你可以先用插件覆盖救急，
+不必等我发新版镜像。
+
+## 校验与报错
+
+文件会在加载时校验，不合规的**只跳过它自己**并给出原因（不会拖垮服务）。
+常见拒绝原因：
+
+| 原因 | 说明 |
+|---|---|
+| `id` 非法 | 必须小写字母/数字开头，只含 `a-z 0-9 _ -`，长度 ≤ 64 |
+| 缺 `name` / `homepage` / `flow` | 这三个必填 |
+| `homepage` 非 http/https | 挡掉 `javascript:` 这类 |
+| 未知 `action` | 只支持上面列出的动作 |
+| 用了浏览器动作但 `need_browser` 不是 true | 必须显式声明（否则会被派到纯请求路径，**静默什么都不做**）|
+| 请求头名或值非法 | 值里有换行/空字符会被拒（防头注入）|
+| 文件 > 256KB | 模板是纯文本配置，不需要这么大 |
+| `id` 重复 | 同一目录里重复时保留第一个 |
+
+出错的条目会显示在「可选站点」下面。
+
+## 关于浏览器动作
+
+`click` / `fill` / `goto` 这些**需要浏览器**。当前镜像**不含浏览器**，所以：
+
+- 纯请求流程（`get` / `post` / `extract_regex`）：**开箱可用**
+- 浏览器流程：需要配置 `remote_cdp_url` 连接外部 Chrome 的调试端口
+  （见 README「需要浏览器怎么办」），或换用带浏览器的基础镜像
+
+模板里用了浏览器动作却没写 `need_browser: true`，会因为上面的校验直接被拒——
+这是故意的，免得你以为走纯请求、实际什么都没做。

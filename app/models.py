@@ -10,9 +10,99 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .schedule import MODE_DAILY, MODE_SUCCESS_BASED, SiteSchedule
+
+
+# --------------------------------------------------------------------------
+# 读配置时的类型收敛
+#
+# 为什么必须有这些：config.json 是用户可以手改、也可能来自旧版本或备份的
+# 文件。以前 from_dict 直接 `int(d.get(...))` / `dict(d.get(...))`，一旦
+# 类型不对就抛异常 —— 而这发生在**启动阶段**，后果是整个容器起不来：
+#     sites 是字符串      -> AttributeError: 'str' object has no attribute 'get'
+#     ai 是 list          -> TypeError
+#     headers 是 list     -> TypeError
+#     state.json 是 list  -> AttributeError
+# （以上都是实测出来的。）容器起不来时极空间 Docker 会按 restart 策略
+# 反复重启，用户看到的现象就是"更新了镜像但版本一直是旧的"——
+# 因为真正在跑的仍是旧容器，而新容器一直没起来。
+#
+# 所以这里全部改成"读不出来就用默认值 + 不抛异常"，宁可少一个字段，
+# 也不能让整个服务无法启动。
+# --------------------------------------------------------------------------
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """只接受 dict；其它（list/str/None…）一律当空。"""
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> List[Any]:
+    """只接受 list/tuple；其它一律当空。（字符串会被当单元素会很意外，所以排除。）"""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def _as_str(value: Any, default: str = '') -> str:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return default
+
+
+def _as_int(value: Any, default: int = 0, lo: Optional[int] = None,
+            hi: Optional[int] = None) -> int:
+    """转 int；非法值用默认；可选上下限夹取。布尔也接受（True->1）。"""
+    try:
+        if value is None or value == '':
+            n = default
+        else:
+            n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    if lo is not None:
+        n = max(lo, n)
+    if hi is not None:
+        n = min(hi, n)
+    return n
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """转 bool —— 刻意**不用** bool(value)。
+
+    因为 bool("false") 是 True：用户手改配置写 "false" 会被当成开启，
+    与直觉相反。这里认得 "false"/"0"/"no"/"off"/空 都算假。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ('', '0', 'false', 'no', 'off', 'n', 'f'):
+            return False
+        if s in ('1', 'true', 'yes', 'on', 'y', 't'):
+            return True
+        return default
+    return default
+
+
+def _as_str_list(value: Any, limit: int = 200) -> List[str]:
+    """字符串列表；逐项转字符串并丢掉空项。"""
+    out = []
+    for x in _as_list(value)[:limit]:
+        if x is None:
+            continue
+        s = x if isinstance(x, str) else str(x)
+        if s.strip():
+            out.append(s)
+    return out
 
 # 代理策略（通知渠道也复用这套取值）
 PROXY_INHERIT = 'inherit'   # 跟随主代理设置
@@ -61,13 +151,14 @@ class Step:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'Step':
+        d = _as_dict(d)
         return Step(
-            action=d.get('action', ACTION_CLICK),
-            target=d.get('target', ''),
-            value=d.get('value', ''),
-            timeout_ms=int(d.get('timeout_ms', 15000)),
-            optional=bool(d.get('optional', False)),
-            note=d.get('note', ''),
+            action=_as_str(d.get('action'), ACTION_CLICK),
+            target=_as_str(d.get('target'), ''),
+            value=_as_str(d.get('value'), ''),
+            timeout_ms=_as_int(d.get('timeout_ms'), 15000, 0, 600000),
+            optional=_as_bool(d.get('optional'), False),
+            note=_as_str(d.get('note'), ''),
         )
 
 
@@ -129,6 +220,18 @@ class SiteConfig:
     # 默认 1440 = 24 小时。以前这里是硬编码的 86400 秒，
     # 界面上显示的"上次成功后 XX 分钟"其实是重试间隔，显示与实际不符。
     success_interval_minutes: int = 1440
+    # 【上次签到成功时间】模式的**初始基准时刻**（从当天 00:00 起的分钟数）。
+    #
+    # 为什么需要单独一个字段：用户要求"选这个模式时，把那一刻填的时刻
+    # 锁定为基准"。不能复用 daily_hour/minute —— 那是"每天固定时刻"模式的
+    # 配置，两个模式共用会导致切模式时互相覆盖。
+    # 也不用 state 里的 last_success_at：那个每次运行结束都会被调度状态
+    # 写回（apply_schedule_state），基准会被冲掉。
+    #
+    # 语义：基准 = max(这个初始锚点, 上次成功时间)。
+    # 也就是首次成功之前按锚点算，首次成功之后锚点自然被成功时间取代。
+    # -1 = 还没设置过（老配置/新建站点），此时按"现在 + 间隔"排第一次。
+    success_anchor_minutes: int = -1
     jitter_enabled: bool = False
     jitter_seconds: int = 3600
     retry_enabled: bool = True
@@ -180,6 +283,19 @@ class SiteConfig:
     state: Dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
+    def anchor_time_of_day(self) -> Optional[Tuple[int, int]]:
+        """初始基准时刻 (小时, 分钟)；没设置过返回 None。"""
+        m = int(getattr(self, 'success_anchor_minutes', -1) or -1)
+        if m < 0:
+            return None
+        return (m // 60, m % 60)
+
+    def set_anchor_from_time_of_day(self, hour: int, minute: int) -> None:
+        """把初始基准设成指定的时刻（用于"选模式时锁定当前填的时间"）。"""
+        h = max(0, min(23, int(hour)))
+        mi = max(0, min(59, int(minute)))
+        self.success_anchor_minutes = h * 60 + mi
+
     def to_schedule(self) -> SiteSchedule:
         """转成调度引擎用的对象（含从 state 恢复的运行状态）。"""
         st = self.state or {}
@@ -189,6 +305,8 @@ class SiteConfig:
             daily_hour=self.daily_hour,
             daily_minute=self.daily_minute,
             success_interval_minutes=self.success_interval_minutes,
+            success_anchor_minutes=int(
+                getattr(self, 'success_anchor_minutes', -1) or -1),
             jitter_enabled=self.jitter_enabled,
             jitter_seconds=self.jitter_seconds,
             retry_enabled=self.retry_enabled,
@@ -238,46 +356,58 @@ class SiteConfig:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'SiteConfig':
-        steps = [Step.from_dict(s) if isinstance(s, dict) else s
-                 for s in (d.get('steps') or [])]
+        d = _as_dict(d)                       # 非 dict（None/str…）当空配置
+        steps_raw = []
+        for s in _as_list(d.get('steps')):
+            if isinstance(s, dict):
+                steps_raw.append(Step.from_dict(s))
+            elif isinstance(s, Step):
+                steps_raw.append(s)
+            # 其它类型直接丢掉：宁可少一步，也不要让整份配置读不出来
         return SiteConfig(
             id=safe_site_id(d.get('id'), d.get('name')),
-            name=d.get('name') or d['id'],
-            enabled=bool(d.get('enabled', True)),
-            kind=d.get('kind', KIND_TEMPLATE),
-            template=d.get('template', ''),
-            homepage=d.get('homepage', ''),
-            need_browser=bool(d.get('need_browser', False)),
-            verify_ssl=bool(d.get('verify_ssl', True)),
-            mode=d.get('mode', MODE_DAILY),
-            daily_hour=int(d.get('daily_hour', 3)),
-            daily_minute=int(d.get('daily_minute', 0)),
-            success_interval_minutes=max(
-                60, int(d.get('success_interval_minutes', 1440))),
-            jitter_enabled=bool(d.get('jitter_enabled', False)),
-            jitter_seconds=int(d.get('jitter_seconds', 3600)),
-            retry_enabled=bool(d.get('retry_enabled', True)),
-            retry_count=int(d.get('retry_count', 3)),
-            retry_interval_minutes=int(d.get('retry_interval_minutes', 30)),
-            ai_enabled=bool(d.get('ai_enabled', True)),
-            ai_after_failures=int(d.get('ai_after_failures', 3)),
-            notify=d.get('notify', '') or '',
-            notify_override=d.get('notify_override'),
-            steps=steps,
-            success_keywords=list(d.get('success_keywords') or []),
-            fail_keywords=list(d.get('fail_keywords') or []),
-            headers=dict(d.get('headers') or {}),
-            proxy_mode=str(d.get('proxy_mode') or PROXY_INHERIT),
-            proxy_url=str(d.get('proxy_url') or ''),
-            username=d.get('username', ''),
-            password_enc=d.get('password_enc', ''),
-            cookie_enc=d.get('cookie_enc', ''),
-            cookie_updated_at=int(d.get('cookie_updated_at', 0) or 0),
-            cookie_source=d.get('cookie_source', '') or '',
-            cookie_status=int(d.get('cookie_status', 0) or 0),
-            cookie_checked_at=int(d.get('cookie_checked_at', 0) or 0),
-            cookie_error=d.get('cookie_error', '') or '',
-            state=dict(d.get('state') or {}),
+            name=_as_str(d.get('name')) or _as_str(d.get('id')),
+            enabled=_as_bool(d.get('enabled'), True),
+            kind=_as_str(d.get('kind'), KIND_TEMPLATE),
+            template=_as_str(d.get('template'), ''),
+            homepage=_as_str(d.get('homepage'), ''),
+            need_browser=_as_bool(d.get('need_browser'), False),
+            verify_ssl=_as_bool(d.get('verify_ssl'), True),
+            mode=_as_str(d.get('mode'), MODE_DAILY),
+            daily_hour=_as_int(d.get('daily_hour'), 3, 0, 23),
+            daily_minute=_as_int(d.get('daily_minute'), 0, 0, 59),
+            success_interval_minutes=_as_int(
+                d.get('success_interval_minutes'), 1440, 60, 10080),
+            # -1 表示"还没设置过"；0..1439 是有效时刻
+            success_anchor_minutes=_as_int(
+                d.get('success_anchor_minutes'), -1, -1, 1439),
+            jitter_enabled=_as_bool(d.get('jitter_enabled'), False),
+            jitter_seconds=_as_int(d.get('jitter_seconds'), 3600, 0, 86400),
+            retry_enabled=_as_bool(d.get('retry_enabled'), True),
+            retry_count=_as_int(d.get('retry_count'), 3, 0, 10),
+            retry_interval_minutes=_as_int(
+                d.get('retry_interval_minutes'), 30, 1, 1440),
+            ai_enabled=_as_bool(d.get('ai_enabled'), True),
+            ai_after_failures=_as_int(d.get('ai_after_failures'), 3, 0, 100),
+            notify=_as_str(d.get('notify'), ''),
+            notify_override=(None if d.get('notify_override') is None
+                             else _as_str(d.get('notify_override'))),
+            steps=steps_raw,
+            success_keywords=_as_str_list(d.get('success_keywords')),
+            fail_keywords=_as_str_list(d.get('fail_keywords')),
+            headers={str(k): _as_str(v)
+                     for k, v in _as_dict(d.get('headers')).items()},
+            proxy_mode=_as_str(d.get('proxy_mode'), PROXY_INHERIT),
+            proxy_url=_as_str(d.get('proxy_url'), ''),
+            username=_as_str(d.get('username'), ''),
+            password_enc=_as_str(d.get('password_enc'), ''),
+            cookie_enc=_as_str(d.get('cookie_enc'), ''),
+            cookie_updated_at=_as_int(d.get('cookie_updated_at'), 0, 0),
+            cookie_source=_as_str(d.get('cookie_source'), ''),
+            cookie_status=_as_int(d.get('cookie_status'), 0),
+            cookie_checked_at=_as_int(d.get('cookie_checked_at'), 0, 0),
+            cookie_error=_as_str(d.get('cookie_error'), ''),
+            state=_as_dict(d.get('state')),
         )
 
 
@@ -328,6 +458,9 @@ class NotifyConfig:
     proxy_url: str = ''
     # 单渠道覆盖：{'telegram': {'mode': 'custom', 'url': 'http://...'}}
     channel_proxy: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # 代理地址的密文版（代理常带 user:pass，明文落盘等于凭据泄露）。
+    # 加载时由 Service 解密回上面的明文属性；保存时加密、明文不落盘。
+    proxy_url_enc: str = ''
 
     # pushplus（实测 200）
     pushplus_token: str = ''
@@ -339,25 +472,125 @@ class NotifyConfig:
     tg_bot_token: str = ''
     tg_chat_id: str = ''
 
+    # --- 上面这些凭据的密文版 ---
+    # 为什么单独列一组而不是直接改明文属性名：这样
+    #   * 内存里仍用明文属性（notify.py 一行都不用改）
+    #   * 磁盘上只存密文（明文在 to_dict 时被剥掉）
+    #   * 老配置（只有明文）能平滑迁移：读出来照常用，下次保存自动加密
+    pushplus_token_enc: str = ''
+    serverchan_key_enc: str = ''
+    wecom_webhook_enc: str = ''
+    tg_bot_token_enc: str = ''
+    tg_chat_id_enc: str = ''
+    # 渠道代理地址打包后的密文（形如 "telegram\thttp://u:p@h:8" 的多行文本）
+    channel_proxy_urls_enc: str = ''
+
     # 只在这些站点上启用通知（mode=custom 时用）
     custom_sites: List[str] = field(default_factory=list)
 
+    # 落盘时需要加密的字段（明文属性名 -> 密文属性名）
+    SECRET_FIELDS = {
+        'pushplus_token': 'pushplus_token_enc',
+        'serverchan_key': 'serverchan_key_enc',
+        'wecom_webhook': 'wecom_webhook_enc',
+        'tg_bot_token': 'tg_bot_token_enc',
+        'tg_chat_id': 'tg_chat_id_enc',
+        'proxy_url': 'proxy_url_enc',
+        # 渠道代理地址打包后的那一份（见 plain_secrets）
+        '_channel_proxy_urls': 'channel_proxy_urls_enc',
+    }
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        """导出配置。
+
+        ⚠️ 内存里这些凭据是明文（notify.py 直接用），但**落盘时一律剥掉
+        明文**，只留密文 —— 密文由 Service 在保存前调用 seal 填好。
+        这样"忘了加密"最坏也只是丢字段，绝不会把明文写出去。
+        """
+        d = asdict(self)
+        # _channel_proxy_urls 只是给加密用的中间键，不是真实字段
+        for plain in self.SECRET_FIELDS:
+            if plain.startswith('_'):
+                continue
+            d.pop(plain, None)
+        # channel_proxy 里的 url 同样常带 user:pass，一并剥掉明文
+        cp = d.get('channel_proxy')
+        if isinstance(cp, dict):
+            for _ch, v in cp.items():
+                if isinstance(v, dict):
+                    v.pop('url', None)
+        return d
+
+    def plain_secrets(self) -> Dict[str, str]:
+        """当前内存里的明文凭据（供 Service 加密落盘）。
+
+        注意 channel_proxy 的 url 在 to_dict() 里会被剥掉，所以这里
+        必须直接从**明文属性**取，不能走 to_dict。
+        """
+        out = {}
+        for k in self.SECRET_FIELDS:
+            if k.startswith('_'):
+                continue
+            out[k] = _as_str(getattr(self, k, ''), '')
+        cp = {ch: _as_str((v or {}).get('url'), '')
+              for ch, v in (self.channel_proxy or {}).items()}
+        out['_channel_proxy_urls'] = '\n'.join(
+            '%s\t%s' % (k, v) for k, v in sorted(cp.items()) if v)
+        return out
+
+    def apply_secrets(self, plain: Dict[str, str]) -> None:
+        """把解密出来的明文写回内存属性（供 Service 加载后调用）。"""
+        for k, v in plain.items():
+            if k.startswith('_'):
+                continue
+            if v:
+                setattr(self, k, v)
+        raw = plain.get('_channel_proxy_urls') or ''
+        if raw:
+            for line in raw.split('\n'):
+                if '\t' not in line:
+                    continue
+                ch, url = line.split('\t', 1)
+                ch, url = ch.strip(), url.strip()
+                if not ch or not url:
+                    continue
+                self.channel_proxy.setdefault(ch, {})['url'] = url
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'NotifyConfig':
+        # 逐字段按类型收敛，不再 setattr 原始值。
+        # 以前是 `setattr(base, k, d[k])` —— 配置里 notify 写成字符串时
+        # 会把整个 NotifyConfig 变成字符串属性，后续 .get() 直接崩，
+        # 而且崩在启动阶段（容器起不来）。实测踩过。
+        d = _as_dict(d)
         base = NotifyConfig()
-        for k in base.to_dict():
-            if k in (d or {}):
-                setattr(base, k, d[k])
-        # 兼容旧配置：channel_proxy 必须是 dict
-        if not isinstance(base.channel_proxy, dict):
-            base.channel_proxy = {}
-        if not isinstance(base.channels, list):
-            base.channels = []
-        if not isinstance(base.custom_sites, list):
-            base.custom_sites = []
+        base.mode = _as_str(d.get('mode'), base.mode)
+        base.channels = _as_str_list(d.get('channels'))
+        base.custom_sites = _as_str_list(d.get('custom_sites'))
+        # proxy_mode / proxy_url 已不再参与"走不走代理"的判定
+        # （现在只看 channel_proxy），但字段仍在数据类里，
+        # 旧配置里可能留着值 —— 必须原样往返，不能读一次就丢掉，
+        # 否则用户保存一次设置就把历史值抹掉了（属于数据丢失）。
+        base.proxy_mode = _as_str(d.get('proxy_mode'), base.proxy_mode)
+        base.proxy_url = _as_str(d.get('proxy_url'), '')
+        # 密文版字段：原样读入，解密由 Service 负责（models 不该依赖 secrets）。
+        # ⚠️ 名单从 SECRET_FIELDS 派生，不手写 —— 手写过一次，
+        # 漏了 channel_proxy_urls_enc，结果渠道代理地址读了就丢。
+        for enc_name in NotifyConfig.SECRET_FIELDS.values():
+            setattr(base, enc_name, _as_str(d.get(enc_name), ''))
+        base.pushplus_token = _as_str(d.get('pushplus_token'), '')
+        base.serverchan_key = _as_str(d.get('serverchan_key'), '')
+        base.wecom_webhook = _as_str(d.get('wecom_webhook'), '')
+        base.tg_bot_token = _as_str(d.get('tg_bot_token'), '')
+        base.tg_chat_id = _as_str(d.get('tg_chat_id'), '')
+        base.proxy_url = _as_str(d.get('proxy_url'), '')
+        # channel_proxy: {渠道: {mode, url}} —— 逐层校验
+        cp = {}
+        for ch, v in _as_dict(d.get('channel_proxy')).items():
+            v = _as_dict(v)
+            cp[str(ch)] = {'mode': _as_str(v.get('mode'), 'inherit'),
+                           'url': _as_str(v.get('url'), '')}
+        base.channel_proxy = cp
         return base
 
 
@@ -378,10 +611,15 @@ class WebdavConfig:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'WebdavConfig':
+        d = _as_dict(d)
         base = WebdavConfig()
-        for k in base.to_dict():
-            if k in (d or {}):
-                setattr(base, k, d[k])
+        base.enabled = _as_bool(d.get('enabled'), False)
+        base.url = _as_str(d.get('url'), '')
+        base.username = _as_str(d.get('username'), '')
+        base.password_enc = _as_str(d.get('password_enc'), '')
+        base.auto_interval_minutes = _as_int(
+            d.get('auto_interval_minutes'), 0, 0)
+        base.backup_key = _as_bool(d.get('backup_key'), False)
         return base
 
 
@@ -433,7 +671,7 @@ class AiConfig:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'AiConfig':
         base = AiConfig()
-        src = dict(d or {})
+        src = _as_dict(d)          # 非 dict（list/str/None）当空配置
 
         # --- 旧字段迁移（逻辑统一前存在过的那些）---
         # ai_calls_per_day（每站点每天调用 AI 几次）现在由
@@ -446,24 +684,29 @@ class AiConfig:
         legacy_global = src.pop('global_max_calls_per_day', None)
         # 更早的版本里 max_calls_per_day 存在过又被删过，语义相同，直接用
 
-        for k in base.to_dict():
-            if k in src:
-                setattr(base, k, src[k])
+        # 逐字段按类型收敛，不再 setattr 原始值（否则 ai 写成 list/字符串
+        # 会把配置搞坏，而且崩在启动阶段 -> 容器起不来）
+        base.enabled = _as_bool(src.get('enabled'), base.enabled)
+        base.api_key_enc = _as_str(src.get('api_key_enc'), '')
+        base.base_url = _as_str(src.get('base_url'), base.base_url)
+        base.model = _as_str(src.get('model'), base.model)
+        base.timeout = _as_int(src.get('timeout'), base.timeout, 1, 600)
+        base.auto_apply = _as_bool(src.get('auto_apply'), base.auto_apply)
+        base.ai_after_failures = _as_int(
+            src.get('ai_after_failures'), base.ai_after_failures, 0, 1000)
+        base.max_calls_per_day = _as_int(
+            src.get('max_calls_per_day'), base.max_calls_per_day, 0, 100000)
+        base.fail_threshold = _as_int(
+            src.get('fail_threshold'), base.fail_threshold, 0, 1000)
 
         if legacy_per_day is not None:
-            try:
-                n = int(legacy_per_day)
-            except (TypeError, ValueError):
-                n = None
+            n = _as_int(legacy_per_day, -1, 0)
             # 只在用户没自己设过上限（仍是默认 20）时迁移，避免覆盖新选择
-            if n is not None and int(base.max_calls_per_day) == 20:
+            if n >= 0 and int(base.max_calls_per_day) == 20:
                 base.max_calls_per_day = n
         elif legacy_global is not None:
-            try:
-                n = int(legacy_global)
-            except (TypeError, ValueError):
-                n = None
-            if n is not None and int(base.max_calls_per_day) == 20:
+            n = _as_int(legacy_global, -1, 0)
+            if n >= 0 and int(base.max_calls_per_day) == 20:
                 base.max_calls_per_day = n
         return base
 
@@ -550,32 +793,42 @@ class AppConfig:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> 'AppConfig':
+        # 顶层也全部走类型收敛：这是启动路径，任何一处抛异常都会让
+        # 容器起不来（用户看到的现象就是"换了镜像但版本没变"）。
+        d = _as_dict(d)
         # 旧配置没有 proxy_mode：有地址就视为"走代理"，没地址就直连。
         # 这样升级后行为不变，不会突然把已有代理关掉。
-        raw_proxy = d.get('proxy', '') or ''
-        mode = d.get('proxy_mode')
+        raw_proxy = _as_str(d.get('proxy'), '')
+        mode = _as_str(d.get('proxy_mode'), '')
         if not mode:
             mode = PROXY_CUSTOM if raw_proxy.strip() else PROXY_DIRECT
+        sites_raw = []
+        for s in _as_list(d.get('sites')):
+            if isinstance(s, dict):
+                sites_raw.append(SiteConfig.from_dict(s))
+            elif isinstance(s, SiteConfig):
+                sites_raw.append(s)
+            # 其它类型（None / str / 数字）直接跳过，不让它拖垮整份配置
         return AppConfig(
-            version=int(d.get('version', 1)),
-            proxy_mode=str(mode),
+            version=_as_int(d.get('version'), 1),
+            proxy_mode=mode,
             proxy=raw_proxy,
-            timezone=d.get('timezone', 'Asia/Shanghai'),
-            browser_path=d.get('browser_path', '') or '',
-            headless=bool(d.get('headless', True)),
-            remote_cdp_url=d.get('remote_cdp_url', '') or '',
+            timezone=_as_str(d.get('timezone'), 'Asia/Shanghai'),
+            browser_path=_as_str(d.get('browser_path'), ''),
+            headless=_as_bool(d.get('headless'), True),
+            remote_cdp_url=_as_str(d.get('remote_cdp_url'), ''),
             # 老配置没有这个键 → 看它有没有站点：有站点就说明管过站点列表了。
             # 两者都没有时保持 False，首次启动仍会补上内置站点（行为不变）。
-            sites_initialized=bool(d.get('sites_initialized'))
-            or bool(d.get('sites')),
-            auth_required=bool(d.get('auth_required', True)),
-            auth_password_enc=d.get('auth_password_enc', '') or '',
-            session_hashes=list(d.get('session_hashes') or []),
-            api_token_hashes=list(d.get('api_token_hashes') or []),
-            notify=NotifyConfig.from_dict(d.get('notify') or {}),
-            webdav=WebdavConfig.from_dict(d.get('webdav') or {}),
-            ai=AiConfig.from_dict(d.get('ai') or {}),
-            sites=[SiteConfig.from_dict(s) for s in (d.get('sites') or [])],
+            sites_initialized=_as_bool(d.get('sites_initialized'), False)
+            or bool(sites_raw),
+            auth_required=_as_bool(d.get('auth_required'), True),
+            auth_password_enc=_as_str(d.get('auth_password_enc'), ''),
+            session_hashes=_as_str_list(d.get('session_hashes')),
+            api_token_hashes=_as_str_list(d.get('api_token_hashes')),
+            notify=NotifyConfig.from_dict(d.get('notify')),
+            webdav=WebdavConfig.from_dict(d.get('webdav')),
+            ai=AiConfig.from_dict(d.get('ai')),
+            sites=sites_raw,
         )
 
 

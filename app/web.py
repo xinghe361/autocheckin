@@ -482,6 +482,33 @@ class WebApp:
             return self.service.test_alert()
 
         # --- 站点模板与元数据（供界面下拉）---
+        @route('GET', '/api/templates')
+        def _templates(q, body):
+            """可选站点模板（内置 + 插件），标注是否已加入。
+
+            插件来自 DATA_DIR/templates/*.json —— 丢个文件进去就能多一个
+            可选站点，**不用重建镜像**。
+            """
+            return {'templates': self.service.list_templates(),
+                    'dir': self.service.plugin_dir(),
+                    'errors': self.service.plugins.errors()}
+
+        @route('POST', '/api/templates/install')
+        def _templates_install(q, body):
+            """把选中的模板加入站点（幂等）。"""
+            tid = str(body.get('id') or '').strip()
+            if not tid:
+                raise ApiError('缺少模板 id', 400)
+            try:
+                return self.service.install_template(tid)
+            except ValueError as e:
+                raise ApiError(str(e), 400) from e
+
+        @route('POST', '/api/templates/reload')
+        def _templates_reload(q, body):
+            """重新扫描插件目录（用户手动放文件后用）。"""
+            return self.service.reload_plugins()
+
         @route('GET', '/api/meta')
         def _meta(q, body):
             from .models import (NOTIFY_MODES, PROXY_INHERIT, PROXY_DIRECT,
@@ -1282,6 +1309,12 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .ckbox .tip b{color:#3a424d}
 .formfoot{display:flex;gap:8px;margin-top:14px;align-items:center;flex-wrap:wrap}
 .formfoot .grow{flex:1}
+/* 设置页顶部的保存条：吸顶，长表单滚动时始终能点到。
+   加背景与下边框，避免滚动时和下面的卡片糊在一起。
+   top 用 header 的高度（header 本身也是 sticky，z-index 同为 5，
+   这里放 top:0 会滑到 header 下面，所以往下让一点）。 */
+.settings-save{position:sticky;top:62px;z-index:4;margin:0 0 12px;
+  padding:10px 12px;background:#f6f7f9;border-bottom:1px solid var(--bd)}
 .kvrow{display:flex;gap:6px;margin-bottom:6px}
 .kvrow input:first-child{flex:0 0 34%}
 .kvrow input{flex:1}
@@ -1388,6 +1421,16 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 
 <!-- ============ 设置 ============ -->
 <section id="tab-settings" class="hide">
+  <!-- 保存按钮放最上面（用户要求）：设置项很多，原来在最底部，
+       每次改一项都要滚到底，很费事。这里放在顶部并吸顶，
+       滚动时始终可见；底部也保留一个入口，方便"改完最后一项"顺手保存。 -->
+  <div class="formfoot settings-save">
+    <button class="b pri" onclick="saveSettings()">保存全部设置</button>
+    <span class="grow"></span>
+    <span class="hint" style="margin:0">改完随时点这里</span>
+  </div>
+  <div id="setMsg" class="msg"></div>
+
   <div class="card">
     <h2>代理设置</h2>
     <label>联网方式</label>
@@ -1562,8 +1605,8 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 
   <div style="display:flex;gap:8px">
     <button class="b pri" onclick="saveSettings()">保存全部设置</button>
+    <span class="hint" style="margin:0">（顶部也有一个，不用往上翻）</span>
   </div>
-  <div id="setMsg" class="msg"></div>
 </section>
 
 </main>
@@ -1716,15 +1759,99 @@ var SITE_CACHE = {};
 /* 两种调度模式的说明文案。
    单独抽成函数而不是写成行内三元：行内三元和字符串拼接混在一起时
    JS 解析容易出问题（这里踩过一次 "Unexpected token '?'"）。 */
-function modeHintHtml(isDaily){
+function modeHintHtml(isDaily, s){
   if(isDaily){
     return '每天在下面设定的时刻签到一次；今天该时刻已过就顺延到明天。';
   }
-  return '每隔下面设定的间隔签到一次，基准是<b>上一次签到成功的时间</b>'
+  var locked = s && !(isNaN(parseInt(s.success_anchor_minutes,10))
+                      || parseInt(s.success_anchor_minutes,10) < 0);
+  var hd = '每隔下面设定的间隔签到一次，基准是<b>上一次签到成功的时间</b>'
     + '（不是固定钟点）。<br>例：今天 03:21 成功、间隔 24 小时 '
-    + '&rarr; 下次明天 03:21 左右。<br>'
-    + '还没成功过的站点：先等一个间隔，然后去尝试第一次签到；'
-    + '第一次成功后，基准就换成那个真实的成功时间。';
+    + '&rarr; 下次明天 03:21 左右。<br>';
+  if(locked){
+    return hd + '这个站点的初始基准已锁定（见下面那个时刻）。'
+      + '第一次签到成功后，基准自动换成真实的成功时间。';
+  }
+  return hd + '还没设置过：先在上面填好时刻，再选这个模式 —— '
+    + '那一刻便会<b>锁定为初始基准</b>，之后不能修改。'
+    + '首次成功后就自动以成功时间为基准了。';
+}
+
+/* 基准是否已锁定 */
+function anchorLocked(s){
+  var a = parseInt(s && s.success_anchor_minutes, 10);
+  return !(isNaN(a) || a < 0);
+}
+/* 时刻输入框是否该禁用。
+   ⚠️ 不能只看"是不是 daily 模式"：那样一来"选了成功模式但还没锁定"
+   也会被禁用，用户就永远没机会把默认的 03:00 改成自己要的 09:35
+   （实测发现的缺陷）。正确规则：
+     * daily 模式 -> 可编辑（这是"每天固定时刻"的配置）
+     * 成功模式 + 未锁定 -> 可编辑（让用户先填，再选模式锁定）
+     * 成功模式 + 已锁定 -> 禁用（用户要求"锁定后人工不能再改"）
+   isDaily 必须由调用方显式传入：初次渲染时用表单数据里的模式，
+   切换时用实时 radio 状态 —— 不能在这里查 DOM（渲染时查不到）。 */
+function timeLocked(s, isDaily){
+  if(isDaily) return false;
+  return anchorLocked(s);
+}
+
+/* 基准时刻的取值：优先用已锁定的基准；没锁定过就用当前 daily 时刻。
+   用户语义："设置这个模式的那一刻，把那一刻填的时刻锁定为初始基准。"
+   所以没设置过时，界面上显示的就是即将被锁定的那个值。 */
+function anchorMinutes(s){
+  var a = parseInt(s && s.success_anchor_minutes, 10);
+  if(isNaN(a) || a < 0){
+    // 没设置过 -> 用 daily 时刻作为"即将锁定"的值
+    return ((parseInt(s.daily_hour||3,10)%24)*60) + (parseInt(s.daily_minute||0,10)%60);
+  }
+  return a % 1440;
+}
+function anchorHour(s){ return Math.floor(anchorMinutes(s)/60); }
+function anchorMinute(s){ return anchorMinutes(s)%60; }
+
+/* 时刻输入框下面那行说明 */
+function timeHintHtml(s){
+  var a = parseInt(s && s.success_anchor_minutes, 10);
+  var locked = !(isNaN(a) || a < 0);
+  if(locked){
+    var hh = String(Math.floor(a/60)).padStart(2,'0');
+    var mm = String(a%60).padStart(2,'0');
+    return '已锁定为 <b>'+hh+':'+mm+'</b>：这是首次签到成功前的基准时刻，'
+      + '不可再修改。<br>第一次签到成功后会<b>自动换成真实的成功时间</b>'
+      + '（例如 09:41 成功，之后就以 09:41 为基准）。';
+  }
+  return '填好时刻后选「以【上次签到成功时间】为基准」，'
+    + '这个时刻会被<b>锁定为初始基准</b>，之后不能再改。';
+}
+
+/* 模式切换时处理"锁定初始基准"。
+   从"每天固定时刻"切到"以成功时间为基准"时，把当时填的时刻定为基准。
+   已经锁定过的不会因为再次点击而被改写（用户要求"设置的那一刻直接锁定"）。 */
+function onModeChange(id){
+  var p = 'f_'+id+'_';
+  var daily = document.querySelector('input[name="'+p+'mode"][value="daily"]');
+  var isDaily = !!(daily && daily.checked);
+  var hidden = $(p+'anchor');
+  if(!isDaily && hidden){
+    var already = hidden.getAttribute
+      && hidden.getAttribute('data-locked') === '1';
+    if(!already){
+      // 首次切到这个模式 -> 锁定当前输入框里的时刻
+      var h = parseInt(($(p+'hour')||{}).value || '3', 10);
+      var m = parseInt(($(p+'min')||{}).value || '0', 10);
+      if(isNaN(h)) h = 3;
+      if(isNaN(m)) m = 0;
+      var locked = (Math.max(0,Math.min(23,h))*60) + Math.max(0,Math.min(59,m));
+      hidden.value = locked;
+      if(hidden.setAttribute) hidden.setAttribute('data-locked', '1');
+      $(p+'hour').value = String(Math.floor(locked/60)).padStart(2,'0');
+      $(p+'min').value = String(locked%60).padStart(2,'0');
+      var hint = $(p+'timeHint');
+      if(hint) hint.innerHTML = timeHintHtml({success_anchor_minutes: locked});
+    }
+  }
+  swSync(id);
 }
 
 /* 把分钟数说成人话：1440 -> "24 小时" */
@@ -2106,6 +2233,8 @@ document.addEventListener('input', function(e){
 function swSyncRadios(id){
   swSync(id);
   swSiteProxy(id);
+  /* 模式切换可能刚把"初始基准"锁定下来，这里同步一次显隐与提示 */
+  onModeChange(id);
 }
 
 /* 自定义请求头：一行一个 key/value */
@@ -2207,12 +2336,20 @@ function siteFormHtml(s, c){
   +       (isDaily?'':' checked')+' data-needs-sync="1" data-sid="'+esc(id)+'">'
   +       '以【上次签到成功时间】为基准</label>'
   +   '</div>'
-  +   '<div class="hint" style="margin:6px 0 0">' + modeHintHtml(isDaily) + '</div>'
+  +   '<div class="hint" style="margin:6px 0 0">' + modeHintHtml(isDaily, s) + '</div>'
   +   '<div class="fgrid" style="margin-top:6px">'
-  +     '<div id="'+p+'dailyBox"><label>时刻（24 小时制）</label>'
+  +     '<div id="'+p+'dailyBox"><label id="'+p+'timeLbl">'
+  +       (isDaily? '时刻（24 小时制）'
+                : (anchorLocked(s)? '初始基准时刻（已锁定）'
+                                   : '初始基准时刻（填好后选上面的模式即可锁定）'))
+  +       '</label>'
   +       '<span class="inline"><input type="number" id="'+p+'hour" min="0" max="23" value="'
-  +         s.daily_hour+'"> : <input type="number" id="'+p+'min" min="0" max="59" value="'
-  +         String(s.daily_minute).padStart(2,'0')+'"></span></div>'
+  +         String(anchorHour(s)).padStart(2,'0')+'"'+(timeLocked(s, isDaily)?' disabled':'')+'> : '
+  +       '<input type="number" id="'+p+'min" min="0" max="59" value="'
+  +         String(anchorMinute(s)).padStart(2,'0')+'"'+(timeLocked(s, isDaily)?' disabled':'')+'>'
+  +       (timeLocked(s, isDaily)? '<span class="hint" style="margin:0">🔒</span>' : '')
+  +       '</span>'
+  +       '<div class="hint" id="'+p+'timeHint">'+timeHintHtml(s)+'</div></div>'
   +     '<div id="'+p+'ivalBox"><label>间隔（分钟，1440＝24 小时）</label>'
   +       '<input type="number" id="'+p+'ival" min="60" max="10080" value="'
   +         (s.success_interval_minutes||1440)+'">'
@@ -2220,9 +2357,11 @@ function siteFormHtml(s, c){
   +     '<div><label>随机延迟上限（分钟）</label>'
   +       '<span class="inline"><input type="number" id="'+p+'jitter" min="0" max="720" value="'
   +         Math.round((s.jitter_seconds||0)/60)+'"></span>'
-  +       '<div class="hint">在设定时刻前后随机浮动，避免每天同一秒请求</div></div>'
+  +       '<div class="hint">在基准时刻前后随机浮动，避免每天同一秒请求</div></div>'
   +   '</div>'
   +   _sw(p+'jitterOn','启用随机延迟', s.jitter_enabled, id)
+  +   '<input type="hidden" id="'+p+'anchor" value="'+anchorMinutes(s)+'"'
+  +     ' data-locked="'+(anchorLocked(s)?'1':'0')+'">'
   + '</div>'
 
   + '<div class="fsec"><h4>失败重试</h4>'
@@ -2351,7 +2490,21 @@ function swSync(id){
   var aOn = $(p+'aiOn'); lb(aOn, !!(aOn&&aOn.checked));
   var daily = document.querySelector('input[name="'+p+'mode"][value="daily"]');
   var isDaily = !!(daily && daily.checked);
-  set($(p+'hour'), isDaily); set($(p+'min'), isDaily);
+  /* 时刻框可用性：daily 可编辑；成功模式未锁定也可编辑（先让用户填），
+     锁定后才禁用。只看 isDaily 会把"选了成功模式但还没锁定"误禁用。 */
+  var aHidden = $(p+'anchor');
+  var aVal = aHidden ? parseInt(aHidden.value, 10) : -1;
+  var aLocked = aHidden && aHidden.getAttribute
+    ? aHidden.getAttribute('data-locked') === '1' : false;
+  var locked = !isDaily && aLocked && !(isNaN(aVal) || aVal < 0);
+  set($(p+'hour'), !locked); set($(p+'min'), !locked);
+  /* 标题与锁图标跟着锁状态变 */
+  var lbl = $(p+'timeLbl');
+  if(lbl){
+    lbl.textContent = isDaily ? '时刻（24 小时制）'
+      : (locked ? '初始基准时刻（已锁定）'
+                : '初始基准时刻（填好后选上面的模式即可锁定）');
+  }
   var box = $(p+'dailyBox'); if(box) box.style.opacity = isDaily? '1':'0.45';
   /* 间隔输入只在"以成功时间为基准"模式下有意义 */
   set($(p+'ival'), !isDaily);
@@ -2410,6 +2563,20 @@ function saveSite(id){
     retry_count: parseInt($(p+'rc').value||'0',10),
     retry_interval_minutes: parseInt($(p+'ri').value||'30',10),
     success_interval_minutes: Math.max(60, parseInt($(p+'ival').value||'1440',10)),
+    /* 初始基准时刻：-1 = 还没锁定。
+       ⚠️ 必须看 data-locked 而不是 hidden 的值：未锁定时 hidden 里放的是
+       "预览值"（当前 daily 时刻），直接当锚点提交会把基准悄悄锁成 03:00
+       —— 用户什么都没改却被锁了（实测发现的缺陷）。 */
+    success_anchor_minutes: (function(){
+      var hid = $(p+'anchor');
+      if(!hid) return -1;
+      var isLocked = hid.getAttribute
+        && hid.getAttribute('data-locked') === '1';
+      if(!isLocked) return -1;
+      var v = parseInt(hid.value, 10);
+      if(isNaN(v) || v < 0) return -1;
+      return v % 1440;
+    })(),
     ai_enabled: $(p+'aiOn').checked,
     notify: $(p+'notify').value,
     proxy_mode: radioValue(p+'pmode') || 'inherit',

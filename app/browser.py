@@ -425,9 +425,44 @@ class BrowserRunner:
 
 
 def browser_available() -> bool:
-    """当前环境是否可用 Playwright（用于自检与界面提示）。"""
+    """当前环境是否**有浏览器能力**（用于自检与界面提示）。
+
+    判据分两种情况 —— 以前只看"playwright 能否 import"，那是错的：
+      * 配了 remote_cdp_url（连外部 Chrome 的调试端口）：
+        只需要 playwright 包能 import。本地有没有浏览器二进制**无关**，
+        因为浏览器在别人那儿（比如 NAS 上的 Chrome 容器）。
+        以前这里会去查本地二进制，于是"明明配好了外部地址"却被判为
+        不可用，界面/自检都显示没有浏览器（实测发现的缺陷）。
+      * 没配 remote_cdp_url：需要本地浏览器二进制，因为要在本进程 launch。
+        如果镜像为瘦身剔除了浏览器，只查 import 会返回 True，然后需要
+        浏览器的站点会以 "Executable doesn't exist at ..." 这种难懂的错
+        失败 —— 用户看到的是"启动失败"，而不是"这个镜像没带浏览器"。
+    """
     try:
-        import playwright.sync_api  # noqa: F401
-        return True
+        from playwright.sync_api import sync_playwright
     except ImportError:
         return False
+    if configured_cdp_url():
+        return True
+    try:
+        with sync_playwright() as p:
+            path = p.chromium.executable_path
+        return bool(path) and os.path.exists(path)
+    except Exception:                                           # noqa: BLE001
+        # 启动 playwright 本身失败（缺系统依赖等）也算不可用
+        return False
+
+
+def configured_cdp_url() -> str:
+    """从配置里读 remote_cdp_url；读不到就当没配。
+
+    单独抽出来是为了让 browser_available() 在没有 service 上下文时
+    （自检脚本、界面提示）也能判断。
+    """
+    try:
+        from .store import Store
+        data_dir = os.environ.get('DATA_DIR', '/data')
+        cfg = Store(data_dir).load_config()
+        return str(getattr(cfg, 'remote_cdp_url', '') or '')
+    except Exception:                                           # noqa: BLE001
+        return ''

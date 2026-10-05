@@ -23,7 +23,7 @@ DEFAULT_PORT = 28999      # 容器内部监听端口；host 模式下即宿主�
 DEFAULT_DATA_DIR = '/data'
 DEFAULT_TZ = 'Asia/Shanghai'
 
-VERSION = '1.4.2'
+VERSION = '1.4.3'
 
 
 @dataclass
@@ -108,8 +108,13 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
                   else os.environ.get('DATA_DIR', DEFAULT_DATA_DIR))
     s.timezone = (args.timezone if args.timezone is not None
                   else os.environ.get('TZ', DEFAULT_TZ))
-    s.proxy = (args.proxy if args.proxy is not None
-               else os.environ.get('PROXY', '')).strip()
+    # 代理**只**由网页「设置 → 网络」决定，不再从环境变量读。
+    #
+    # 为什么去掉环境变量：两处都能设就会互相打架，而"网页里改了却不生效"
+    # 是最难排查的一类问题（用户看到的现象是"我明明填了代理，怎么还是直连"）。
+    # 现在只有一个来源，行为可预测。
+    # --proxy 命令行参数保留（调试用），但没有环境变量回退。
+    s.proxy = (args.proxy or '').strip()
     # 代理地址还是模板占位符的话，必须在这里就指出来。
     # 否则它会表现为"域名解析失败（Errno -2）"，看起来像 DNS 故障，
     # 用户会去查 DNS —— 实测就是这么被带偏的。
@@ -119,13 +124,18 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
             print('[警告] 代理地址看起来还是模板占位符：%s' % s.proxy)
             print('       程序会把它当成真实主机名去解析，必然失败，')
             print('       报错会显示为"域名解析失败"，但真正的原因是代理没填。')
-            print('       请到「设置 → 网络」填真实地址，或删掉 compose 里的 PROXY 行。')
+            print('       请到网页「设置 → 网络」填真实地址。')
             print('       已忽略这个占位符，本次按【直连】运行。')
             s.proxy = ''
         else:
             # 打码后再打印：代理地址常带 user:pass，直接进日志等于凭据泄露
             print('[启动] 代理: %s（主机 %s）'
                   % (mask_proxy_url(s.proxy), proxy_host(s.proxy)))
+    if os.environ.get('PROXY', '').strip():
+        print('[提示] 检测到环境变量 PROXY，但本版本已改为'
+              '**只认网页「设置 → 网络」里的代理配置**。')
+        print('       环境变量不再生效，请到网页里填写；'
+              'compose 里的 PROXY 行可以删掉了。')
     s.env_key = os.environ.get('AUTOCHECKIN_KEY', '').strip()
     s.log_level = (args.log_level if args.log_level is not None
                    else os.environ.get('LOG_LEVEL', 'info'))
@@ -134,7 +144,19 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
     tick = (args.tick_seconds if args.tick_seconds is not None
             else _env_int('TICK_SECONDS', 60))
     s.tick_seconds = max(5, int(tick))
-    s.version = os.environ.get('APP_VERSION', VERSION)
+    # 版本号**只**反映代码真实版本，不可被环境变量覆盖。
+    #
+    # 为什么去掉覆盖：以前是 `os.environ.get('APP_VERSION', VERSION)`，
+    # 于是"界面显示的版本"和"实际跑的代码"可以不一致 —— 排查问题时报的
+    # 版本号是错的，等于自毁线索（用户就因此被带偏过：明明更新了镜像，
+    # 界面却一直显示旧版本，查了很久）。
+    # 如果确实需要标注自建镜像，用 APP_VERSION_SUFFIX 之类另起一个字段，
+    # 不能顶替 VERSION 本身。
+    s.version = VERSION
+    if os.environ.get('APP_VERSION', '').strip():
+        print('[提示] 检测到环境变量 APP_VERSION，但本版本已改为'
+              '**版本号只反映代码真实版本**，该变量不再生效。')
+        print('       当前真实版本：%s' % VERSION)
     return s
 
 
@@ -183,7 +205,29 @@ def create_service(settings: Settings):
         try:
             from .browser import BrowserRunner, browser_available
             if browser_available():
-                browser = BrowserRunner(headless=True)
+                # remote_cdp_url / browser_path / headless 都存在配置里，
+                # 所以在建服务之前先读一次配置。
+                #
+                # ⚠️ 以前这里只写 BrowserRunner(headless=True)，**没把配置传进去** ——
+                # 于是界面上填的"连接外部 Chrome 调试端口"被完全忽略，
+                # 而且不报错（用户会以为配好了却一直走本地浏览器/不可用）。
+                # 实测发现。
+                try:
+                    _cfg = SV.Service(settings.data_dir,
+                                      version=settings.version,
+                                      env_key=settings.env_key or None,
+                                      proxy=settings.proxy).load_config()
+                    _cdp = getattr(_cfg, 'remote_cdp_url', '') or ''
+                    _bpath = getattr(_cfg, 'browser_path', '') or ''
+                    _headless = bool(getattr(_cfg, 'headless', True))
+                except Exception:                               # noqa: BLE001
+                    _cdp, _bpath, _headless = '', '', True
+                browser = BrowserRunner(headless=_headless,
+                                        browser_path=_bpath,
+                                        remote_cdp_url=_cdp)
+                if _cdp:
+                    print('[启动] 浏览器：连接外部 Chrome（%s）'
+                          % _cdp.split('@')[-1])
         except Exception:  # noqa: BLE001
             browser = None
 

@@ -39,10 +39,25 @@ class TestConfigAndOverview(ServiceCase):
         self.assertFalse(ov['ai_configured'])
         self.assertEqual(ov['version'], '1.0.0-test')
 
-    def test_external_proxy_used_when_config_empty(self):
+    def test_constructor_proxy_no_longer_overrides_config(self):
+        """构造参数不再能顶替配置里的代理。
+
+        以前 Service(proxy=...) 会在"配置里没代理"时顶上去，
+        那是环境变量 PROXY 的入口。现在代理**只**来自配置
+        （网页「设置 → 网络」），所以传了这个参数也不该生效。
+        """
         svc = SV.Service(self.dir, env_key=S.generate_key(),
                          proxy='http://from-env:1')
-        self.assertTrue(svc.overview()['proxy_configured'])
+        self.assertFalse(svc.overview()['proxy_configured'],
+                         '代理只认配置；构造参数不该再生效')
+
+    def test_config_proxy_is_reported(self):
+        """配置里设了代理才应报告为已配置。"""
+        cfg = self.svc.load_config()
+        cfg.proxy = 'http://from-config:1'
+        cfg.proxy_mode = 'custom'
+        self.svc.save_config(cfg)
+        self.assertTrue(self.svc.overview()['proxy_configured'])
 
     def test_list_sites_reports_runtime_fields(self):
         s = self.svc.list_sites()[0]
@@ -164,9 +179,15 @@ class TestRecording(ServiceCase):
         self.assertTrue(out['saved'])
         site = self.svc.get_site('new1')
         self.assertEqual(site.kind, 'custom')
-        self.assertTrue(site.need_browser)
         self.assertEqual(site.homepage, 'https://a.b/')
         self.assertTrue(site.steps)
+        # 录制的步骤含 click/fill，所以**算出来**需要浏览器 ——
+        # 但不再硬编码到 site.need_browser 上（由 needs_browser() 依据
+        # 步骤动作自动判断，这样纯 get/post 步骤的站点能走纯请求路径）
+        from app.engine import needs_browser
+        self.assertTrue(needs_browser(site), '含浏览器动作的录制站点需要浏览器')
+        self.assertFalse(site.need_browser,
+                         '不该把 need_browser 硬编码到配置里（会盖掉自动判断）')
 
     def test_events_ignored_without_session(self):
         self.assertEqual(self.svc.push_events('nope', [{'kind': 'click'}]), 0)

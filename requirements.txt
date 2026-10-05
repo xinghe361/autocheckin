@@ -1,7 +1,14 @@
 # 运行依赖（刻意保持精简）
 #
-# playwright 既提供 Python API，也提供镜像里预装的 Chromium 驱动。
-# 官方基础镜像已包含浏览器与全部系统依赖，所以这里不需要额外装 apt 包。
+# --- playwright：保留，但**镜像里不带浏览器** ---
+#   内置站点（V2EX / NodeSeek / Chiphell）全部走纯 HTTP 请求，不需要浏览器；
+#   抓 Cookie 靠用户浏览器里的扩展；录制脚本注入在用户浏览器的 iframe 里。
+#   留着这个包是为了保留**浏览器接口**：配好 remote_cdp_url 后可以连接
+#   外部已有的 Chrome（CDP 调试端口，如 NAS 上的 Kasm Chrome），
+#   这样"录制的自定义站点"仍能回放 —— 而且镜像依然很瘦（不像把整个
+#   Chromium 打进镜像那样多 600MB+）。
+#   包本身约 36MB（自带 driver），不含浏览器二进制。
 playwright==1.48.0
+
 # 凭据加密（Fernet = AES-128-CBC + HMAC）
 cryptography==43.0.3

@@ -46,6 +46,12 @@ class SiteSchedule:
     # "上次成功后 XX 分钟"（取的是重试间隔），显示与实际不符，
     # 用户也没法真的调间隔。
     success_interval_minutes: int = 1440
+    # 【上次签到成功时间】模式的**初始基准时刻**（当天 00:00 起的分钟数）。
+    # 用户在界面上选这个模式时，把那一刻填的时刻锁定成基准。
+    # -1 = 没设置过（老配置/新站点）。
+    # 基准取 max(初始锚点, 上次成功时间)：首次成功前用锚点，
+    # 成功之后自然被真实成功时间取代。
+    success_anchor_minutes: int = -1
 
     # 是否启用随机偏移
     jitter_enabled: bool = False
@@ -111,21 +117,67 @@ def next_daily_time(now: int, site: SiteSchedule, rng: random.Random) -> int:
     return apply_jitter(base_tomorrow, site, rng)
 
 
-def next_success_based_time(now: int, site: SiteSchedule, rng: random.Random) -> int:
+def anchor_base_ts(now: int, anchor_minutes: int) -> int:
+    """把锁定的基准时刻换算成"**第一个**该签到的时刻"。
+
+    用户要求（第一次）："如果时刻已过就顺延下一天"。
+    所以语义是「今天的那个时刻；已经过了就用明天那个」，而不是
+    "锚点 + 一个间隔"（那样第一次会白等一整天）。
+
+    注意与成功后的区别：成功之后的基准是"实际成功时间 + 间隔"，
+    由调用方另行处理。
+    """
+    minutes = max(0, min(1439, int(anchor_minutes)))
+    candidate = _at_local_time(now, minutes // 60, minutes % 60)
+    if candidate <= now:
+        candidate += 86400          # 今天这个点已过 -> 顺延到明天
+    return int(candidate)
+
+
+def next_success_based_time(now: int, site: SiteSchedule,
+                            rng: random.Random) -> int:
     """模式二：以【上次签到成功时刻】为基准，每隔 N 分钟一次（+可选随机偏移）。
 
-    例：今天 03:21 成功、间隔 1440 分钟 → 下次 明天 03:21 + 随机偏移。
+    基准的取法（优先级从高到低）：
+      1. 上次真实签到成功时间（一旦成功过，就用它）
+      2. 界面里锁定的"初始基准时刻"（success_anchor_minutes）
+      3. 都没有（老配置/从没设置过）-> 现在 + 间隔（保持旧行为不变）
 
-    若从未成功过（新加的站点），则以"现在"为基准排第一次 ——
-    也就是启用后先等一个间隔，再去尝试第一次签到。
-    首次尝试成功后，基准就自动换成真实的成功时间。
+    基准确定后：候选 = 基准 + 间隔 N 次，直到落在未来；再叠加随机偏移。
+
+    例：初始基准 09:35、间隔 1440 分钟
+      -> 首次排在 09:35（今天或明天，看当前时间）
+      -> 09:35 签到成功后，基准换成真实成功时刻（如 09:41）
+      -> 下次就是 09:41 + 1440 分钟 = 明天 09:41
     """
     interval = max(60, int(getattr(site, 'success_interval_minutes', 1440) or 1440))
     interval_seconds = interval * 60
 
-    if site.last_success_at:
-        base = int(site.last_success_at) + interval_seconds
+    # ⚠️ 不能用 `... or -1`：0 是合法值（基准 00:00），而 `0 or -1` 会变成 -1，
+    # 于是"午夜基准"被当成"没设置"，静默退回旧行为（实测踩过）。
+    raw_anchor = getattr(site, 'success_anchor_minutes', -1)
+    anchor = -1 if raw_anchor is None else int(raw_anchor)
+    last_success = getattr(site, 'last_success_at', None)
+    if last_success:
+        # 成功过：基准就是真实成功时间（锚点自动被取代）
+        base = int(last_success) + interval_seconds
+    elif anchor >= 0:
+        # 还没成功过、但锁定了初始基准：
+        # 第一次就排在"基准当天"（今天该时刻已过则顺延明天），
+        # 而不是"锚点 + 一个间隔"—— 后者会让第一次白等一整天。
+        #
+        # ⚠️ 这里必须单独处理"叠加抖动后仍然过去"的情形：
+        # 那种情况下要顺延到**下一个基准点（+1 天）**，不能交给下面
+        # 那个按 `interval` 推进的循环 —— 间隔是 1440 分钟时，
+        # 从 00:00 会一次跳到次日 14:00，把整段都跳过（实测踩过）。
+        base = anchor_base_ts(now, anchor)
+        guard = 0
+        while apply_jitter(base, site, rng) <= now and guard < 400:
+            base += 86400
+            guard += 1
+        return apply_jitter(base, site, rng)
     else:
+        # 从没成功过、也没设置初始基准 -> 保持旧行为
         base = int(now) + interval_seconds
 
     candidate = apply_jitter(base, site, rng)

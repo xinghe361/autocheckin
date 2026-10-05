@@ -123,10 +123,24 @@ class TestAppConfig(unittest.TestCase):
         back = AppConfig.from_dict(cfg.to_dict())
         self.assertEqual(back.proxy, cfg.proxy)
         self.assertEqual(back.notify.mode, NOTIFY_FAIL_ONLY)
-        self.assertEqual(back.notify.pushplus_token, 'pt')
         self.assertEqual(back.webdav.url, cfg.webdav.url)
         self.assertEqual(back.ai.api_key_enc, 'enc')
         self.assertEqual(len(back.sites), len(cfg.sites))
+
+    def test_to_dict_strips_notify_plaintext(self):
+        """notify 凭据**刻意不**在 to_dict 里往返。
+
+        内存里是明文（notify.py 直接用），但落盘只能有密文。
+        所以 to_dict() 一律剥掉明文 —— 即使调用方忘了加密，
+        最坏结果也只是丢字段，绝不会把凭据明文写到磁盘上。
+        真正的加解密在 Service 里（见 tests/test_config_robustness.py）。
+        """
+        cfg = default_config()
+        cfg.notify.pushplus_token = 'pt'
+        d = cfg.to_dict()
+        self.assertNotIn('pushplus_token', (d.get('notify') or {}))
+        self.assertEqual(cfg.notify.pushplus_token, 'pt',
+                         'to_dict 不该改内存里的明文')
 
     def test_exclude_secrets_removes_credentials(self):
         cfg = default_config()
@@ -267,12 +281,26 @@ class TestChannelProxy(unittest.TestCase):
 
 class TestNotifyConfigRoundTrip(unittest.TestCase):
     def test_channel_proxy_survives_round_trip(self):
+        """渠道代理的 mode 往返保留。
+
+        ⚠️ url（代理地址）**故意不**经 to_dict 往返 —— 它含 user:pass，
+        落盘只能存密文，加解密由 Service 负责。
+        所以这里只断言 mode，url 的往返见 test_config_robustness.py。
+        """
         c = NotifyConfig(proxy_mode='custom', proxy_url='http://p:1',
                          channel_proxy={'wecom': {'mode': 'direct'}})
         back = NotifyConfig.from_dict(c.to_dict())
         self.assertEqual(back.proxy_mode, 'custom')
-        self.assertEqual(back.proxy_url, 'http://p:1')
         self.assertEqual(back.channel_proxy['wecom']['mode'], 'direct')
+        self.assertEqual(back.channel_proxy['wecom'].get('url', ''), '',
+                         '代理地址明文不该经 to_dict 往返（落盘只有密文）')
+
+    def test_proxy_url_plaintext_not_in_to_dict(self):
+        c = NotifyConfig(proxy_url='http://user:pw@h:8')
+        d = c.to_dict()
+        self.assertNotIn('proxy_url', d, '明文代理地址不能落盘')
+        # 密文字段本身可以出现在结构里（值为空，等 Service 填）
+        self.assertEqual(d.get('proxy_url_enc', ''), '')
 
     def test_legacy_config_without_new_fields(self):
         """旧配置文件没有这些字段，不能崩。"""
@@ -400,9 +428,39 @@ class TestTemplates(unittest.TestCase):
     def test_custom_site_defaults(self):
         s = T.generic_custom_site('my', '我的站', 'https://a.b/')
         self.assertEqual(s.kind, 'custom')
-        self.assertTrue(s.need_browser)
         self.assertEqual(s.steps, [])
         self.assertTrue(s.verify_ssl)
+        # 刻意**不**硬编码 need_browser：是否走浏览器由步骤里的动作决定
+        # （见 engine.needs_browser / steps_need_browser）。
+        # 硬编码成 True 会让"纯 get/post 步骤"的站点也被迫走浏览器，
+        # 把 checkin_via_http 里支持自定义步骤的分支架空。
+        self.assertFalse(s.need_browser)
+
+    def test_no_steps_means_no_browser(self):
+        from app.engine import needs_browser
+        s = T.generic_custom_site('my', '我的站', 'https://a.b/')
+        self.assertFalse(needs_browser(s), '没有步骤的自定义站点不需要浏览器')
+
+    def test_browser_steps_need_browser(self):
+        from app.engine import needs_browser
+        from app.models import Step
+        s = T.generic_custom_site('my', '我的站', 'https://a.b/',
+                                  steps=[Step(action='click', target='#b')])
+        self.assertTrue(needs_browser(s), '含 click 的步骤需要浏览器')
+
+    def test_http_steps_do_not_need_browser(self):
+        """纯 get/post 步骤应该走纯请求路径。
+
+        以前 needs_browser() 对自定义站点一律返回 True，
+        导致 checkin_via_http 里"自定义站点若填的是 http 步骤也可走这条路"
+        那条分支**永远走不到**（既有缺陷）。
+        """
+        from app.engine import needs_browser
+        from app.models import Step
+        s = T.generic_custom_site('my', '我的站', 'https://a.b/',
+                                  steps=[Step(action='get',
+                                              target='https://a.b/api')])
+        self.assertFalse(needs_browser(s), '纯 http 步骤不该派到浏览器')
 
 
 if __name__ == '__main__':

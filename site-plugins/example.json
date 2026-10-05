@@ -1,0 +1,23 @@
+{
+  "id": "example",
+  "name": "示例站点（请改成你自己的）",
+  "homepage": "https://example.com/",
+  "mission_url": "https://example.com/checkin",
+  "need_browser": false,
+  "verify_ssl": true,
+  "flow": [
+    { "action": "get", "url": "{mission_url}" },
+    { "action": "extract_regex", "pattern": "token=([0-9a-f]+)", "save_as": "token", "required": true },
+    { "action": "get", "url": "https://example.com/checkin/do?token={token}" },
+    { "action": "get", "url": "{mission_url}" }
+  ],
+  "success_keywords": ["签到成功", "已领取"],
+  "fail_keywords": ["请先登录", "需要先登录"],
+  "already_keywords": ["今天已经签到"],
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9"
+  },
+  "note": "这是一份可复制的模板。改 id / name / homepage / flow 就能变成你自己的站点。"
+}

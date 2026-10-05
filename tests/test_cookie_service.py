@@ -246,9 +246,11 @@ class TestMaybeCheckCookies(unittest.TestCase):
 
         out = self.svc.maybe_check_cookies(force=True)
         self.assertTrue(out.get('skipped'))
-        # 仍要记录时间，否则调度每分钟都会重跑
+        # 仍要记录时间，否则调度每分钟都会重跑。
+        # 注意 _cookie_check_at 存在 state.meta 里，不是顶层键
+        # （以前这里写 st.get(...)，RuntimeState 没有 get 方法，所以一直是假通过）。
         st = self.svc.load_state()
-        self.assertGreater(st.get('_cookie_check_at', 0), 0)
+        self.assertGreater(st.meta.get('_cookie_check_at', 0), 0)
 
     def test_alert_when_token_present_even_if_channels_empty(self):
         """填了 token 但没勾选渠道 —— 仍视为"有渠道"，失效时要能推出去。

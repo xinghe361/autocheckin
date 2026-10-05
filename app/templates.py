@@ -158,11 +158,66 @@ CHIPHELL = {
 BUILTIN: List[Dict[str, Any]] = [V2EX, NODESEEK, CHIPHELL]
 
 
+# ---------------------------------------------------------------------------
+# 插件模板：把"支持哪些站点"从镜像里解耦出来
+#
+# 模板本来就是纯数据，所以外部只要放一个 JSON 文件（数据目录 templates/*.json）
+# 就能多一个可选模板，**不用重建镜像**。实现见 app/plugins.py。
+#
+# 这里用"提供者回调"的方式挂钩子，而不是让 templates 直接依赖 plugins：
+#   * 避免循环依赖（plugins 校验时要用到动作白名单）
+#   * 单测里可以注入假提供者
+#   * 没挂提供者时行为与以前完全一致（只有那三个内置模板）
+# 服务启动时会调用 set_plugin_provider() 挂上真实的插件存储。
+# ---------------------------------------------------------------------------
+_plugin_provider = None
+
+
+def set_plugin_provider(fn) -> None:
+    """挂上插件提供者：fn() -> List[模板 dict]。传 None 表示取消。"""
+    global _plugin_provider
+    _plugin_provider = fn
+
+
+def plugin_templates() -> List[Dict[str, Any]]:
+    """当前可用的插件模板（没有提供者或出错时返回空表，绝不让它抛出去）。"""
+    if _plugin_provider is None:
+        return []
+    try:
+        got = _plugin_provider() or []
+    except Exception:                                           # noqa: BLE001
+        # 插件加载失败不能影响内置功能
+        return []
+    return [t for t in got if isinstance(t, dict) and t.get('id')]
+
+
 def template_by_id(tid: str) -> Dict[str, Any]:
+    """按 id 找模板。
+
+    顺序：**插件优先，内置兜底** —— 这样用户可以用插件覆盖某个内置模板
+    （比如站点改版导致判定关键词失效时，不必等我改代码发版）。
+    """
+    if tid:
+        for t in plugin_templates():
+            if t.get('id') == tid:
+                return t
     for t in BUILTIN:
         if t['id'] == tid:
             return t
     return {}
+
+
+def available_templates() -> List[Dict[str, Any]]:
+    """所有可选模板（内置 + 插件），id 去重、插件优先。
+
+    供界面"可选站点"列表使用：用户勾选哪个才把它加进站点。
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for t in BUILTIN:
+        out[t['id']] = dict(t, source='builtin')
+    for t in plugin_templates():
+        out[t['id']] = dict(t, source='plugin')
+    return sorted(out.values(), key=lambda t: t['id'])
 
 
 def builtin_sites() -> List[SiteConfig]:
@@ -196,7 +251,10 @@ def generic_custom_site(site_id: str, name: str, homepage: str,
         kind='custom',
         template='',
         homepage=homepage,
-        need_browser=True,          # 自定义流程默认走浏览器，最通用
+        # 不硬编码 need_browser：交给 engine.needs_browser() 依据步骤里的动作
+        # （click/fill/goto 等浏览器动作）自动判断。硬编码成 True 会让
+        # "纯 get/post 步骤"的自定义站点也被迫走浏览器，
+        # 把 checkin_via_http 里那套支持自定义步骤的分支架空。
         verify_ssl=True,
         steps=list(steps or []),
         success_keywords=[],

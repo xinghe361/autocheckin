@@ -290,6 +290,31 @@ def _render_step(step: Dict[str, Any], variables: Dict[str, str]) -> Dict[str, A
     return out
 
 
+# 纯请求流程支持的动作（run_http_flow 里实现的就这三个）
+HTTP_FLOW_ACTIONS = frozenset({'get', 'post', 'extract_regex'})
+
+
+def steps_need_browser(steps) -> bool:
+    """这批步骤里有**只有浏览器才能做**的动作吗？
+
+    为什么必须区分：录制产出的是 click / fill / goto / wait 这类浏览器动作，
+    而 run_http_flow 只实现 get / post / extract_regex，**遇到不认识的 action
+    会静默跳过**。所以步骤全是浏览器动作时若被派到纯请求路径，
+    结果会是"发了个请求、什么也没做、然后报未登录" —— 最难查的那类错。
+
+    反过来，纯 HTTP 步骤（get/post/extract_regex）应该走纯请求路径：
+    engine.checkin_via_http 的注释本来就写着"自定义站点若填的是 http 步骤，
+    也可走这条路"，但以前 needs_browser() 一律返回 True，那条分支永远走不到。
+    """
+    for s in steps or []:
+        action = getattr(s, 'action', None)
+        if action is None and isinstance(s, dict):
+            action = s.get('action')
+        if action and str(action) not in HTTP_FLOW_ACTIONS:
+            return True
+    return False
+
+
 def needs_browser(site: SiteConfig) -> bool:
     """该站点是否需要浏览器。"""
     if site.need_browser:
@@ -297,7 +322,9 @@ def needs_browser(site: SiteConfig) -> bool:
     if site.kind == KIND_TEMPLATE:
         tpl = template_by_id(site.template)
         return bool(tpl.get('need_browser'))
-    return bool(site.steps)
+    # 自定义站点：只有步骤里含浏览器动作才需要浏览器。
+    # 全是 get/post/extract_regex 的站点应当走纯请求（否则纯请求分支永远到不了）。
+    return steps_need_browser(site.steps)
 
 
 def check_cookie_valid(site: SiteConfig, cookie_header: str,
@@ -398,7 +425,11 @@ def checkin_site(site: SiteConfig, proxy: str = '', password: str = '',
             if browser is None:
                 return CheckinResult(
                     site_id=site.id, site_name=site.name, success=False,
-                    message='该站点需要浏览器，但浏览器未启用/不可用',
+                    message='该站点需要浏览器（录制的站点用的是点击/填表这类'
+                            '浏览器动作），但当前镜像没有浏览器。'
+                            '内置站点不受影响；如需这类站点，请换用带浏览器的'
+                            '镜像，或把站点改成纯请求流程'
+                            '（纯请求只支持 get / post / extract_regex 三种步骤）。',
                     error_kind='browser_unavailable', attempt=attempt,
                     duration_ms=int((time.time() - started) * 1000))
             outcome = browser.run(site, proxy=proxy, password=password,

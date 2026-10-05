@@ -167,12 +167,22 @@ class TestStartupWarning(unittest.TestCase):
             self._restore(saved)
 
     def test_settings_keeps_real_proxy(self):
+        """真实代理地址要保留（--proxy 路径）。
+
+        注意：环境变量 PROXY 已不再被读取（代理只认网页设置），
+        所以这里改用命令行参数验证"真实地址不被误判成占位符"。
+        """
+        import app.main as M
+        s = M.build_settings(['--proxy', 'http://192.168.1.10:7890'])
+        self.assertEqual(s.proxy, 'http://192.168.1.10:7890')
+
+    def test_proxy_env_no_longer_used(self):
+        """环境变量里的真实代理也不再生效 —— 统一由网页设置决定。"""
         import app.main as M
         saved = os.environ.get('PROXY')
         os.environ['PROXY'] = 'http://192.168.1.10:7890'
         try:
-            s = M.build_settings([])
-            self.assertEqual(s.proxy, 'http://192.168.1.10:7890')
+            self.assertEqual(M.build_settings([]).proxy, '')
         finally:
             self._restore(saved)
 

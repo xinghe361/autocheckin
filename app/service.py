@@ -41,10 +41,12 @@ from . import notify as notify_mod
 from . import secrets as S
 from . import webdav as W
 from .models import (AppConfig, NotifyConfig, SiteConfig, Step, WebdavConfig,
-                     AiConfig, KIND_CUSTOM, default_config)
+                     AiConfig, KIND_CUSTOM, KIND_TEMPLATE, default_config)
 from .recorder import RawEvent, StepRecorder, merge_steps
 from .runner import Runner
 from .store import RuntimeState, Store, was_ever_initialized
+from . import templates as T
+from .plugins import PluginStore
 from .templates import builtin_sites, template_by_id
 
 
@@ -94,9 +96,83 @@ class Service:
         self._recordings: Dict[str, RecordSession] = {}
         # 可注入的日志函数：后台巡检等场景需要留痕，但单测里不该刷屏
         self.log = log_fn or (lambda *a: None)
+        # 发现过"明文存盘的凭据"就置位，下次保存时自动加密（迁移用）
+        self._needs_secret_migration = False
+        # 插件模板：从 DATA_DIR/templates/*.json 读，**不用重建镜像**就能加站点。
+        # 挂到 templates 模块的回调上，这样 engine/browser/models 里
+        # 那些 template_by_id() 调用不需要改（也不用到处传 store）。
+        self.plugins = PluginStore(data_dir)
+        T.set_plugin_provider(self.plugins.load)
 
-    # ------------------------------------------------------------ 基础
+    # ---------------------------------------------------------- 插件模板
+    def list_templates(self) -> List[Dict[str, Any]]:
+        """所有可选模板（内置 + 插件），并标注该模板是否已加入站点。
+
+        界面用它渲染"可选站点"列表：只有**选中（已加入）**的才在站点里展示。
+        """
+        try:
+            have = {s.id for s in self.load_config().sites}
+        except Exception:                                       # noqa: BLE001
+            have = set()
+        out = []
+        for t in T.available_templates():
+            out.append({
+                'id': t['id'],
+                'name': t.get('name', t['id']),
+                'homepage': t.get('homepage', ''),
+                'need_browser': bool(t.get('need_browser')),
+                'verify_ssl': bool(t.get('verify_ssl', True)),
+                'note': t.get('note', ''),
+                'source': t.get('source', 'builtin'),
+                'installed': t['id'] in have,
+                'step_count': len(t.get('flow') or []),
+            })
+        return out
+
+    def install_template(self, tid: str) -> Dict[str, Any]:
+        """把一个模板加入站点（幂等）。
+
+        参数按模板预置好（关键词/请求头/流程），加入后可在站点页改。
+        """
+        tpl = T.template_by_id(tid)
+        if not tpl:
+            raise ValueError('没有这个模板：%s' % tid)
+        cfg = self.load_config()
+        if cfg.site(tid):
+            return {'ok': True, 'already': True, 'id': tid}
+        site = SiteConfig(
+            id=tid,
+            name=tpl.get('name') or tid,
+            enabled=True,
+            kind=KIND_TEMPLATE,
+            template=tid,
+            homepage=tpl.get('homepage', ''),
+            need_browser=bool(tpl.get('need_browser')),
+            verify_ssl=bool(tpl.get('verify_ssl', True)),
+            success_keywords=list(tpl.get('success_keywords') or []),
+            fail_keywords=list(tpl.get('fail_keywords') or []),
+            headers=dict(tpl.get('headers') or {}),
+        )
+        cfg.sites.append(site)
+        cfg.sites_initialized = True
+        self.save_config(cfg)
+        return {'ok': True, 'already': False, 'id': tid,
+                'name': site.name, 'need_browser': site.need_browser}
+
+    def reload_plugins(self) -> Dict[str, Any]:
+        """强制重读插件目录（界面上"重新扫描"用）。"""
+        got = self.plugins.load(force=True)
+        return {'count': len(got), 'ids': [t['id'] for t in got],
+                'errors': self.plugins.errors()}
+
+    def plugin_dir(self) -> str:
+        return self.plugins.ensure_dir()
+
     def load_config(self) -> AppConfig:
+        return self._load_config_impl()
+
+    def _load_config_impl(self) -> AppConfig:
+        """真正的加载逻辑（对外只暴露 load_config）。"""
         cfg = self.store.load_config()
         # 只在**站点为空、且配置没被显式管理过**时补内置站点。
         #
@@ -108,18 +184,71 @@ class Service:
         # 的配置（含刚装好的默认配置）才允许补。
         if not cfg.sites and not cfg.sites_initialized:
             cfg.sites = builtin_sites()
-        # 环境变量里的代理优先于配置文件（方便 compose 统一控制）。
-        # 注意：只有配置里还没设代理时才顶上去，否则会覆盖掉用户在
-        # 网页「设置 → 网络」里的选择（网页改完却"不生效"就是这么来的）。
-        from .models import PROXY_CUSTOM, PROXY_INHERIT
-        if self.proxy and not cfg.proxy:
-            cfg.proxy = self.proxy
-            if (cfg.proxy_mode or '').lower() in ('', PROXY_INHERIT,
-                                                 'direct', 'none'):
-                cfg.proxy_mode = PROXY_CUSTOM
+        # 把 notify 里的凭据解密进内存属性（notify.py 直接用明文属性）
+        self._unseal_notify(cfg)
         return cfg
 
+    # ---------------------------------------------- notify 凭据的加解密
+    def _unseal_notify(self, cfg: AppConfig) -> None:
+        """把 notify 的密文凭据解密到内存的明文属性上。
+
+        为什么在这里做（而不是 models 里）：models 不该依赖 secrets
+        （会形成循环导入），而且解密需要 SecretBox，只有 Service 有。
+
+        兼容老配置：如果只有明文、没有密文，就保持明文不动 ——
+        这样升级后功能照常，下次保存时会自动加密（平滑迁移）。
+        """
+        n = cfg.notify
+        plain: Dict[str, str] = {}
+        for plain_name, enc_name in n.SECRET_FIELDS.items():
+            token = getattr(n, enc_name, '') or ''
+            if not token:
+                continue
+            val = self.box.try_decrypt(token, '')
+            if val:
+                plain[plain_name] = val
+        # 渠道代理地址
+        cp_token = getattr(n, 'channel_proxy_urls_enc', '') or ''
+        if cp_token:
+            val = self.box.try_decrypt(cp_token, '')
+            if val:
+                plain['_channel_proxy_urls'] = val
+        if plain:
+            n.apply_secrets(plain)
+        # 只要发现过"明文存盘"的凭据，就标记一下，下次保存自动加密
+        for plain_name in n.SECRET_FIELDS:
+            if getattr(n, plain_name, '') and not getattr(n, plain_name + '_enc', ''):
+                self._needs_secret_migration = True
+                break
+        if (n.channel_proxy or {}).get('telegram', {}).get('url') \
+                and not cp_token:
+            self._needs_secret_migration = True
+
+    def _seal_notify(self, cfg: AppConfig) -> None:
+        """保存前把 notify 的明文凭据加密进 *_enc 字段。
+
+        密文写完后，明文属性在 to_dict() 里已被剥掉，所以磁盘上只有密文。
+
+        ⚠️ 这里必须**无条件按当前明文的真实状态**设置密文：
+          * 明文有值 -> 写新密文
+          * 明文为空 -> 清掉旧密文（否则下次加载会把旧密文解密回来，
+            表现为**用户删掉的凭据自己复活** —— 实测踩过）
+        所以不能写成"明文为空时保留原密文"。
+        """
+        n = cfg.notify
+        plains = n.plain_secrets()
+        for plain_name, enc_name in n.SECRET_FIELDS.items():
+            val = plains.get(plain_name, '')
+            if val:
+                setattr(n, enc_name, self.box.encrypt(val))
+            else:
+                setattr(n, enc_name, '')      # 清空 = 真的删掉
+
     def save_config(self, cfg: AppConfig) -> None:
+        # 落盘前先把 notify 的明文凭据加密。
+        # 注意 to_dict() 本身也会剥掉明文，所以即使这里忘了加密，
+        # 最坏结果也只是"字段丢了"，而不会把明文写到磁盘上。
+        self._seal_notify(cfg)
         self.store.save_config(cfg)
 
     def make_runner(self, cfg: AppConfig) -> Runner:
@@ -162,6 +291,7 @@ class Service:
                 'retry_count': s.retry_count,
                 'retry_interval_minutes': s.retry_interval_minutes,
                 'success_interval_minutes': s.success_interval_minutes,
+            'success_anchor_minutes': s.success_anchor_minutes,
                 'ai_enabled': s.ai_enabled,
                 'ai_after_failures': s.ai_after_failures,
                 'notify': s.notify or '',
@@ -230,6 +360,12 @@ class Service:
                   'success_interval_minutes'):
             if k in data and data[k] is not None and str(data[k]) != '':
                 setattr(site, k, int(data[k]))
+        # 初始基准时刻（-1 表示没设置过）。
+        # 单独处理：它允许 0 和 -1，不能走上面"空串就跳过"的逻辑。
+        if 'success_anchor_minutes' in data and data['success_anchor_minutes'] is not None \
+                and str(data['success_anchor_minutes']) != '':
+            site.success_anchor_minutes = max(
+                -1, min(1439, int(data['success_anchor_minutes'])))
         # 间隔不能小于 1 小时，否则会变成"几乎一直在签到"
         site.success_interval_minutes = max(60, int(site.success_interval_minutes
                                                     or 1440))
@@ -456,14 +592,16 @@ class Service:
             cfg = self.load_config()
             site = cfg.site(site_id)
             if not site:
+                # 不再硬编码 need_browser=True：engine.needs_browser() 会看
+                # 步骤里有没有浏览器动作（click/fill/goto/wait）来自动判断。
+                # 硬编码会盖掉这个判断，让"纯 get/post 步骤"的自定义站点
+                # 也被迫走浏览器（而纯请求分支本来支持这类步骤）。
                 site = SiteConfig(id=site_id, name=session.name or site_id,
-                                  kind=KIND_CUSTOM, homepage=session.start_url,
-                                  need_browser=True)
+                                  kind=KIND_CUSTOM, homepage=session.start_url)
                 cfg.sites.append(site)
             if not site.homepage:
                 site.homepage = session.start_url
             site.kind = KIND_CUSTOM
-            site.need_browser = True
             site.steps = merge_steps(site.steps or [], new_steps) if append else list(new_steps)
             total = len(site.steps)
             self.save_config(cfg)
@@ -485,7 +623,7 @@ class Service:
         wd = cfg.webdav
         password = self.box.try_decrypt(wd.password_enc, '') if wd.password_enc else ''
         return W.WebdavClient(wd.url, wd.username, password,
-                              proxy=cfg.proxy or self.proxy)
+                              proxy=cfg.proxy)
 
     def backup_now(self) -> Dict[str, Any]:
         cfg = self.load_config()
@@ -604,7 +742,7 @@ class Service:
         if not username:
             username = cfg.webdav.username
         client = W.WebdavClient(url, username, password,
-                                proxy=cfg.proxy or self.proxy)
+                                proxy=cfg.proxy)
         return W.test_connection(client)
 
     # ------------------------------------------------------------ 通知
@@ -625,7 +763,7 @@ class Service:
         if not key:
             return {'ok': False, 'models': [], 'status': 0,
                     'error': '还没有配置 DeepSeek API Key', 'model': cfg.ai.model}
-        out = DS.list_models(cfg.ai, key, cfg.proxy or self.proxy)
+        out = DS.list_models(cfg.ai, key, cfg.proxy)
         out['model'] = cfg.ai.model or DS.DEEPSEEK_DEFAULT_MODEL
         out['default'] = DS.DEEPSEEK_DEFAULT_MODEL
         return out
@@ -642,7 +780,7 @@ class Service:
             ncfg.channels = [channel]
         else:
             ncfg = cfg.notify
-        report = notify_mod.send_all(ncfg, result, cfg.proxy or self.proxy)
+        report = notify_mod.send_all(ncfg, result, cfg.proxy)
         return {'report': report}
 
     def test_alert(self) -> Dict[str, Any]:
@@ -651,10 +789,12 @@ class Service:
         if not notify_mod.has_any_channel(cfg.notify):
             raise ValueError('还没有配置任何通知渠道')
         body = notify_mod.format_ai_failure_alert(
-            '示例站点', int(getattr(cfg.ai, 'fail_threshold', 2) or 2),
+            # ⚠️ 不能用 `... or 2`：fail_threshold=0 表示"永不停用"，
+            # 是用户主动选的合法值，被 or 吞成 2 会让测试告警里显示错误的次数。
+            '示例站点', int(getattr(cfg.ai, 'fail_threshold', 2)),
             '这是测试：AI 返回 401（示例原因）', True)
         report = notify_mod.send_alert(cfg.notify, '自动签到 · 分析失败告警（测试）',
-                                       body, cfg.proxy or self.proxy)
+                                       body, cfg.proxy)
         return {'report': report}
 
     # ---------------------------------------------------- Cookie 效期检查
@@ -730,7 +870,7 @@ class Service:
             lines += ['', '到「站点」页对应站点下点「编辑」，粘贴新的 Cookie 即可。']
             try:
                 notify_mod.send_alert(cfg.notify, title, '\n'.join(lines),
-                                      cfg.proxy or self.proxy)
+                                      cfg.proxy)
                 notified = True
             except Exception as e:                              # noqa: BLE001
                 self.log('发送 Cookie 失效告警失败：%s' % e)
