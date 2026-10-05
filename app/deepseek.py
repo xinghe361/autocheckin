@@ -221,6 +221,31 @@ def sanitize_patch(patch: Any) -> Dict[str, Any]:
     return out
 
 
+def redact_steps(steps) -> List[Dict[str, Any]]:
+    """把步骤里**填写内容**换成占位符，供发给 AI 用。
+
+    为什么必须做：录制"登录并签到"时，用户输入的字面值（含密码）会被存进
+    `steps[].value`。而 AI 提示词原本是 `json.dumps(步骤)` 原样发出去 ——
+    等于把站点密码明文发给第三方模型（实测确认过）。
+    AI 分析失败原因**不需要**这些字面值，它需要的是"按了什么选择器、做了什么动作"。
+
+    `{password}` / `{username}` 这类占位符本身就是变量名，不敏感，保留原样
+    （保留它们反而有助于模型理解流程）。
+    """
+    out: List[Dict[str, Any]] = []
+    for s in steps or []:
+        try:
+            d = s.to_dict() if hasattr(s, 'to_dict') else dict(s)
+        except Exception:                                       # noqa: BLE001
+            continue
+        if str(d.get('action') or '') == 'fill':
+            v = str(d.get('value') or '')
+            if v and not (v.startswith('{') and v.endswith('}')):
+                d['value'] = '(已省略)'
+        out.append(d)
+    return out
+
+
 def build_prompt(site: SiteConfig, result: CheckinResult,
                  page_excerpt: str = '', trace: Optional[List[str]] = None) -> str:
     """构造给模型的用户提示。"""
@@ -235,7 +260,8 @@ def build_prompt(site: SiteConfig, result: CheckinResult,
         '## 当前配置',
         '成功关键词：%s' % (site.success_keywords or []),
         '失败关键词：%s' % (site.fail_keywords or []),
-        '步骤：%s' % json.dumps([s.to_dict() for s in site.steps], ensure_ascii=False)
+        # ⚠️ 用 redact_steps：填写内容不发给 AI（可能含站点密码）
+        '步骤：%s' % json.dumps(redact_steps(site.steps), ensure_ascii=False)
         if site.steps else '步骤：(无，使用内置模板)',
         '',
         '## 失败情况',

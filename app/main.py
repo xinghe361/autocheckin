@@ -23,7 +23,7 @@ DEFAULT_PORT = 28999      # 容器内部监听端口；host 模式下即宿主�
 DEFAULT_DATA_DIR = '/data'
 DEFAULT_TZ = 'Asia/Shanghai'
 
-VERSION = '1.4.4'
+VERSION = '1.4.5'
 
 
 @dataclass

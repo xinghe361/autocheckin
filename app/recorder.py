@@ -35,6 +35,32 @@ EV_SUBMIT = 'submit'
 # 元素上没有意义的标签：点了也不算"签到操作"
 IGNORED_TAGS = {'html', 'body', 'head', 'script', 'style', 'meta', 'link'}
 
+# 密码框记这个占位符，而不是记用户输入的明文。
+# 回放时由 engine 的变量表把站点配置里加密保存的密码替换进来。
+RADIO_VALUE_PLACEHOLDER = '{password}'
+
+
+def _is_secret_input(info) -> bool:
+    """这个输入框是不是密码框？（录制时不记明文）
+
+    判据以 `type=password` 为主 —— 那是浏览器自己标的，最可靠。
+    另外补一层 name/id 关键词判断：有些站点用 `type=text` 配 autocomplete
+    装密码，光看 type 会漏（但关键词可能误判，所以只在明显时才算）。
+    """
+    if not isinstance(info, dict):
+        return False
+    if str(info.get('type') or '').strip().lower() == 'password':
+        return True
+    blob = ' '.join(str(info.get(k) or '') for k in
+                    ('name', 'id', 'placeholder', 'aria-label')).lower()
+    if not blob:
+        return False
+    for kw in ('password', 'passwd', 'pass', 'pwd', 'secret', 'token',
+               '验证码', '密码', '口令'):
+        if kw in blob:
+            return True
+    return False
+
 # 选择器里优先使用的属性（越靠前越稳定）
 ATTR_PRIORITY = ('data-testid', 'data-id', 'data-name', 'name', 'aria-label',
                  'placeholder', 'title')
@@ -167,13 +193,26 @@ class StepRecorder:
             if kind in (EV_INPUT, EV_CHANGE):
                 if not selector:
                     continue
+                # ⚠️ 密码框不记字面值，改记 {password} 占位符。
+                #
+                # 为什么：README 让用户"像平时一样登录并完成一次签到"，
+                # 于是密码会被原样存进 steps[].value —— 后果是密码
+                #   · 明文落在 config.json
+                #   · 随 WebDAV 备份上传到云端
+                #   · 随 AI 提示词发给 DeepSeek（实测确认）
+                # 而站点配置里本来就有加密保存的密码，会有 {password}
+                # 变量在回放时替换进去，所以不必把明文写进步骤。
+                val = RADIO_VALUE_PLACEHOLDER if _is_secret_input(ev.info) \
+                    else ev.value
                 if selector == last_fill_selector and steps and \
                         steps[-1].action == ACTION_FILL:
                     # 同一输入框连续输入 → 覆盖上一步，不记成每字符一步
-                    steps[-1].value = ev.value
+                    steps[-1].value = val
                 else:
                     steps.append(Step(action=ACTION_FILL, target=selector,
-                                      value=ev.value, timeout_ms=15000))
+                                      value=val, timeout_ms=15000,
+                                      note='用占位符代替密码明文'
+                                      if _is_secret_input(ev.info) else ''))
                     last_fill_selector = selector
                 continue
 

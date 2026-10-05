@@ -356,7 +356,42 @@ class Service:
         # 注意 to_dict() 本身也会剥掉明文，所以即使这里忘了加密，
         # 最坏结果也只是"字段丢了"，而不会把明文写到磁盘上。
         self._seal_notify(cfg)
+        self._scrub_step_passwords(cfg)
         self.store.save_config(cfg)
+
+    def _scrub_step_passwords(self, cfg: AppConfig) -> int:
+        """把录制步骤里"等于站点密码的字面值"换成 {password} 占位符。
+
+        背景：录制时会把用户输入的字面值存进 steps[].value。对"登录+签到"
+        这种流程，那里面就有站点密码 —— 明文落在 config.json、随 WebDAV
+        备份上传、也会随 AI 提示词发出去（实测确认过）。录制器已改成对
+        密码框记 {password}，但**以前录好的数据**里还是明文。
+
+        这里刻意**只做精确匹配**：值必须与该站点已保存的密码完全相同。
+        不做"看起来像密码"的启发式猜测 —— 猜错会把正常填写内容改坏，
+        而精确匹配不会误判。
+
+        返回改写了几处（便于日志/测试断言）。
+        """
+        changed = 0
+        for site in (cfg.sites or []):
+            if not getattr(site, 'steps', None):
+                continue
+            pw = ''
+            if getattr(site, 'password_enc', ''):
+                pw = self.box.try_decrypt(site.password_enc, '') or ''
+            if not pw:
+                continue
+            for st in site.steps:
+                if getattr(st, 'action', '') != 'fill':
+                    continue
+                if str(getattr(st, 'value', '') or '') == pw:
+                    st.value = '{password}'
+                    changed += 1
+        if changed:
+            self.log('已把 %d 处录制步骤里的密码明文换成 {password} 占位符'
+                     % changed)
+        return changed
 
     def make_runner(self, cfg: AppConfig) -> Runner:
         if self._runner_factory:
