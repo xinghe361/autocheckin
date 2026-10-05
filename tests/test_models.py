@@ -400,7 +400,8 @@ class TestTemplates(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_template_by_id(self):
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX 每日铜币')
+        # 内置站点名就是站点本名（不带"每日铜币"这类后缀）
+        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
         self.assertEqual(T.template_by_id('nope'), {})
 
     def test_builtin_sites_carry_notable_flags(self):

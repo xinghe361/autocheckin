@@ -43,7 +43,7 @@ UA_DEFAULT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 
 V2EX = {
     'id': 'v2ex',
-    'name': 'V2EX 每日铜币',
+    'name': 'V2EX',
     'homepage': 'https://www.v2ex.com/',
     'mission_url': 'https://www.v2ex.com/mission/daily',
     'need_browser': False,
@@ -80,7 +80,7 @@ V2EX = {
 
 NODESEEK = {
     'id': 'nodeseek',
-    'name': 'NodeSeek 试试手气',
+    'name': 'NodeSeek',
     'homepage': 'https://www.nodeseek.com/board',
     # 签到走 API，不是网页。random=true 就是"试试手气"（随机鸡腿数）；
     # 想改成固定 5 鸡腿，把 url 里的 random=true 换成 random=false。
@@ -127,7 +127,7 @@ NODESEEK = {
 
 CHIPHELL = {
     'id': 'chiphell',
-    'name': 'Chiphell 每日邪恶值',
+    'name': 'Chiphell',
     'homepage': 'https://www.chiphell.com/',
     'mission_url': 'https://www.chiphell.com/forum.php',
     'need_browser': False,          # 实测：纯请求可达，无需浏览器
@@ -156,6 +156,39 @@ CHIPHELL = {
 
 
 BUILTIN: List[Dict[str, Any]] = [V2EX, NODESEEK, CHIPHELL]
+
+# 内置模板**旧版本用过**的显示名 -> 现在用的名字。
+#
+# 用户要求："把每个站点签到任务的名称直接以站点名称当名字，
+# 不要加每日铜币什么的"。模板名改了只影响**新建**的站点；
+# 已经存在的站点名字是存在 config.json 里的，所以要迁移一次。
+#
+# 只在"站点用的正是该内置模板、且名字一字不差等于旧默认名"时才改 ——
+# 这样用户自己改过的名字绝不会被覆盖。
+TEMPLATE_NAME_MIGRATION = {
+    'v2ex': ('V2EX 每日铜币', 'V2EX'),
+    'nodeseek': ('NodeSeek 试试手气', 'NodeSeek'),
+    'chiphell': ('Chiphell 每日邪恶值', 'Chiphell'),
+}
+
+
+def migrate_site_names(cfg) -> int:
+    """把内置站点的旧默认名换成新名字。返回改了几个。
+
+    只做精确匹配（template 对得上 + 名字等于旧默认名），不做模糊猜测 ——
+    用户自定义的名字必须原样保留。
+    """
+    changed = 0
+    for site in (getattr(cfg, 'sites', None) or []):
+        tid = getattr(site, 'template', '') or ''
+        pair = TEMPLATE_NAME_MIGRATION.get(tid)
+        if not pair:
+            continue
+        old, new = pair
+        if getattr(site, 'name', '') == old:
+            site.name = new
+            changed += 1
+    return changed
 
 
 # ---------------------------------------------------------------------------

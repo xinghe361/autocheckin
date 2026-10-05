@@ -240,7 +240,7 @@ class TestTemplateProvider(unittest.TestCase):
         T.set_plugin_provider(None)
         self.assertEqual([s.id for s in T.builtin_sites()],
                          ['v2ex', 'nodeseek', 'chiphell'])
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX 每日铜币')
+        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
 
     def test_plugin_overrides_builtin(self):
         """插件能覆盖内置模板 —— 站点改版时不必等发新版镜像。"""
@@ -250,13 +250,13 @@ class TestTemplateProvider(unittest.TestCase):
 
     def test_builtin_used_when_no_plugin(self):
         T.set_plugin_provider(lambda: [dict(GOOD, id='other')])
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX 每日铜币')
+        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
 
     def test_provider_error_does_not_break_builtin(self):
         def boom():
             raise RuntimeError('boom')
         T.set_plugin_provider(boom)
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX 每日铜币')
+        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
         self.assertEqual(T.plugin_templates(), [])
 
     def test_available_templates_marks_source(self):

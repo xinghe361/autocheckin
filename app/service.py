@@ -7,6 +7,7 @@ web.py 里的路由只是薄薄一层转发。
 from __future__ import annotations
 
 import os
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -48,6 +49,20 @@ from .store import RuntimeState, Store, was_ever_initialized
 from . import templates as T
 from .plugins import PluginStore
 from .templates import builtin_sites, template_by_id
+
+# 影响"下次运行时间"的站点字段。
+# 这些字段一变，已排的 next_run_at 就必须作废重算 —— 否则旧值会被一直沿用
+# （runner.ensure_scheduled 只在 next_run_at 为空时才计算）。
+#
+# 实测症状：把站点从"每天固定时刻"改成"以【上次签到成功时间】为基准"
+# 并锁定 09:35 后，界面与实际调度仍停在旧的 03:00 —— 设置看起来没生效。
+SCHEDULE_FIELDS = (
+    'enabled', 'mode',                      # 每天固定 / 以成功时间为基准
+    'daily_hour', 'daily_minute',           # 每天固定模式的时刻
+    'success_interval_minutes',             # 成功模式的间隔
+    'success_anchor_minutes',               # 初始基准时刻
+    'jitter_enabled', 'jitter_seconds',     # 随机延迟
+)
 
 
 @dataclass
@@ -293,6 +308,16 @@ class Service:
             cfg.sites = builtin_sites()
         # 把 notify 里的凭据解密进内存属性（notify.py 直接用明文属性）
         self._unseal_notify(cfg)
+        # 内置站点的显示名改过（去掉"每日铜币"这类后缀）。
+        # 在**加载时**就地改内存里的名字，这样界面立刻显示新名字；
+        # 落盘要等下一次保存（save_config）。只匹配"一字不差等于旧默认名"
+        # 的情况，用户自己改过的名字不会被覆盖。
+        try:
+            n = T.migrate_site_names(cfg)
+            if n:
+                self.log('已把 %d 个内置站点的名称改为站点本名' % n)
+        except Exception as e:                                  # noqa: BLE001
+            self.log('站点名称迁移跳过：%s' % e)
         return cfg
 
     # ---------------------------------------------- notify 凭据的加解密
@@ -472,6 +497,13 @@ class Service:
         existing = cfg.site(site_id)
         site = existing or SiteConfig(id=site_id, name=site_id)
 
+        # ⚠️ 改动**之前**先记下"调度相关字段"的值。
+        # 为什么：site 与 existing 是同一个对象（site = existing），
+        # 改完再比就永远相等，判断不出变化（这一点很容易写错）。
+        before = None
+        if existing is not None:
+            before = {k: getattr(existing, k, None) for k in SCHEDULE_FIELDS}
+
         if 'name' in data and data['name']:
             site.name = str(data['name'])
         for k in ('template', 'kind', 'mode', 'notify',
@@ -533,6 +565,34 @@ class Service:
             cfg.sites.append(site)
         cfg.sites_initialized = True         # 站点列表已被显式管理
         self.save_config(cfg)
+
+        # 调度相关字段变了 → 作废已排的下次时间，让调度器按新配置重算。
+        #
+        # 为什么必须做：runner.ensure_scheduled() 只在 next_run_at **为空**时
+        # 才计算。所以改了模式/时刻/间隔/随机/锚点之后，旧值会被一直沿用 ——
+        # 实测：把站点改成"以【上次签到成功时间】为基准"并锁定 09:35 后，
+        # 界面与实际调度仍停在旧的 03:00，锚点要等第一次签到成功才生效。
+        # 也就是说"设置没生效"，而且用户完全看不出来。
+        if before is not None:
+            changed = [k for k in SCHEDULE_FIELDS
+                       if before.get(k) != getattr(site, k, None)]
+            if changed:
+                # 立刻按新配置重算，而不是只清成 0 等调度器去补 ——
+                # 清成 0 的话界面会短暂显示"下次 —"（最长等一个 tick，60 秒），
+                # 用户会以为设置没保存上。
+                from .schedule import next_run_at
+                state = self.load_state()
+                if getattr(site, 'enabled', True):
+                    state.set_next_run_at(
+                        site.id,
+                        next_run_at(int(time.time()), site.to_schedule(),
+                                    random.Random()))
+                else:
+                    # 停用的站点不需要排期（ensure_scheduled 也会跳过它）
+                    state.set_next_run_at(site.id, 0)
+                self.store.save_state(state)
+                self.log('站点 %s 的调度设置已变（%s），下次运行时间已重算'
+                         % (site.id, '、'.join(changed)))
         return site
 
     # ------------------------------------------------------------------
