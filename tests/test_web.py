@@ -632,6 +632,32 @@ class TestSchedulerLoop(unittest.TestCase):
         s = SCH.Scheduler(self.svc, interval=1)
         self.assertGreaterEqual(s.interval, 5)
 
+    def test_tick_calls_plugin_sync(self):
+        """每次 tick 都要问一次"该不该同步模板"（内部自限）。
+
+        没这条测试的话，很容易出现"功能写好了但没接进调度"，
+        表现为开关打开却永远不同步。
+        """
+        calls = []
+        orig = self.svc.maybe_sync_plugins
+        self.svc.maybe_sync_plugins = lambda *a, **k: calls.append(1) or {}
+        try:
+            self.sch.tick()
+        finally:
+            self.svc.maybe_sync_plugins = orig
+        self.assertEqual(len(calls), 1, 'tick 应调用一次插件同步检查')
+
+    def test_plugin_sync_error_does_not_break_tick(self):
+        """同步失败绝不能影响签到（否则网络问题会让签到也停）。"""
+        def boom(*a, **k):
+            raise RuntimeError('同步炸了')
+        orig = self.svc.maybe_sync_plugins
+        self.svc.maybe_sync_plugins = boom
+        try:
+            self.assertIsNone(self.sch.tick())       # 不抛出去
+        finally:
+            self.svc.maybe_sync_plugins = orig
+
 
 class TestHttpServerEndToEnd(unittest.TestCase):
     """用真实 HTTP 走一遍，确认服务器层能通。

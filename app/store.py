@@ -23,6 +23,35 @@ from typing import Any, Dict, List, Optional
 
 from .models import AppConfig, default_config
 
+
+def _strip_url_secrets(url: str) -> str:
+    """去掉 URL 里的账密与查询串，用于"写进备份前再剥一层"。
+
+    只处理 http/https；其它形式（如 `owner/repo` 简写）原样返回。
+    不用 urllib.parse 是为了不引入额外依赖风险与异常分支 ——
+    这里只做保守的字符串裁剪，宁可多剥也不漏。
+    """
+    s = str(url or '').strip()
+    low = s.lower()
+    if not low.startswith(('http://', 'https://')):
+        return s
+    # 去掉 ?query 和 #fragment（令牌常放在查询串里）
+    for sep in ('#', '?'):
+        i = s.find(sep)
+        if i != -1:
+            s = s[:i]
+    # 去掉 scheme://user:pass@ 里的 user:pass@
+    i = s.find('://')
+    if i != -1:
+        rest = s[i + 3:]
+        at = rest.rfind('@')
+        if at != -1:
+            slash = rest.find('/')
+            # 只有 @ 出现在第一个 / 之前才是"账密@主机"
+            if slash == -1 or at < slash:
+                s = s[:i + 3] + rest[at + 1:]
+    return s
+
 CONFIG_FILE = 'config.json'
 STATE_FILE = 'state.json'
 
@@ -367,6 +396,13 @@ class Store:
         """
         data = cfg.to_dict(include_secrets=True)
         data['proxy'] = ''
+        # 模板同步来源：URL 里可能带账密或 ?token=...（自定义主机常见）。
+        # 带账密的写法在 pluginsync.parse_source 那层就被拒了，但查询串
+        # 仍可能藏令牌 —— 备份外泄等于交出仓库访问权，所以这里再剥一层。
+        # 只剥"看起来带凭据"的部分，普通的 owner/repo 保留（恢复后仍能同步）。
+        src = str(data.get('plugin_sync_source') or '')
+        if src:
+            data['plugin_sync_source'] = _strip_url_secrets(src)
         # 认证状态不进备份，恢复时保留本机现有的认证信息
         for k in ('auth_password_enc', 'session_hashes', 'api_token_hashes'):
             data.pop(k, None)

@@ -738,6 +738,16 @@ class AppConfig:
     # 只判断"站点是否为空"分不出这两者，实测过站点会自己回来继续签到。
     sites_initialized: bool = False
 
+    # --- 站点模板插件同步（从 GitHub / https 地址拉模板）---
+    # 需求原文：「自动可以设定几点拉一次，默认间隔为天，自动加上开关」
+    # 关掉就只剩手动「立即同步」。
+    plugin_sync_enabled: bool = False
+    # 来源：owner/repo[/目录] 或 https 地址（**只允许 https**）
+    plugin_sync_source: str = ''
+    # 每天几点拉（'HH:MM'），配合下面的间隔天数
+    plugin_sync_time: str = '03:00'
+    plugin_sync_interval_days: int = 1
+
     # --- 访问控制 ---
     # 网页界面是否需要登录。
     # 为什么默认开启：接口能改代理（可劫持流量）、删站点、触发签到、取回密钥，
@@ -773,6 +783,10 @@ class AppConfig:
             'headless': self.headless,
             'remote_cdp_url': self.remote_cdp_url,
             'sites_initialized': bool(self.sites_initialized),
+            'plugin_sync_enabled': bool(self.plugin_sync_enabled),
+            'plugin_sync_source': self.plugin_sync_source,
+            'plugin_sync_time': self.plugin_sync_time,
+            'plugin_sync_interval_days': int(self.plugin_sync_interval_days),
             'auth_required': self.auth_required,
             'auth_password_enc': self.auth_password_enc,
             'session_hashes': list(self.session_hashes or []),
@@ -821,6 +835,11 @@ class AppConfig:
             # 两者都没有时保持 False，首次启动仍会补上内置站点（行为不变）。
             sites_initialized=_as_bool(d.get('sites_initialized'), False)
             or bool(sites_raw),
+            plugin_sync_enabled=_as_bool(d.get('plugin_sync_enabled'), False),
+            plugin_sync_source=_as_str(d.get('plugin_sync_source'), ''),
+            plugin_sync_time=_as_str(d.get('plugin_sync_time'), '03:00'),
+            plugin_sync_interval_days=_as_int(
+                d.get('plugin_sync_interval_days'), 1, 1, 365),
             auth_required=_as_bool(d.get('auth_required'), True),
             auth_password_enc=_as_str(d.get('auth_password_enc'), ''),
             session_hashes=_as_str_list(d.get('session_hashes')),

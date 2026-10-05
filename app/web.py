@@ -491,7 +491,23 @@ class WebApp:
             """
             return {'templates': self.service.list_templates(),
                     'dir': self.service.plugin_dir(),
-                    'errors': self.service.plugins.errors()}
+                    'errors': self.service.plugins.errors(),
+                    'sync': self.service.plugin_sync_status()}
+
+        @route('POST', '/api/templates/sync')
+        def _templates_sync(q, body):
+            """立即同步一次（手动就是立即）。"""
+            from .pluginsync import SyncError
+            src = str(body.get('source') or '').strip()
+            try:
+                rep = self.service.sync_plugins(src)
+            except SyncError as e:
+                raise ApiError('同步失败：%s' % e, 400) from e
+            return rep
+
+        @route('GET', '/api/templates/sync/status')
+        def _templates_sync_status(q, body):
+            return self.service.plugin_sync_status()
 
         @route('POST', '/api/templates/install')
         def _templates_install(q, body):
@@ -545,6 +561,24 @@ class WebApp:
             cfg.remote_cdp_url = str(body.get('remote_cdp_url') or '')
         if 'browser_path' in body:
             cfg.browser_path = str(body.get('browser_path') or '')
+
+        # --- 站点模板同步 ---
+        if 'plugin_sync_enabled' in body:
+            cfg.plugin_sync_enabled = bool(body['plugin_sync_enabled'])
+        if 'plugin_sync_source' in body:
+            # 只存来源字符串；非法写法在同步时才会被 pluginsync 拒绝并给出原因
+            # （保存时不拦，否则用户没法保存"填了一半"的设置）
+            cfg.plugin_sync_source = str(body.get('plugin_sync_source') or '')[:300]
+        if 'plugin_sync_time' in body:
+            from .pluginsync import parse_hhmm
+            h, mi = parse_hhmm(str(body.get('plugin_sync_time') or ''))
+            cfg.plugin_sync_time = '%02d:%02d' % (h, mi)
+        if 'plugin_sync_interval_days' in body:
+            try:
+                v = int(body.get('plugin_sync_interval_days'))
+            except (TypeError, ValueError):
+                v = 1
+            cfg.plugin_sync_interval_days = max(1, min(365, v))
 
         n = body.get('notify') or {}
         if n:
@@ -1467,6 +1501,53 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       <div><label>连接已有 Chrome（CDP，可选）</label>
         <input id="set_cdp" placeholder="http://browser:9222"></div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>可选站点同步（从 GitHub 拉模板）</h2>
+    <div class="hint">
+      把仓库里某个目录下的 <code>.json</code> 站点模板同步进来，**不用重建镜像**。
+      同步只是把模板变成「可选」，还要在上面「可选站点」里选中才会真正签到。
+    </div>
+    <div class="row">
+      <div><label>来源</label>
+        <input id="set_sync_src" placeholder="用户名/仓库名/目录，或 https 地址"></div>
+      <div><label>每天同步时刻</label>
+        <input id="set_sync_time" placeholder="03:00" style="max-width:120px"></div>
+      <div><label>间隔（天）</label>
+        <input id="set_sync_days" type="number" min="1" max="365" value="1"
+               style="max-width:110px"></div>
+    </div>
+    <label class="sw" style="margin-top:8px">
+      <input type="checkbox" id="set_sync_on">
+      <span class="track"></span><span class="lb">自动同步</span>
+    </label>
+    <div class="hint" style="margin-top:6px">
+      关掉就只剩手动。<b>手动同步是立即执行</b>；自动则到上面那个时刻、
+      且间隔天数已到时才拉（打开开关后会先立刻拉一次）。
+      只支持 <b>https</b>；来源示例：<code>用户名/仓库名/目录名</code>。
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="b pri" onclick="syncNow()">立即同步</button>
+      <button class="b" onclick="loadSyncStatus()">查看状态</button>
+    </div>
+    <div id="syncMsg" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>可选站点</h2>
+    <div class="hint">
+      下面是可以加入的站点模板。**只有点「加入」的才会出现在站点列表里**
+      并参与签到；没加入的只是"可选"。
+      <span id="plugDir"></span>
+    </div>
+    <div class="row" style="gap:8px;align-items:flex-end">
+      <div style="flex:1">
+        <button class="b" onclick="loadTemplates()">重新扫描</button>
+      </div>
+    </div>
+    <div id="plugErrors"></div>
+    <div id="tplList" style="margin-top:10px"></div>
   </div>
 
   <div class="card">
@@ -3079,6 +3160,98 @@ function stopRec(save){
     }).catch(function(e){ show('recMsg', e.message, 'err'); });
 }
 
+/* ---------------- 站点模板：同步 + 可选列表 ---------------- */
+function fmtTime(ts){
+  if(!ts) return '从未';
+  var d = new Date(ts*1000);
+  function p(n){ return (n<10?'0':'')+n; }
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '
+         +p(d.getHours())+':'+p(d.getMinutes());
+}
+
+function loadSyncStatus(){
+  api('GET','/api/templates/sync/status').then(function(s){
+    var parts = [];
+    parts.push(s.enabled ? '自动同步：开' : '自动同步：关');
+    parts.push('来源：'+(s.source ? esc(s.source) : '（未填）'));
+    parts.push('时刻：'+esc(s.time)+'，每 '+s.interval_days+' 天');
+    parts.push('上次同步：'+fmtTime(s.last_at));
+    if(s.next_at) parts.push('下次：'+fmtTime(s.next_at));
+    var last = s.last || {};
+    if(last.at){
+      if(last.ok){
+        parts.push('上次结果：新增 '+(last.added||0)+'，更新 '+(last.updated||0)
+                   +'，移除 '+(last.removed||0));
+      } else {
+        parts.push('<span style="color:#c33">上次失败：'
+                   +esc(last.error||'')+'</span>');
+      }
+    }
+    show('syncMsg', parts.join('　·　'), (last.at && !last.ok) ? 'err' : 'ok');
+  }).catch(function(e){ show('syncMsg', e.message, 'err'); });
+}
+
+function syncNow(){
+  var src = $('set_sync_src').value.trim();
+  show('syncMsg','正在同步…','');
+  api('POST','/api/templates/sync',{source:src}).then(function(r){
+    var msg = '同步完成：新增 '+(r.added||[]).length
+            + '，更新 '+(r.updated||[]).length
+            + '，移除 '+(r.removed||[]).length;
+    if((r.errors||[]).length){
+      msg += '；有 '+r.errors.length+' 个被拒绝（见下表）';
+    }
+    show('syncMsg', msg, 'ok');
+    loadTemplates();
+  }).catch(function(e){ show('syncMsg', e.message, 'err'); });
+}
+
+function loadTemplates(){
+  api('GET','/api/templates').then(function(d){
+    var list = d.templates || [];
+    $('plugDir').innerHTML = d.dir ? '　存放目录：<code>'+esc(d.dir)+'</code>' : '';
+    /* 被拒绝的插件文件要显示原因，否则用户不知道文件为什么没生效 */
+    var errs = d.errors || [];
+    $('plugErrors').innerHTML = errs.length
+      ? '<div class="hint" style="color:#c33">有 '+errs.length
+        +' 个文件未生效：<br>'
+        + errs.slice(0,8).map(function(e){
+            return '· <b>'+esc(e.file)+'</b>：'+esc(e.reason); }).join('<br>')
+        + '</div>'
+      : '';
+    if(!list.length){
+      $('tplList').innerHTML = '<div class="hint">还没有可选站点。</div>';
+      return;
+    }
+    var rows = list.map(function(t){
+      var tags = [];
+      tags.push('<span class="tag">'+esc(t.source==='plugin'?'插件':'内置')+'</span>');
+      if(t.need_browser) tags.push('<span class="tag">需要浏览器</span>');
+      var btn = t.installed
+        ? '<span class="tag">已加入</span>'
+        : '<button class="b pri" onclick="installTpl(\''+esc(t.id)+'\')">加入</button>';
+      return '<div class="row" style="align-items:center;gap:10px;'
+        + 'border-top:1px solid var(--bd);padding-top:8px">'
+        + '<div style="flex:1"><b>'+esc(t.name)+'</b> '+tags.join(' ')
+        + '<div class="hint" style="margin:0">'+esc(t.id)+' · '
+        + esc(t.homepage||'')+' · '+t.step_count+' 步</div>'
+        + (t.note ? '<div class="hint" style="margin:0">'+esc(t.note)+'</div>' : '')
+        + '</div><div>'+btn+'</div></div>';
+    });
+    $('tplList').innerHTML = rows.join('');
+  }).catch(function(e){
+    $('tplList').innerHTML = '<div class="hint" style="color:#c33">'
+      + esc(e.message)+'</div>';
+  });
+}
+
+function installTpl(id){
+  api('POST','/api/templates/install',{id:id}).then(function(r){
+    loadTemplates();
+    refreshAll();
+  }).catch(function(e){ show('syncMsg', e.message, 'err'); });
+}
+
 /* ---------------- 设置 ---------------- */
 function loadSettings(){
   api('GET','/api/settings').then(function(d){
@@ -3089,6 +3262,14 @@ function loadSettings(){
     swGlobalProxy();
     $('set_headless').value = d.headless ? '1' : '0';
     $('set_cdp').value = d.remote_cdp_url || '';
+    /* 站点模板同步 */
+    $('set_sync_on').checked = !!d.plugin_sync_enabled;
+    $('set_sync_src').value = d.plugin_sync_source || '';
+    $('set_sync_time').value = d.plugin_sync_time || '03:00';
+    $('set_sync_days').value = d.plugin_sync_interval_days || 1;
+    loadSyncStatus();
+    /* 可选站点列表：设置页打开时也要刷新（同步进来的模板要立刻可见） */
+    loadTemplates();
     var n = d.notify || {};
     $('set_nmode').innerHTML = (META.notify_modes||[]).map(function(m){
       return '<option value="'+esc(m)+'"'+(m===n.mode?' selected':'')+'>'+esc(m)+'</option>';
@@ -3252,6 +3433,10 @@ function saveSettings(){
     proxy: $('set_proxy').value.trim(),
     headless: $('set_headless').value === '1',
     remote_cdp_url: $('set_cdp').value.trim(),
+    plugin_sync_enabled: $('set_sync_on').checked,
+    plugin_sync_source: $('set_sync_src').value.trim(),
+    plugin_sync_time: $('set_sync_time').value.trim(),
+    plugin_sync_interval_days: parseInt($('set_sync_days').value||'1', 10),
     notify: collectNotify(),
     webdav: {url: $('set_wdurl').value.trim(), username: $('set_wduser').value.trim(),
              password: $('set_wdpw').value, backup_key: $('set_wdkey').checked},

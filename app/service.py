@@ -168,6 +168,113 @@ class Service:
     def plugin_dir(self) -> str:
         return self.plugins.ensure_dir()
 
+    # ---------------------------------------------------- 插件同步（远端）
+    def _plugin_sync(self) -> 'PluginSync':
+        from .pluginsync import PluginSync
+        # 代理用函数传入：代理是运行时可能改的设置，不能在构造时固定
+        return PluginSync(self.plugins, proxy_fn=lambda: self._sync_proxy())
+
+    def _sync_proxy(self) -> str:
+        try:
+            cfg = self.load_config()
+            if getattr(cfg, 'proxy_mode', '') == 'custom':
+                return (cfg.proxy or '').strip()
+        except Exception:                                       # noqa: BLE001
+            pass
+        return ''
+
+    def sync_plugins(self, source: str = '', manual: bool = True
+                     ) -> Dict[str, Any]:
+        """拉一次远端模板。manual=True 时失败直接把原因抛给调用方。"""
+        from .pluginsync import SyncError
+        cfg = self.load_config()
+        src = (source or getattr(cfg, 'plugin_sync_source', '') or '').strip()
+        if not src:
+            raise SyncError('没有填同步来源（形如 owner/repo 或 https 地址）')
+        report = self._plugin_sync().sync(src)
+        now = int(time.time())
+        state = self.load_state()
+        state.set('_plugin_sync_at', now)
+        # ⚠️ 这里**不存来源地址**：它会落到 state.json，而 state.json 也在
+        # 备份里。来源是自定主机时可能带 ?token=... （带账密的写法已在
+        # parse_source 被拒，但查询串仍可能藏令牌）。
+        # 界面要显示来源时从配置读即可（/api/templates/sync/status 里给）。
+        state.set('_plugin_sync_result', {
+            'at': now, 'ok': True,
+            'added': len(report.get('added') or []),
+            'updated': len(report.get('updated') or []),
+            'removed': len(report.get('removed') or []),
+            'errors': (report.get('errors') or [])[:10],
+            'manual': bool(manual),
+        })
+        self.store.save_state(state)
+        return report
+
+    def maybe_sync_plugins(self, force: bool = False) -> Dict[str, Any]:
+        """调度用：到点才真的同步（内部自限）。
+
+        规则见 pluginsync.sync_due：关掉/没填来源就永不到期；
+        从没同步过则立刻到期（刚打开开关先拉一次）；否则要同时满足
+        "间隔天数已到"与"当天设定的时刻已过"。
+        """
+        from .pluginsync import SyncError, sync_due
+        from .schedule import _at_local_time
+        cfg = self.load_config()
+        if not getattr(cfg, 'plugin_sync_enabled', False) and not force:
+            return {'skipped': True, 'reason': '未开启自动同步'}
+        state = self.load_state()
+        last = int(state.get('_plugin_sync_at') or 0)
+        now = int(time.time())
+        due, nxt = sync_due(now, last, True,
+                            getattr(cfg, 'plugin_sync_source', '') or '',
+                            getattr(cfg, 'plugin_sync_time', '03:00') or '03:00',
+                            getattr(cfg, 'plugin_sync_interval_days', 1) or 1,
+                            _at_local_time)
+        if not force and not due:
+            return {'skipped': True, 'next_at': nxt, 'last_at': last}
+        try:
+            rep = self.sync_plugins(manual=False)
+            self.log('插件同步完成：新增 %d，更新 %d，移除 %d'
+                     % (len(rep.get('added') or []),
+                        len(rep.get('updated') or []),
+                        len(rep.get('removed') or [])))
+            return rep
+        except SyncError as e:
+            # 同步失败绝不能影响签到；记下来供界面显示
+            state = self.load_state()
+            state.set('_plugin_sync_at', now)
+            state.set('_plugin_sync_result',
+                      {'at': now, 'ok': False, 'error': str(e),
+                       'manual': False})
+            self.store.save_state(state)
+            self.log('插件同步失败（已忽略）：%s' % e)
+            return {'ok': False, 'error': str(e)}
+
+    def plugin_sync_status(self) -> Dict[str, Any]:
+        from .pluginsync import sync_due
+        from .schedule import _at_local_time
+        cfg = self.load_config()
+        state = self.load_state()
+        last = state.get('_plugin_sync_result') or {}
+        at = int(state.get('_plugin_sync_at') or 0)
+        enabled = bool(getattr(cfg, 'plugin_sync_enabled', False))
+        src = getattr(cfg, 'plugin_sync_source', '') or ''
+        hhmm = getattr(cfg, 'plugin_sync_time', '03:00') or '03:00'
+        days = int(getattr(cfg, 'plugin_sync_interval_days', 1) or 1)
+        now = int(time.time())
+        due, nxt = sync_due(now, at, enabled, src, hhmm, days,
+                            _at_local_time)
+        return {
+            'enabled': enabled,
+            'source': src,
+            'time': hhmm,
+            'interval_days': days,
+            'last_at': at,
+            'last': last,
+            'due': due,
+            'next_at': 0 if due else nxt,
+        }
+
     def load_config(self) -> AppConfig:
         return self._load_config_impl()
 

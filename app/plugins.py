@@ -186,7 +186,11 @@ class PluginStore:
         """目录里所有 .json 的 (名字, 修改时间, 大小) 快照。"""
         try:
             names = sorted(n for n in os.listdir(self.dir)
-                           if n.lower().endswith('.json'))
+                           if n.lower().endswith('.json')
+                           # 跳过 . 开头的文件（如同步记录 .sync_state.json）：
+                           # 它不是模板，若当模板读会报一条"id 不合法"的
+                           # 莫名其妙错误显示在界面上（实测踩过）。
+                           and not n.startswith('.'))
         except OSError:
             return ()
         items = []
@@ -260,8 +264,13 @@ class PluginStore:
 
     def save(self, template: Dict[str, Any]) -> str:
         """把（已校验的）模板写成 <id>.json，返回文件路径。"""
+        tid = str(template.get('id') or '')
+        # 再校验一次 id：这个值会被拼进文件路径，绝不能让 `../` 之类混进来
+        # （防御性检查 —— 调用方本应先过 validate_template，但不能只靠那个）
+        if not PLUGIN_ID_RE.match(tid):
+            raise ValueError('模板 id 不合法，拒绝写入：%r' % tid)
         self.ensure_dir()
-        path = os.path.join(self.dir, '%s.json' % template['id'])
+        path = os.path.join(self.dir, '%s.json' % tid)
         tmp = path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(template, f, ensure_ascii=False, indent=2)
@@ -270,6 +279,9 @@ class PluginStore:
         return path
 
     def delete(self, tid: str) -> bool:
+        # 同样先校验：这个值会拼进路径
+        if not PLUGIN_ID_RE.match(str(tid or '')):
+            return False
         path = os.path.join(self.dir, '%s.json' % tid)
         try:
             os.remove(path)

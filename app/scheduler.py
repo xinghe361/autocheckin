@@ -47,6 +47,13 @@ class Scheduler:
                 # 巡检失败绝不能影响正常签到
                 self.log('Cookie 巡检出错（已忽略）：%s' % e)
 
+            # 站点模板同步：同样内部自限（到设定的时刻且间隔天数已到才拉）
+            try:
+                self.service.maybe_sync_plugins()
+            except Exception as e:                              # noqa: BLE001
+                # 同步失败绝不能影响签到
+                self.log('插件同步出错（已忽略）：%s' % e)
+
             cfg = self.service.load_config()
             state = self.service.load_state()
             runner = self.service.make_runner(cfg)

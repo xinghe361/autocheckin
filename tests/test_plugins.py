@@ -205,6 +205,30 @@ class TestPluginStore(unittest.TestCase):
         self.assertTrue(self.ps.delete('saved'))
         self.assertEqual(self.ps.load(force=True), [])
 
+    def test_dotfiles_are_not_templates(self):
+        """以 . 开头的 .json 不是模板（如同步记录 .sync_state.json）。
+
+        不跳过的话它会被当模板读，然后在界面上显示一条
+        "id 必须是小写字母…（收到 None）" 的莫名其妙错误 —— 实测踩过。
+        """
+        self._write('.sync_state.json',
+                    {'files': ['a.json'], 'source': 'a/b', 'at': 1})
+        self.assertEqual(self.ps.load(force=True), [])
+        self.assertEqual(self.ps.errors(), [], '不该报错')
+
+    def test_save_rejects_path_traversal_id(self):
+        """id 会被拼进文件路径，非法值必须拒绝（防御性，不只靠上层校验）。"""
+        for bad in ('../evil', 'a/b', '..', 'x/../../y', '', None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self.ps.save({'id': bad, 'name': 'x'})
+
+    def test_delete_rejects_path_traversal_id(self):
+        for bad in ('../evil', 'a/b', '..', '', None):
+            with self.subTest(bad=bad):
+                self.assertFalse(self.ps.delete(bad),
+                                 '非法 id 不该删成功：%r' % (bad,))
+
 
 class TestTemplateProvider(unittest.TestCase):
     """插件提供者：插件优先、内置兜底、异常不影响内置。"""
