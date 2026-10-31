@@ -10,9 +10,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import engine as E  # noqa: E402
-from app import templates as T  # noqa: E402
 from app.httpclient import HttpResponse  # noqa: E402
 from app.models import SiteConfig  # noqa: E402
+from _tpl_loader import load  # noqa: E402
 
 
 def fake_fetcher(pages, calls=None):
@@ -76,14 +76,15 @@ class TestV2exFlow(unittest.TestCase):
     这里只保留一个集成到流程引擎的冒烟，避免两处重复维护。
     """
 
-    FLOW = T.V2EX['flow']
+    FLOW = load('v2ex')['flow']
     VARS = {'mission_url': 'https://www.v2ex.com/mission/daily'}
 
     def _run(self, script, calls):
         f = fake_fetcher(script, calls)
-        return E.run_http_flow(f, self.FLOW, T.V2EX['success_keywords'],
-                               T.V2EX['fail_keywords'],
-                               T.V2EX['already_keywords'],
+        tpl = load('v2ex')
+        return E.run_http_flow(f, self.FLOW, tpl['success_keywords'],
+                               tpl['fail_keywords'],
+                               tpl['already_keywords'],
                                initial_vars=dict(self.VARS))
 
     def test_success_with_token_extraction(self):
@@ -182,6 +183,17 @@ class TestFlowEngineGeneral(unittest.TestCase):
         self.assertIn('403', out.message)
 
 
+def _site_config(sid):
+    tpl = load(sid)
+    return SiteConfig(
+        id=tpl['id'], name=tpl['name'], kind='template', template=tpl['id'],
+        homepage=tpl['homepage'], need_browser=bool(tpl['need_browser']),
+        verify_ssl=bool(tpl.get('verify_ssl', True)),
+        success_keywords=list(tpl.get('success_keywords') or []),
+        fail_keywords=list(tpl.get('fail_keywords') or []),
+        headers=dict(tpl.get('headers') or {}))
+
+
 class TestNeedsBrowser(unittest.TestCase):
     def test_template_flags(self):
         """内置站点当前【全部走纯 HTTP】—— 这是实测修正后的结果。
@@ -192,7 +204,7 @@ class TestNeedsBrowser(unittest.TestCase):
           * chiphell 带 Cookie 访问 forum.php 即可，证书也正常
         所以三者的 need_browser 都应为 False。
         """
-        by_id = {s.id: s for s in T.builtin_sites()}
+        by_id = {sid: _site_config(sid) for sid in ('v2ex', 'nodeseek', 'chiphell')}
         self.assertFalse(E.needs_browser(by_id['v2ex']))
         self.assertFalse(E.needs_browser(by_id['nodeseek']),
                          'NodeSeek 实测走 API 纯请求即可')
@@ -291,7 +303,7 @@ class TestCheckinSiteDispatch(unittest.TestCase):
         def fake_fetch(method, url, data):
             return HttpResponse(status=200, text='已领取 铜币', url=url)
 
-        s = [x for x in T.builtin_sites() if x.id == 'v2ex'][0]
+        s = _site_config('v2ex')
         import app.engine as _e
         orig = _e._http_fetcher
 

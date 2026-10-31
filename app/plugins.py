@@ -163,6 +163,11 @@ def validate_template(data: Any, source: str = '') -> Tuple[Dict[str, Any], str]
     }
     if isinstance(data.get('mission_url'), str):
         tpl['mission_url'] = data['mission_url']
+    # 模板可选项（如 NodeSeek 的签到方式）。形状校验交给 templates.option_specs，
+    # 它本身就是"认不出就跳过"的容错设计 —— 这里只要原样透传非列表之外的
+    # 合法结构即可（写歪了的 options 由 option_specs 静默忽略，不报错）。
+    if isinstance(data.get('options'), list):
+        tpl['options'] = data['options']
     return tpl, ''
 
 

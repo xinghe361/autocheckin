@@ -14,9 +14,10 @@ import unittest
 sys.path.insert(0, '.')
 from app.engine import run_http_flow                        # noqa: E402
 from app.httpclient import HttpResponse                     # noqa: E402
-from app.templates import BUILTIN, resolve_options          # noqa: E402
+from app.templates import resolve_options                   # noqa: E402
+from _tpl_loader import load                                 # noqa: E402
 
-TPL = [t for t in BUILTIN if t['id'] == 'nodeseek'][0]
+TPL = load('nodeseek')
 
 SUCCESS = ('{"success":true,"message":"运气爆棚，恭喜你签到获得了7个鸡腿",'
            '"gain":7,"current":408}')

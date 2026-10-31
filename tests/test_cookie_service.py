@@ -146,9 +146,8 @@ class TestClearCookie(unittest.TestCase):
 class TestMaybeCheckCookies(unittest.TestCase):
     """登录态巡检：重点是"只报一次"，避免每天重复推同一条。
 
-    注意：default_config() 自带 v2ex / nodeseek / chiphell 三个内置站点，
-    所以这里直接用内置站点，不要再 append 一个自己的 —— 否则
-    sites[0] 会是内置站点，断言就会对着错的站点做。
+    站点模板全部来自外部 JSON，这里 seed 三个内置模板并加入站点，
+    然后对着 nodeseek 做巡检。
     """
 
     SID = 'nodeseek'
@@ -156,6 +155,10 @@ class TestMaybeCheckCookies(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.svc = make_service(self.tmp)
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')
+        for sid in ('v2ex', 'nodeseek', 'chiphell'):
+            self.svc.install_template(sid)
         cfg = self.svc.load_config()
         site = cfg.site(self.SID)
         site.cookie_enc = self.svc.box.encrypt('a=1; b=2')
@@ -296,8 +299,10 @@ class TestCookieStatusInListSites(unittest.TestCase):
     def test_list_sites_exposes_status_but_not_content(self):
         tmp = tempfile.mkdtemp()
         svc = make_service(tmp)
+        from _tpl_loader import seed_plugins
+        seed_plugins(svc, 'nodeseek')
+        svc.install_template('nodeseek')
         cfg = svc.load_config()
-        # 用内置站点（default_config 自带 3 个）
         cfg.site('nodeseek').cookie_enc = svc.box.encrypt('a=SECRET; b=2')
         svc.save_config(cfg)
 

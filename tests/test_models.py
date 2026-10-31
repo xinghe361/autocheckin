@@ -153,13 +153,14 @@ class TestAppConfig(unittest.TestCase):
 
     def test_site_lookup(self):
         cfg = default_config()
+        cfg.sites.append(SiteConfig(id='v2ex', name='V2EX'))
         self.assertIsNotNone(cfg.site('v2ex'))
         self.assertIsNone(cfg.site('nope'))
 
-    def test_default_config_has_three_builtin_sites(self):
+    def test_default_config_has_no_builtin_sites(self):
+        """站点模板全部来自外部 JSON，默认配置是零站点。"""
         cfg = default_config()
-        ids = sorted(s.id for s in cfg.sites)
-        self.assertEqual(ids, ['chiphell', 'nodeseek', 'v2ex'])
+        self.assertEqual(cfg.sites, [])
 
 
 class TestNotifyPolicy(unittest.TestCase):
@@ -390,21 +391,26 @@ class TestChannelDetection(unittest.TestCase):
 
 class TestTemplates(unittest.TestCase):
     def test_all_templates_have_required_fields(self):
-        for t in T.BUILTIN:
+        from _tpl_loader import all_ids, load
+        for sid in all_ids():
+            t = load(sid)
             for key in ('id', 'name', 'homepage', 'need_browser',
                         'success_keywords', 'fail_keywords'):
-                self.assertIn(key, t, '%s 缺少 %s' % (t.get('id'), key))
+                self.assertIn(key, t, '%s 缺少 %s' % (sid, key))
 
     def test_ids_unique(self):
-        ids = [t['id'] for t in T.BUILTIN]
+        from _tpl_loader import all_ids
+        ids = all_ids()
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_template_by_id(self):
-        # 内置站点名就是站点本名（不带"每日铜币"这类后缀）
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
-        self.assertEqual(T.template_by_id('nope'), {})
+    def test_template_names_are_plain(self):
+        """站点名就是站点本名（不带"每日铜币"这类后缀）。"""
+        from _tpl_loader import load
+        self.assertEqual(load('v2ex')['name'], 'V2EX')
+        self.assertEqual(load('nodeseek')['name'], 'NodeSeek')
+        self.assertEqual(load('chiphell')['name'], 'Chiphell')
 
-    def test_builtin_sites_carry_notable_flags(self):
+    def test_bundled_templates_carry_notable_flags(self):
         """内置站点的浏览器/证书标记 —— 依据真实请求实测修正。
 
         曾经的判断：nodeseek 需要浏览器（以为 Cloudflare 挡死了）；
@@ -414,17 +420,18 @@ class TestTemplates(unittest.TestCase):
           * Chiphell：带 Cookie 访问 forum.php 即签到（页面出现「用户组」）；
             证书链正常，无需 verify_ssl=False
         """
-        by_id = {s.id: s for s in T.builtin_sites()}
-        self.assertFalse(by_id['v2ex'].need_browser, 'V2EX 纯请求即可')
-        self.assertFalse(by_id['nodeseek'].need_browser,
+        from _tpl_loader import load
+        self.assertFalse(load('v2ex')['need_browser'], 'V2EX 纯请求即可')
+        self.assertFalse(load('nodeseek')['need_browser'],
                          'NodeSeek 实测走 API 纯请求即可')
-        self.assertFalse(by_id['chiphell'].need_browser,
+        self.assertFalse(load('chiphell')['need_browser'],
                          'Chiphell 实测纯请求即可')
-        self.assertTrue(by_id['chiphell'].verify_ssl,
+        self.assertTrue(load('chiphell')['verify_ssl'],
                         'Chiphell 证书正常，不该放宽校验')
         # 内置站点要预置请求头：NodeSeek 缺 Origin/Referer 会 403
-        self.assertTrue(by_id['nodeseek'].headers.get('Origin'))
-        self.assertTrue(by_id['nodeseek'].headers.get('Referer'))
+        ns_headers = load('nodeseek')['headers']
+        self.assertTrue(ns_headers.get('Origin'))
+        self.assertTrue(ns_headers.get('Referer'))
 
     def test_custom_site_defaults(self):
         s = T.generic_custom_site('my', '我的站', 'https://a.b/')

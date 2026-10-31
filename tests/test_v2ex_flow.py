@@ -18,9 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.engine import run_http_flow                            # noqa: E402
 from app.httpclient import HttpResponse                         # noqa: E402
-from app.templates import BUILTIN                               # noqa: E402
+from _tpl_loader import load                                     # noqa: E402
 
-TPL = [t for t in BUILTIN if t['id'] == 'v2ex'][0]
+TPL = load('v2ex')
 MISSION = TPL['mission_url']
 REDEEM_PREFIX = 'https://www.v2ex.com/mission/daily/redeem?once='
 

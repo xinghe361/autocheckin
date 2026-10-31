@@ -19,10 +19,11 @@ from app import templates as T  # noqa: E402
 from app.httpclient import HttpResponse  # noqa: E402
 from app.models import SiteConfig  # noqa: E402
 from app.service import Service  # noqa: E402
+from _tpl_loader import load  # noqa: E402
 
 
 def nodeseek_template():
-    return T.template_by_id('nodeseek')
+    return load('nodeseek')
 
 
 class TestDeclaredOptions(unittest.TestCase):
@@ -47,7 +48,7 @@ class TestDeclaredOptions(unittest.TestCase):
     def test_other_templates_have_no_options(self):
         """V2EX / Chiphell 没有可选项，界面就不该出现那一栏。"""
         for tid in ('v2ex', 'chiphell'):
-            self.assertEqual(T.option_specs(T.template_by_id(tid)), [], tid)
+            self.assertEqual(T.option_specs(load(tid)), [], tid)
 
 
 class TestResolve(unittest.TestCase):
@@ -102,7 +103,17 @@ class TestEngineUrl(unittest.TestCase):
     """真正重要的是最后发出去的请求地址。"""
 
     def setUp(self):
-        self.site = [x for x in T.builtin_sites() if x.id == 'nodeseek'][0]
+        # 站点模板来自 JSON；这里按模板造一个 SiteConfig（等价于旧的 builtin_sites()）
+        tpl = load('nodeseek')
+        self.site = SiteConfig(
+            id=tpl['id'], name=tpl['name'], kind='template', template=tpl['id'],
+            homepage=tpl['homepage'], need_browser=bool(tpl['need_browser']),
+            verify_ssl=bool(tpl.get('verify_ssl', True)),
+            success_keywords=list(tpl.get('success_keywords') or []),
+            fail_keywords=list(tpl.get('fail_keywords') or []),
+            headers=dict(tpl.get('headers') or {}))
+        # checkin_via_http 内部会 template_by_id('nodeseek')，需要 provider 返回模板
+        T.set_plugin_provider(lambda: [load('nodeseek')])
         self.seen = []
         self._orig = E._http_fetcher
 
@@ -117,6 +128,7 @@ class TestEngineUrl(unittest.TestCase):
 
     def tearDown(self):
         E._http_fetcher = self._orig
+        T.set_plugin_provider(None)
 
     def url_for(self, options):
         self.site.options = options
@@ -161,6 +173,11 @@ class TestServiceOptions(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix='ac_opt_')
         self.svc = Service(self.dir, version='t', env_key=S.generate_key(),
                            proxy='')
+        # 站点模板来自外部 JSON，seed 三个内置模板并加入站点
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')
+        for sid in ('v2ex', 'nodeseek', 'chiphell'):
+            self.svc.install_template(sid)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -201,6 +218,13 @@ class TestServiceOptions(unittest.TestCase):
 
 
 class TestModelRoundTrip(unittest.TestCase):
+    def setUp(self):
+        # site_options() 需要 template_by_id('nodeseek') 能查到模板
+        T.set_plugin_provider(lambda: [load('nodeseek')])
+
+    def tearDown(self):
+        T.set_plugin_provider(None)
+
     def test_options_survive_serialisation(self):
         s = SiteConfig(id='nodeseek', name='NodeSeek', kind='template',
                        template='nodeseek', options={'attendance': 'false'})
@@ -239,10 +263,16 @@ class TestSiteApiExposesSpecs(unittest.TestCase):
         self.svc = Service(self.dir, version='t', env_key=S.generate_key(),
                            proxy='')
         self.app = WB.WebApp(self.svc, version='t')
+        # 先 setup（写盘会阻止 setup，所以 seed 要放在 setup 之后）
         self.app.dispatch('POST', '/api/auth/setup', {},
                           {'password': 'test-password-1'}, token='',
                           source='test')
         self.token = self.app._new_token
+        # seed 模板并加入站点，这样 /api/site 才有 nodeseek/v2ex 可查
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')
+        for sid in ('v2ex', 'nodeseek', 'chiphell'):
+            self.svc.install_template(sid)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)

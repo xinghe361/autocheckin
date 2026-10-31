@@ -92,6 +92,20 @@ try:
     st, _ = get('/api/sites')
     check('登录后可正常读取', st == 200, 'HTTP %s' % st)
 
+    # 站点模板全部来自外部 JSON：seed 三个内置模板并加入站点，
+    # 让后面的站点/概览/元数据检查有内容可断言。
+    import shutil
+    site_plugins = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'site-plugins')
+    tpl_dir = svc.plugin_dir()
+    os.makedirs(tpl_dir, exist_ok=True)
+    for sid in ('v2ex', 'nodeseek', 'chiphell'):
+        shutil.copy(os.path.join(site_plugins, '%s.json' % sid),
+                    os.path.join(tpl_dir, '%s.json' % sid))
+    svc.reload_plugins()
+    for sid in ('v2ex', 'nodeseek', 'chiphell'):
+        svc.install_template(sid)
+
     code, _ = post('/api/auth/login', {'password': 'wrong-password'})
     check('错误口令被拒', code == 401, str(_)[:120])
 

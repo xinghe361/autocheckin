@@ -877,9 +877,9 @@ class AppConfig:
 
 
 def default_config() -> AppConfig:
-    """带三个内置站点的默认配置。"""
-    from .templates import builtin_sites
+    """默认配置（零站点）。
 
-    cfg = AppConfig()
-    cfg.sites = builtin_sites()
-    return cfg
+    站点模板全部来自外部 JSON，全新安装没有任何内置站点；
+    用户在「可选站点」里选中才会加入。
+    """
+    return AppConfig()

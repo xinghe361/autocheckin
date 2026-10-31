@@ -426,13 +426,14 @@ class WebApp:
             from .models import (NOTIFY_MODES, PROXY_INHERIT, PROXY_DIRECT,
                                  PROXY_CUSTOM)
             from .notify import ALL_CHANNELS
-            from .templates import BUILTIN
+            from .templates import available_templates
             return {
                 'version': self.version,
-                'templates': [{'id': t['id'], 'name': t['name'],
-                               'need_browser': t['need_browser'],
+                'templates': [{'id': t.get('id'), 'name': t.get('name'),
+                               'need_browser': t.get('need_browser'),
                                'verify_ssl': t.get('verify_ssl', True),
-                               'note': t.get('note', '')} for t in BUILTIN],
+                               'note': t.get('note', '')}
+                              for t in available_templates()],
                 'notify_modes': list(NOTIFY_MODES),
                 'channels': list(ALL_CHANNELS),
                 'proxy_modes': [PROXY_INHERIT, PROXY_DIRECT, PROXY_CUSTOM],

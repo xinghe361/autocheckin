@@ -163,6 +163,10 @@ class TestConfig(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix='ac_tmo_')
         self.svc = Service(self.dir, version='t', env_key=S.generate_key(),
                            proxy='')
+        # seed 模板并加入站点（v2ex 用于 timeout_seconds 的存取测试）
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex')
+        self.svc.install_template('v2ex')
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)

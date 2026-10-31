@@ -14,12 +14,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import templates as T  # noqa: E402
 from app.engine import classify_page  # noqa: E402
+from _tpl_loader import load          # noqa: E402
 
 
 def tpl(sid):
-    return T.template_by_id(sid)
+    return load(sid)
 
 
 class TestNodeSeekAssertions(unittest.TestCase):
@@ -169,26 +169,30 @@ class TestV2exAssertions(unittest.TestCase):
 class TestTemplateSanity(unittest.TestCase):
     """模板层面的基本约束：这些字段缺了会让签到静默失灵。"""
 
-    def test_all_builtin_need_cookie_and_are_http(self):
-        for t in T.BUILTIN:
-            with self.subTest(site=t['id']):
+    def test_all_bundled_need_cookie_and_are_http(self):
+        from _tpl_loader import all_ids, load
+        for sid in all_ids():
+            t = load(sid)
+            with self.subTest(site=sid):
                 self.assertFalse(t['need_browser'],
-                                 '%s 实测走纯 HTTP' % t['id'])
-                self.assertTrue(t.get('flow'), '%s 必须有可执行的 flow' % t['id'])
+                                 '%s 实测走纯 HTTP' % sid)
+                self.assertTrue(t.get('flow'), '%s 必须有可执行的 flow' % sid)
                 self.assertTrue(t.get('headers'),
-                                '%s 应预置请求头（缺 Origin/Referer 会 403）' % t['id'])
+                                '%s 应预置请求头（缺 Origin/Referer 会 403）' % sid)
                 self.assertTrue(t.get('success_keywords'),
-                                '%s 必须有成功判据' % t['id'])
+                                '%s 必须有成功判据' % sid)
                 self.assertTrue(t.get('fail_keywords'),
-                                '%s 必须有失败判据，否则失效时无法识别' % t['id'])
+                                '%s 必须有失败判据，否则失效时无法识别' % sid)
 
     def test_no_cookie_keyword_misuse(self):
         """success_keywords 里不能出现明显是失败含义的词。"""
+        from _tpl_loader import all_ids, load
         bad = ('未登录', '请先登录', '失效', '过期', '失败')
-        for t in T.BUILTIN:
+        for sid in all_ids():
+            t = load(sid)
             for kw in (t.get('success_keywords') or []):
                 if any(b in kw for b in bad):
-                    self.fail('%s 的成功判据里含失败词：%s' % (t['id'], kw))
+                    self.fail('%s 的成功判据里含失败词：%s' % (sid, kw))
 
 
 if __name__ == '__main__':

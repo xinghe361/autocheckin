@@ -29,7 +29,13 @@ class WebCase(unittest.TestCase):
         self.svc = SV.Service(self.dir, version='9.9.9',
                               env_key=S.generate_key(), proxy='')
         self.app = WB.WebApp(self.svc, version='9.9.9')
+        # 先登录（setup 必须在写盘之前，否则"配置文件已存在"会拒 setup）
         self.token = self._login()
+        # 站点模板全部来自外部 JSON，seed 三个内置模板并加入站点
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')
+        for sid in ('v2ex', 'nodeseek', 'chiphell'):
+            self.svc.install_template(sid)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -574,6 +580,11 @@ class TestSchedulerLoop(unittest.TestCase):
 
         self.svc = SV.Service(self.dir, env_key=S.generate_key(),
                               runner_factory=factory)
+        # seed 三个内置模板并加入站点（调度循环要对它们排程）
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')
+        for sid in ('v2ex', 'nodeseek', 'chiphell'):
+            self.svc.install_template(sid)
         self.now = 1_700_000_000.0
         self.sch = SCH.Scheduler(self.svc, interval=60,
                                  now_fn=lambda: self.now)
@@ -699,6 +710,11 @@ class TestHttpServerEndToEnd(unittest.TestCase):
             urllib.request.HTTPCookieProcessor(self.jar))
         # 完成口令初始化，拿到会话 Cookie
         self._post('/api/auth/setup', {'password': 'http-e2e-pw'})
+        # seed 三个内置模板并加入站点
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')
+        for sid in ('v2ex', 'nodeseek', 'chiphell'):
+            self.svc.install_template(sid)
 
     def tearDown(self):
         self.httpd.shutdown()

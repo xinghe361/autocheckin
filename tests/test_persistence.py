@@ -175,57 +175,6 @@ class TestStateDeltaDoesNotClobber(Case):
         self.assertEqual(sorted(got), ['a', 'b'])
 
 
-class TestBuiltinSitesDoNotResurrect(Case):
-    """删光站点后内置模板不能自己回来。
-
-    历史行为是"站点为空就补内置"，这导致用户删掉不想跑的站点后，
-    它们下次加载又回来继续签到（国内直连 v2ex/nodeseek 不可达 →
-    天天失败 → 烧 AI 额度）。这里把"用户删空"与"从没配置过"分开。
-    """
-
-    def test_deleted_builtins_stay_deleted(self):
-        """用户删光内置站点后不能再自己回来（本项目的核心诉求）。"""
-        svc = Service(tempfile.mkdtemp(prefix='ac_builtin_'), version='t',
-                      env_key=S.generate_key(), proxy='')
-        svc.save_config(svc.load_config())
-        self.assertEqual(len(svc.list_sites()), 3)
-        for s in list(svc.load_config().sites):
-            svc.delete_site(s.id)
-        self.assertEqual(svc.list_sites(), [], '内置站点自动复活了')
-        self.assertEqual(svc.load_config().sites, [])
-
-    def test_legacy_empty_config_gets_builtins(self):
-        """老配置（站点为空、从没管理过）仍应补内置 —— 升级行为不变。
-
-        这是"从没配置过"的那一半：文件里 sites 为空且没有管理标记。
-        """
-        d = tempfile.mkdtemp(prefix='ac_legacy_')
-        Store(d).save_config(AppConfig())        # 站点为空且未标记
-        svc = Service(d, version='t', env_key=S.generate_key(), proxy='')
-        self.assertEqual(len(svc.list_sites()), 3)
-
-    def test_pristine_default_recognised(self):
-        """默认配置（3 个内置站点原封不动）判定为"没动过"。"""
-        from app.models import default_config
-        store = Store(tempfile.mkdtemp(prefix='ac_pristine_'))
-        # default_config() 才带内置站点；裸 AppConfig() 的 sites 是空的，
-        # 那代表"站点为空"而不是"未动过的默认"，两者要分清（我第一版搞混了）
-        self.assertTrue(store.is_pristine(default_config()))
-        self.assertFalse(store.is_pristine(AppConfig()),
-                         '站点为空的配置不等于"未动过的默认配置"')
-        cfg = default_config()
-        cfg.sites_initialized = True
-        self.assertFalse(store.is_pristine(cfg), '标记过就不算未动过')
-
-    def test_flag_persists_across_reload(self):
-        cfg = self.svc.load_config()
-        cfg.sites = []                            # 删空
-        cfg.sites_initialized = True
-        self.svc.save_config(cfg)
-        self.assertTrue(self.svc.load_config().sites_initialized)
-        self.assertEqual(self.svc.list_sites(), [])
-
-
 class TestAiPatchPersists(Case):
     """AI 补丁必须落盘（与"不覆盖用户"是相反方向，别过度修正）。"""
 

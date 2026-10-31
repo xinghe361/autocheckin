@@ -153,8 +153,8 @@ class TestStore(TempDirCase):
     def test_missing_config_returns_defaults(self):
         st = ST.Store(self.dir)
         cfg = st.load_config()
-        self.assertEqual(sorted(s.id for s in cfg.sites),
-                         ['chiphell', 'nodeseek', 'v2ex'])
+        # 站点模板全部来自外部，默认配置是零站点
+        self.assertEqual(cfg.sites, [])
 
     def test_corrupt_config_is_quarantined_not_fatal(self):
         st = ST.Store(self.dir)

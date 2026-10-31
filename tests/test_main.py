@@ -190,7 +190,8 @@ class TestCreateService(unittest.TestCase):
             # 密钥文件应已生成
             from app import secrets as S
             self.assertTrue(os.path.exists(os.path.join(d, S.KEY_FILENAME)))
-            self.assertEqual(len(svc.list_sites()), 3)
+            # 站点模板全部来自外部，全新安装是零站点
+            self.assertEqual(svc.list_sites(), [])
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -296,14 +297,14 @@ class TestProcessSmoke(unittest.TestCase):
 
         with self.opener.open(self.base + '/api/overview', timeout=10) as r:
             ov = json.loads(r.read().decode('utf-8'))
-        self.assertEqual(ov['site_count'], 3)
-        self.assertEqual(ov['enabled_count'], 3)
+        # 站点模板全部来自外部，全新安装是零站点
+        self.assertEqual(ov['site_count'], 0)
+        self.assertEqual(ov['enabled_count'], 0)
 
         # 无调度模式：站点应该还没排过期
         with self.opener.open(self.base + '/api/sites', timeout=10) as r:
             sites = json.loads(r.read().decode('utf-8'))['sites']
-        self.assertEqual(sites[0]['next_run_at'], 0,
-                         '--no-scheduler 时不该自动排程')
+        self.assertEqual(sites, [], '全新安装应是零站点')
 
         # 优雅退出。
         # 注意平台差异：Windows 的 Popen.terminate() 是 TerminateProcess（强制结束，

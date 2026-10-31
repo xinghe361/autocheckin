@@ -20,16 +20,28 @@ class ServiceCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix='autocheckin_svc_')
         self.svc = SV.Service(self.dir, version='1.0.0-test',
                               env_key=S.generate_key(), proxy='')
+        # 站点模板全部来自外部 JSON。这里把三个内置模板 seed 进插件目录
+        # 并加入站点，模拟"用户已同步安装"，保持与重构前一致的初始状态
+        # （三个站点），让下面的测试不用逐个改。
+        from _tpl_loader import seed_plugins
+        seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')
+        for sid in ('v2ex', 'nodeseek', 'chiphell'):
+            self.svc.install_template(sid)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
 class TestConfigAndOverview(ServiceCase):
-    def test_fresh_install_has_builtin_sites(self):
-        sites = self.svc.list_sites()
-        self.assertEqual(sorted(s['id'] for s in sites),
-                         ['chiphell', 'nodeseek', 'v2ex'])
+    def test_fresh_install_has_no_sites(self):
+        """全新安装是零站点：模板全部来自外部，不再内置。"""
+        # 用一个新的 Service（不走 ServiceCase.setUp 的 seed），验证零站点
+        d = tempfile.mkdtemp(prefix='ac_fresh_')
+        try:
+            svc = SV.Service(d, version='t', env_key=S.generate_key(), proxy='')
+            self.assertEqual(svc.list_sites(), [])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_overview_counts(self):
         ov = self.svc.overview()
@@ -211,11 +223,11 @@ class TestSiteCrud(ServiceCase):
         self.assertFalse(self.svc.get_site('x').enabled)
         self.assertFalse(self.svc.set_site_enabled('nope', True))
 
-    def test_legacy_empty_config_gets_builtins(self):
-        """配置文件存在但站点为空时，应补上内置站点。"""
+    def test_empty_config_stays_empty(self):
+        """配置文件存在但站点为空时，保持零站点（不再自动补内置）。"""
         store = Store(self.dir)
         store.save_config(AppConfig())          # 站点为空
-        self.assertEqual(len(self.svc.list_sites()), 3)
+        self.assertEqual(self.svc.list_sites(), [])
 
 
 class TestRecording(ServiceCase):

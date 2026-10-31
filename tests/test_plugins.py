@@ -231,39 +231,36 @@ class TestPluginStore(unittest.TestCase):
 
 
 class TestTemplateProvider(unittest.TestCase):
-    """插件提供者：插件优先、内置兜底、异常不影响内置。"""
+    """插件提供者：现在没有内置模板，模板全部来自插件。"""
 
     def tearDown(self):
         T.set_plugin_provider(None)
 
-    def test_no_provider_matches_old_behaviour(self):
+    def test_no_provider_means_no_templates(self):
         T.set_plugin_provider(None)
-        self.assertEqual([s.id for s in T.builtin_sites()],
-                         ['v2ex', 'nodeseek', 'chiphell'])
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
+        self.assertEqual(T.template_by_id('v2ex'), {})
+        self.assertEqual(T.available_templates(), [])
 
-    def test_plugin_overrides_builtin(self):
-        """插件能覆盖内置模板 —— 站点改版时不必等发新版镜像。"""
+    def test_plugin_provides_template(self):
         T.set_plugin_provider(lambda: [dict(GOOD, id='v2ex',
-                                            name='V2EX（插件修正）')])
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX（插件修正）')
+                                            name='V2EX（插件）')])
+        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX（插件）')
 
-    def test_builtin_used_when_no_plugin(self):
+    def test_missing_id_returns_empty(self):
         T.set_plugin_provider(lambda: [dict(GOOD, id='other')])
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
+        self.assertEqual(T.template_by_id('v2ex'), {})
 
-    def test_provider_error_does_not_break_builtin(self):
+    def test_provider_error_does_not_break(self):
         def boom():
             raise RuntimeError('boom')
         T.set_plugin_provider(boom)
-        self.assertEqual(T.template_by_id('v2ex')['name'], 'V2EX')
+        self.assertEqual(T.template_by_id('v2ex'), {})
         self.assertEqual(T.plugin_templates(), [])
 
-    def test_available_templates_marks_source(self):
+    def test_available_templates_lists_plugins(self):
         T.set_plugin_provider(lambda: [dict(GOOD, id='plug')])
-        got = {t['id']: t['source'] for t in T.available_templates()}
-        self.assertEqual(got['plug'], 'plugin')
-        self.assertEqual(got['v2ex'], 'builtin')
+        got = [t['id'] for t in T.available_templates()]
+        self.assertEqual(got, ['plug'])
 
 
 class TestServicePluginFlow(unittest.TestCase):

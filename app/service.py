@@ -48,7 +48,7 @@ from .runner import Runner
 from .store import RuntimeState, Store, was_ever_initialized
 from . import templates as T
 from .plugins import PluginStore
-from .templates import builtin_sites, template_by_id
+from .templates import template_by_id
 
 # 影响"下次运行时间"的站点字段。
 # 这些字段一变，已排的 next_run_at 就必须作废重算 —— 否则旧值会被一直沿用
@@ -355,28 +355,10 @@ class Service:
     def _load_config_impl(self) -> AppConfig:
         """真正的加载逻辑（对外只暴露 load_config）。"""
         cfg = self.store.load_config()
-        # 只在**站点为空、且配置没被显式管理过**时补内置站点。
-        #
-        # ⚠️ 不能只看 `if not cfg.sites`：用户把内置站点全删掉之后，
-        # 这个条件同样成立，于是站点会"自动复活"并继续被调度签到 ——
-        # 用户删了它们却又天天失败（国内直连 v2ex/nodeseek 不可达），
-        # 还会因此烧 AI 额度。实测就是如此。
-        # 判据：sites_initialized 表示用户动过站点列表；只有"从没动过"
-        # 的配置（含刚装好的默认配置）才允许补。
-        if not cfg.sites and not cfg.sites_initialized:
-            cfg.sites = builtin_sites()
+        # 站点模板全部来自外部 JSON，本服务不再内置任何站点 ——
+        # 全新安装就是"零站点"，用户在「可选站点」里选中才会签到。
         # 把 notify 里的凭据解密进内存属性（notify.py 直接用明文属性）
         self._unseal_notify(cfg)
-        # 内置站点的显示名改过（去掉"每日铜币"这类后缀）。
-        # 在**加载时**就地改内存里的名字，这样界面立刻显示新名字；
-        # 落盘要等下一次保存（save_config）。只匹配"一字不差等于旧默认名"
-        # 的情况，用户自己改过的名字不会被覆盖。
-        try:
-            n = T.migrate_site_names(cfg)
-            if n:
-                self.log('已把 %d 个内置站点的名称改为站点本名' % n)
-        except Exception as e:                                  # noqa: BLE001
-            self.log('站点名称迁移跳过：%s' % e)
         return cfg
 
     # ---------------------------------------------- notify 凭据的加解密

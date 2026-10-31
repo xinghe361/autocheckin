@@ -479,22 +479,6 @@ class Store:
                 keep_auth_from.sites_initialized
         return cfg
 
-    def is_pristine(self, cfg: AppConfig) -> bool:
-        """配置是否还是"刚装好、没动过"的默认状态？
-
-        用于决定"站点为空时要不要补内置站点"。两种"空"要分开：
-          * 从没配置过（默认的 3 个内置站点原封不动）→ 补回来是合理的，
-            用户删了内置站点后重启也能恢复（老行为，别破坏）
-          * 用户显式管理过站点（新增/删除过）→ **绝不能**自动补，
-            否则删掉的站点会自己回来继续签到、烧 AI 额度
-        """
-        if cfg.sites_initialized:
-            return False
-        from .templates import builtin_sites
-        cur = sorted((s.id, s.name) for s in cfg.sites)
-        prv = sorted((s.id, s.name) for s in builtin_sites())
-        return cur == prv
-
     def merge_site_patch(self, sites: List[Any],
                          fields: Optional[List[str]] = None) -> None:
         """把 AI 补丁改过的**允许字段**增量写回盘上。

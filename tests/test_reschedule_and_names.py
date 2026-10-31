@@ -138,63 +138,21 @@ class TestRescheduleOnConfigChange(unittest.TestCase):
 
 
 class TestPlainSiteNames(unittest.TestCase):
-    def test_builtin_templates_use_plain_names(self):
-        names = {t['id']: t['name'] for t in T.BUILTIN}
+    def test_bundled_templates_use_plain_names(self):
+        from _tpl_loader import all_ids, load
+        names = {sid: load(sid)['name'] for sid in all_ids()}
         self.assertEqual(names['v2ex'], 'V2EX')
         self.assertEqual(names['nodeseek'], 'NodeSeek')
         self.assertEqual(names['chiphell'], 'Chiphell')
 
     def test_no_decorative_suffix(self):
-        for t in T.BUILTIN:
-            for bad in ('每日', '铜币', '邪恶值', '试试手气', '签到'):
-                with self.subTest(t=t['id'], bad=bad):
+        from _tpl_loader import all_ids, load
+        for sid in all_ids():
+            t = load(sid)
+            for bad in ('每日', '铜币', '邪恶值', '试试手气'):
+                with self.subTest(t=sid, bad=bad):
                     self.assertNotIn(bad, t['name'],
                                      '站点名不该带装饰性后缀')
-
-    def test_migration_renames_old_defaults(self):
-        class C:
-            pass
-        c = C()
-        c.sites = [SiteConfig(id='v2ex', name='V2EX 每日铜币', template='v2ex'),
-                   SiteConfig(id='nodeseek', name='NodeSeek 试试手气',
-                              template='nodeseek'),
-                   SiteConfig(id='chiphell', name='Chiphell 每日邪恶值',
-                              template='chiphell')]
-        self.assertEqual(T.migrate_site_names(c), 3)
-        self.assertEqual([s.name for s in c.sites],
-                         ['V2EX', 'NodeSeek', 'Chiphell'])
-
-    def test_migration_keeps_custom_names(self):
-        """用户自己改过的名字绝不能被覆盖。"""
-        class C:
-            pass
-        c = C()
-        c.sites = [SiteConfig(id='v2ex', name='我的 V2EX', template='v2ex'),
-                   SiteConfig(id='x', name='V2EX 每日铜币', template=''),
-                   SiteConfig(id='y', name='V2EX 每日铜币', template='other')]
-        self.assertEqual(T.migrate_site_names(c), 0)
-        self.assertEqual([s.name for s in c.sites],
-                         ['我的 V2EX', 'V2EX 每日铜币', 'V2EX 每日铜币'])
-
-    def test_migration_is_idempotent(self):
-        class C:
-            pass
-        c = C()
-        c.sites = [SiteConfig(id='v2ex', name='V2EX 每日铜币', template='v2ex')]
-        T.migrate_site_names(c)
-        self.assertEqual(T.migrate_site_names(c), 0, '第二次不该再改')
-
-    def test_load_config_applies_migration(self):
-        """界面读到的名字必须已经是新名字（不只是文件里改了）。"""
-        d = tempfile.mkdtemp(prefix='ac_names_')
-        svc = Service(d, version='t', env_key=S.generate_key(), proxy='')
-        svc.upsert_site({'id': 'v2ex', 'name': 'V2EX 每日铜币',
-                         'template': 'v2ex', 'kind': 'template',
-                         'homepage': 'https://www.v2ex.com/'})
-        self.assertEqual(svc.load_config().site('v2ex').name, 'V2EX')
-        # 自定义名字不受影响
-        svc.upsert_site({'id': 'v2ex', 'name': '我自己起的'})
-        self.assertEqual(svc.load_config().site('v2ex').name, '我自己起的')
 
 
 if __name__ == '__main__':

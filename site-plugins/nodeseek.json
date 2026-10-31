@@ -1,0 +1,37 @@
+{
+  "id": "nodeseek",
+  "name": "NodeSeek",
+  "homepage": "https://www.nodeseek.com/board",
+  "mission_url": "https://www.nodeseek.com/api/attendance?random={attendance}",
+  "need_browser": false,
+  "verify_ssl": true,
+  "options": [
+    {
+      "key": "attendance",
+      "label": "签到方式",
+      "default": "true",
+      "choices": [
+        { "value": "true", "label": "试试手气（鸡腿数随机）" },
+        { "value": "false", "label": "鸡腿 ×5（固定拿 5 个）" }
+      ],
+      "note": "对应站内两个签到按钮。选「试试手气」时拿到的数量不固定，选「鸡腿 ×5」固定 5 个。"
+    }
+  ],
+  "flow": [
+    { "action": "post", "url": "https://www.nodeseek.com/api/attendance?random={attendance}" },
+    { "action": "extract_regex", "pattern": "\"gain\":\\s*(\\d+)", "save_as": "gain" },
+    { "action": "extract_regex", "pattern": "\"current\":\\s*(\\d+)", "save_as": "current" }
+  ],
+  "success_keywords": ["鸡腿", "已完成签到", "恭喜你签到"],
+  "fail_keywords": ["未登录", "请先登录", "請先登入", "登录失效", "登录已过期", "\"success\":false", "\"success\": false", "\"status\":404", "\"status\": 404", "USER NOT FOUND", "NOT LOGGED IN"],
+  "already_keywords": ["已完成签到", "今天已经签到", "已签到"],
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Content-Type": "application/json",
+    "Origin": "https://www.nodeseek.com",
+    "Referer": "https://www.nodeseek.com/board"
+  },
+  "note": "签到走 API（不在 Cloudflare 防线后）。Origin/Referer 必需，缺了 403。必须配 Cookie。签到方式（试试手气/鸡腿×5）在站点编辑里选。"
+}
