@@ -337,5 +337,50 @@ class TestServicePluginFlow(unittest.TestCase):
         self.assertTrue(self.svc.reload_plugins()['errors'])
 
 
+class TestBundledSitePlugins(unittest.TestCase):
+    """仓库里随源码发布的 site-plugins/*.json 必须能通过校验。
+
+    这些是给用户直接用的真实模板，坏了不会报错、只会让用户装完发现不能用，
+    所以要在 CI 里钉住它们可解析、可判定。
+    """
+
+    SITE_PLUGINS = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'site-plugins')
+
+    def _bundled(self):
+        out = []
+        for name in sorted(os.listdir(self.SITE_PLUGINS)):
+            if not name.lower().endswith('.json'):
+                continue
+            p = os.path.join(self.SITE_PLUGINS, name)
+            with open(p, encoding='utf-8') as f:
+                out.append((name, json.load(f)))
+        return out
+
+    def test_all_bundled_templates_validate(self):
+        bundled = self._bundled()
+        self.assertTrue(bundled, 'site-plugins 目录下应有模板')
+        for name, tpl in bundled:
+            with self.subTest(name=name):
+                _, why = validate_template(tpl)
+                self.assertEqual(why, '', '%s 校验失败：%s' % (name, why))
+
+    def test_erling_flow_stops_at_sign_action(self):
+        """恩山模板的判定必须基于签到 POST 的返回，不能以重取页面结尾。
+
+        改回去会怎样：签到后重取页面处于"已签到"状态，命中 already，
+        把"今天第一次签到成功"误判成"今天已经领过了"。
+        """
+        for name, tpl in self._bundled():
+            if tpl.get('id') != 'right_erling':
+                continue
+            last = tpl['flow'][-1]
+            self.assertEqual(last['action'], 'post',
+                             '恩山流程最后一步应是签到 POST，'
+                             '而不是重取签到页（否则误判 already）')
+            self.assertIn('formhash', last['data'])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
