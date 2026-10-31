@@ -609,6 +609,13 @@ class WebApp:
                 nc.channel_proxy = n['channel_proxy']
             if 'custom_sites' in n and isinstance(n['custom_sites'], list):
                 nc.custom_sites = [str(x) for x in n['custom_sites']]
+            # 每日汇总
+            if 'digest_enabled' in n:
+                nc.digest_enabled = bool(n['digest_enabled'])
+            if 'digest_time' in n:
+                from .pluginsync import parse_hhmm
+                h, mi = parse_hhmm(str(n.get('digest_time') or ''))
+                nc.digest_hour, nc.digest_minute = h, mi
             # 凭据：非空才覆盖
             for field, key in (('pushplus_token', 'pushplus_token'),
                                ('serverchan_key', 'serverchan_key'),
@@ -1731,6 +1738,22 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <div class="hint">通知默认跟随「设置 → 网络」里的主代理；
       需要单独指定的渠道，可以在下面每个渠道自己那行里选"直连 / 自定义"。</div>
     <div id="chanBox"></div>
+    <div class="fsec" style="margin-top:14px">
+      <h4>每日汇总</h4>
+      <label class="sw" id="set_digestLbl">
+        <input type="checkbox" id="set_digest">
+        <span class="track"></span><span class="lb">每天推一条汇总（代替每站点各推一条）</span>
+      </label>
+      <div class="row" style="margin-top:6px">
+        <div>
+          <label>推送时刻</label>
+          <input id="set_digest_time" placeholder="09:00" style="width:110px">
+        </div>
+      </div>
+      <div class="hint">汇总的是<b>前一天</b>的结果：签到大多在凌晨跑完，
+        早上推"今天"只会是残缺的。内容为成功/失败次数、失败的站点与原因。
+        同一天只会推一条；某天完全没有记录时不推。</div>
+    </div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="b" onclick="testNotify()">发送测试通知</button>
       <button class="b" onclick="testAlert()">测试"分析失败"告警</button>
@@ -3837,6 +3860,12 @@ function loadSettings(){
     loadAuthState();
     loadKeyInfo();
     renderChannels(n, d);
+    /* 每日汇总：未设置时给个默认 09:00，后端默认值也是 9 点 */
+    if($('set_digest')) $('set_digest').checked = !!n.digest_enabled;
+    if($('set_digest_time')){
+      $('set_digest_time').value = pad2(n.digest_hour == null ? 9 : n.digest_hour)
+        + ':' + pad2(n.digest_minute == null ? 0 : n.digest_minute);
+    }
   }).catch(function(e){ show('setMsg', e.message, 'err'); });
 }
 
@@ -3966,6 +3995,9 @@ function collectNotify(){
     });
     if(sel.value) n.channel_proxy[ch] = {mode: sel.value, url: url};
   });
+  /* 每日汇总 */
+  n.digest_enabled = !!($('set_digest') && $('set_digest').checked);
+  n.digest_time = ($('set_digest_time') ? $('set_digest_time').value.trim() : '');
   return n;
 }
 

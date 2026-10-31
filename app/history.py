@@ -163,6 +163,13 @@ def month_bounds(month: str) -> tuple:
     return int(start.timestamp()), int(end.timestamp())
 
 
+def day_bounds(day: str) -> tuple:
+    """'2026-10-31' -> (当天 0 点, 次日 0 点) 的本地时间戳。"""
+    d = datetime.strptime(day[:10], '%Y-%m-%d')
+    start = datetime(d.year, d.month, d.day)
+    return int(start.timestamp()), int((start + timedelta(days=1)).timestamp())
+
+
 class History:
     """history.jsonl 的读写门面（追加写 + 容错读）。"""
 
@@ -413,6 +420,52 @@ class History:
                 'problem_days': days_bad,
             },
             'retention_days': KEEP_DAYS,
+        }
+
+    def day_summary(self, day: str) -> Dict[str, Any]:
+        """按站点汇总某一天，供每日推送使用。
+
+        与日历的区别：日历是"这一天每一天格子的状态"，这里是
+        "这一天每个站点到底成没成、失败的是什么原因"，是给一条消息用的。
+        """
+        since, until = day_bounds(day)
+        entries = self.load(since=since, until=until)
+        sites: Dict[str, Dict[str, Any]] = {}
+        reasons: Dict[str, int] = {}
+        for e in entries:
+            sid = str(e.get('site_id') or '')
+            st = sites.setdefault(sid, {
+                'site_id': sid,
+                'site_name': str(e.get('site_name') or sid),
+                'ok': 0, 'fail': 0, 'reason': '', 'last_msg': '',
+                'last_ts': 0,
+            })
+            if _bool(e.get('ok')):
+                st['ok'] += 1
+            else:
+                st['fail'] += 1
+                code = self._reason_of(e)
+                reasons[code] = reasons.get(code, 0) + 1
+                st['reason'] = code
+                st['last_msg'] = _clean_msg(e.get('msg'))
+            ts = _int(e.get('ts'))
+            if ts >= st['last_ts']:
+                st['last_ts'] = ts
+
+        rows = sorted(sites.values(),
+                      key=lambda x: (-x['fail'], -x['ok'], x['site_name']))
+        total_ok = sum(r['ok'] for r in rows)
+        total_fail = sum(r['fail'] for r in rows)
+        return {
+            'date': day,
+            'ok': total_ok,
+            'fail': total_fail,
+            'total': total_ok + total_fail,
+            'sites': rows,
+            # 失败原因按次数倒序，推送里只说前三条
+            'reasons': sorted(({'code': c, 'count': n}
+                               for c, n in reasons.items()),
+                              key=lambda x: -x['count']),
         }
 
     def recent(self, site_id: str = '', days: int = 30) -> Dict[str, Any]:

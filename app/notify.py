@@ -14,7 +14,7 @@ from __future__ import annotations
 import html
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .httpclient import HttpConfig, HttpError, enc_json, normalize_proxy, request
 from .models import (NOTIFY_ALL, NOTIFY_CUSTOM, NOTIFY_FAIL_ONLY, NOTIFY_NONE,
@@ -310,6 +310,52 @@ def send_alert(cfg: NotifyConfig, title: str, content: str,
         except Exception as e:  # noqa: BLE001
             report[ch] = '失败：%s' % e
     return report
+
+
+def digest_message(summary: Dict[str, Any]) -> tuple:
+    """每日汇总的正文本（history.day_summary 的结果）。
+
+    站点多了以后逐条推送会刷屏，用户索性就把通知关了 —— 一天一条
+    "成功几个、失败的是谁、为什么"反而更有用。
+    """
+    from .reasons import classify
+
+    date = str(summary.get('date') or '')
+    title = '%s 签到日报' % (date or '今天')
+    sites = summary.get('sites') or []
+    if not sites:
+        return title, '这一天没有任何签到记录（可能是没启用任何站点）。'
+
+    ok = int(summary.get('ok') or 0)
+    fail = int(summary.get('fail') or 0)
+    lines = ['成功 %d 次 · 失败 %d 次' % (ok, fail)]
+
+    bad = [s for s in sites if s.get('fail')]
+    if bad:
+        lines.append('')
+        lines.append('有问题的站点：')
+        for s in bad[:10]:
+            label = ''
+            if s.get('reason'):
+                label = classify(str(s.get('reason')), '').get('label') or ''
+            msg = str(s.get('last_msg') or '').strip()
+            detail = label or msg or '失败'
+            # 有归类时把原始消息附在后面，没归类就只显示原始消息
+            if label and msg and msg != label:
+                detail = '%s（%s）' % (label, msg[:40])
+            lines.append('· %s：%s' % (s.get('site_name') or s.get('site_id'),
+                                      detail))
+        if len(bad) > 10:
+            lines.append('· …还有 %d 个' % (len(bad) - 10))
+
+    good = [s for s in sites if s.get('ok') and not s.get('fail')]
+    if good:
+        lines.append('')
+        names = [str(s.get('site_name') or s.get('site_id')) for s in good[:20]]
+        tail = '' if len(good) <= 20 else ' 等 %d 个' % len(good)
+        lines.append('正常：' + '、'.join(names) + tail)
+
+    return title, '\n'.join(lines)
 
 
 def format_ai_failure_alert(site_name: str, ai_failures: int,

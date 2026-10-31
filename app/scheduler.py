@@ -54,6 +54,13 @@ class Scheduler:
                 # 同步失败绝不能影响签到
                 self.log('插件同步出错（已忽略）：%s' % e)
 
+            # 每日汇总推送：内部按"今天是否推过 + 是否到点"自限，
+            # 所以每分钟调一次也不会重复推。
+            try:
+                self.service.maybe_send_digest()
+            except Exception as e:                              # noqa: BLE001
+                self.log('每日汇总出错（已忽略）：%s' % e)
+
             cfg = self.service.load_config()
             state = self.service.load_state()
             runner = self.service.make_runner(cfg)

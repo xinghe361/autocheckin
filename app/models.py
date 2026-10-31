@@ -510,6 +510,13 @@ class NotifyConfig:
     # 只在这些站点上启用通知（mode=custom 时用）
     custom_sites: List[str] = field(default_factory=list)
 
+    # --- 每日汇总（一天一条，代替每站点各推一条）---
+    # 站点一多，逐条推送会刷屏，用户反而会关掉通知。
+    # 汇总只报"昨天一共成功几个、失败几个、失败的是谁、为什么"。
+    digest_enabled: bool = False
+    digest_hour: int = 9
+    digest_minute: int = 0
+
     # 落盘时需要加密的字段（明文属性名 -> 密文属性名）
     SECRET_FIELDS = {
         'pushplus_token': 'pushplus_token_enc',
@@ -589,6 +596,9 @@ class NotifyConfig:
         base.mode = _as_str(d.get('mode'), base.mode)
         base.channels = _as_str_list(d.get('channels'))
         base.custom_sites = _as_str_list(d.get('custom_sites'))
+        base.digest_enabled = _as_bool(d.get('digest_enabled'), False)
+        base.digest_hour = _as_int(d.get('digest_hour'), 9, 0, 23)
+        base.digest_minute = _as_int(d.get('digest_minute'), 0, 0, 59)
         # proxy_mode / proxy_url 已不再参与"走不走代理"的判定
         # （现在只看 channel_proxy），但字段仍在数据类里，
         # 旧配置里可能留着值 —— 必须原样往返，不能读一次就丢掉，

@@ -225,6 +225,65 @@ class Service:
         self.store.save_state(state)
         return report
 
+    # 记录"哪一天的汇总已经推过了"，防止一天推多条
+    DIGEST_STATE_KEY = '_digest_sent_on'
+
+    def maybe_send_digest(self, force: bool = False) -> Dict[str, Any]:
+        """调度用：到点就把**昨天**的签到结果汇总成一条推出去。
+
+        为什么汇总的是昨天而不是今天：签到大多在凌晨跑，
+        早上推送时"今天"才刚开始，数据是残缺的；昨天才是完整的一天。
+
+        去重靠 state 里的日期字符串（不是时间戳）：重启容器后
+        同一天不会重复推，跨天自然重置。
+        """
+        cfg = self.load_config()
+        n = cfg.notify
+        # 开关是用户的明确意愿，force 也不越过它 ——
+        # force 只用来忽略"到点了吗/今天推过没"，不改变"要不要这功能"。
+        if not getattr(n, 'digest_enabled', False):
+            return {'skipped': True, 'reason': '未启用每日汇总'}
+        if not notify_mod.has_any_channel(n):
+            return {'skipped': True, 'reason': '未配置通知渠道'}
+
+        now = int(time.time())
+        lt = time.localtime(now)
+        today = time.strftime('%Y-%m-%d', lt)
+        state = self.load_state()
+        if not force and str(state.get(self.DIGEST_STATE_KEY) or '') == today:
+            return {'skipped': True, 'reason': '今天已经推过'}
+
+        due_at = (int(getattr(n, 'digest_hour', 9) or 0),
+                  int(getattr(n, 'digest_minute', 0) or 0))
+        if not force and (lt.tm_hour, lt.tm_min) < due_at:
+            return {'skipped': True, 'reason': '还没到推送时刻',
+                    'due_at': '%02d:%02d' % due_at}
+
+        yday = time.strftime('%Y-%m-%d', time.localtime(now - 86400))
+        summary = self.history().day_summary(yday)
+
+        # 昨天一条记录都没有：直接记账跳过，不要给用户推"今天啥也没发生"
+        if not summary.get('total'):
+            state.set(self.DIGEST_STATE_KEY, today)
+            self.store.save_state(state)
+            return {'skipped': True, 'reason': '昨天没有签到记录',
+                    'date': yday}
+
+        title, content = notify_mod.digest_message(summary)
+        report = notify_mod.send_alert(n, title, content, self.proxy or '')
+        # 全部渠道都失败时不记账，等下一个 tick 再试 ——
+        # 否则一次网络抖动就会让用户整天收不到日报，而且毫无提示。
+        delivered = [ch for ch, msg in (report or {}).items()
+                     if not str(msg).startswith('失败')]
+        if delivered:
+            state.set(self.DIGEST_STATE_KEY, today)
+            self.store.save_state(state)
+        self.log('每日汇总 %s：成功 %d 失败 %d，渠道 %s'
+                 % (yday, summary.get('ok', 0), summary.get('fail', 0),
+                    report))
+        return {'sent': bool(delivered), 'date': yday,
+                'summary': summary, 'channels': report}
+
     def maybe_sync_plugins(self, force: bool = False) -> Dict[str, Any]:
         """调度用：到点才真的同步（内部自限）。
 
