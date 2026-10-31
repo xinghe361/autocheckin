@@ -23,7 +23,7 @@ DEFAULT_PORT = 28999      # 容器内部监听端口；host 模式下即宿主�
 DEFAULT_DATA_DIR = '/data'
 DEFAULT_TZ = 'Asia/Shanghai'
 
-VERSION = '1.5.0'
+VERSION = '1.6.0'
 
 
 @dataclass
@@ -77,6 +77,25 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in ('1', 'true', 'yes', 'on', 'y')
 
 
+def resolve_timezone(arg, env_tz) -> str:
+    """决定进程用哪个时区名。命令行 > 环境变量 > 默认。
+
+    **空字符串必须当成"没设置"**：`os.environ.get('TZ', 默认)` 在 TZ=
+    （值为空）时会拿到 ''，不会走默认分支；而 TZ='' 在 Linux 上等价 UTC，
+    Windows 的 CRT 也这么认。后果是签到时间整体偏 8 小时，
+    现象是"每天上午 11 点才签到"—— 几乎没人会想到去查一个空的 TZ 变量。
+    compose 里写 `- TZ=`，或 `-e TZ` 不带值就会踩到。
+    （上面 _env_int / _env_bool 都处理了空值，这里原先漏了。）
+    """
+    for v in (arg, env_tz):
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            return v
+    return DEFAULT_TZ
+
+
 def build_settings(argv: Optional[List[str]] = None) -> Settings:
     """解析命令行与环境变量，得到运行参数。"""
     parser = argparse.ArgumentParser(
@@ -106,8 +125,7 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
     s.host = args.host if args.host is not None else os.environ.get('HOST', '0.0.0.0')
     s.data_dir = (args.data_dir if args.data_dir is not None
                   else os.environ.get('DATA_DIR', DEFAULT_DATA_DIR))
-    s.timezone = (args.timezone if args.timezone is not None
-                  else os.environ.get('TZ', DEFAULT_TZ))
+    s.timezone = resolve_timezone(args.timezone, os.environ.get('TZ'))
     # 代理**只**由网页「设置 → 网络」决定，不再从环境变量读。
     #
     # 为什么去掉环境变量：两处都能设就会互相打架，而"网页里改了却不生效"

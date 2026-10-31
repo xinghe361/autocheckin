@@ -1399,6 +1399,47 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
   font-size:11.5px;flex:none;width:42px}
 .daylist .st{flex:none;width:46px;font-size:11.5px}
 .daylist .bd{flex:1;min-width:0;word-break:break-word}
+/* 失败原因：明细里的小色块，以及下方的「按大类汇总」。
+   颜色跟着大类走（登录/拦截/网络/站点/规则），不用读文字也能分出该找谁。 */
+.rchip{display:inline-block;padding:0 6px;border-radius:8px;font-size:11px;
+  border:1px solid currentColor;line-height:1.7;margin-right:3px;
+  cursor:help;white-space:nowrap}
+.rhead{font-size:12.5px;font-weight:600;margin:16px 0 8px}
+.rgroup{margin-bottom:11px}
+.rg{display:flex;align-items:center;gap:6px;font-size:12px;color:#3a424d}
+.rdot{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
+.rg .rcnt{margin-left:auto;color:var(--mut);font-size:11.5px}
+.rbar{height:5px;border-radius:3px;background:#f0f2f5;margin:4px 0 1px;
+  overflow:hidden}
+.rbar i{display:block;height:100%;border-radius:3px}
+.rrow{display:flex;gap:10px;align-items:baseline;font-size:12px;padding:4px 6px;
+  border-radius:5px;cursor:pointer}
+.rrow:hover{background:#f7f9fc}
+.rrow.on{background:#f2f5fa}
+/* 给原因名一个最小宽度：各行说明文字的起点才能对齐，
+   否则"被限流"和"被拒绝（403）"下面那一列会参差不齐。 */
+.rrow .rname{font-weight:600;flex:none;min-width:96px}
+.rrow .rsite{color:var(--mut);font-size:11.5px;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rrow .rcnt{color:var(--mut);font-size:11.5px;flex:none;min-width:76px;
+  text-align:right}
+.rrow .rlast{color:#a7aeb8;font-size:11px;flex:none;text-align:right;
+  min-width:80px}
+.revlist{margin:2px 0 6px 13px;padding-left:10px;border-left:2px solid #eef1f5}
+.revlist .it{border-bottom:none;padding:3px 2px;gap:12px}
+.revlist .rt{color:var(--mut);font-size:11px;flex:none;min-width:78px;
+  font-family:ui-monospace,Consolas,monospace}
+/* 窄屏：上面那套"四列一行"在 390px 上会把说明文字压成只剩一两个字。
+   改成两行 —— 第一行原因+次数+时间，第二行整行放站点/原文。 */
+@media (max-width:560px){
+  .rrow{flex-wrap:wrap;gap:3px 10px}
+  .rrow .rname{min-width:0;flex:1 1 auto;order:1}
+  .rrow .rcnt{min-width:0;order:2}
+  .rrow .rlast{min-width:0;order:3}
+  .rrow .rsite{flex:1 1 100%;order:4;padding-left:2px}
+  .revlist{margin-left:6px}
+  .calcell .cmeta{font-size:9.5px}
+}
 </style>
 </head>
 <body>
@@ -1481,6 +1522,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       <span>点某一天看当天明细</span>
     </div>
     <div id="hisDay" class="daylist"></div>
+    <div id="hisReasons"></div>
     <div class="hint">记录从升级到本版本后开始积累（旧版本没存历史，补不回来）。
       只保留最近 <span id="hisKeep">180</span> 天。</div>
   </div>
@@ -1811,7 +1853,7 @@ document.querySelectorAll('#mainNav button[data-tab]').forEach(function(b){
    数据全部由服务端算好再返回：哪天是哪天、这月从周几开始，都不在
    浏览器里算 —— 容器时区与访问设备的时区可能不同，两边各算一遍
    会出现"日历上今天高亮在昨天"这种对不上的问题。 */
-var HIS = {month:'', site:'', data:null, day:''};
+var HIS = {month:'', site:'', data:null, day:'', rcode:''};
 
 function pad2(n){ return (n < 10 ? '0' : '') + n; }
 
@@ -1828,6 +1870,7 @@ function hisTime(ts){
 function hisPickSite(){
   HIS.site = $('hisSite').value || '';
   HIS.day = '';
+  HIS.rcode = '';
   HIS.month = HIS.month || thisMonth();
   loadHistory();
 }
@@ -1840,6 +1883,7 @@ function hisMonth(delta){
   while(mo > 11){ mo -= 12; y += 1; }
   HIS.month = y + '-' + pad2(mo + 1);
   HIS.day = '';
+  HIS.rcode = '';
   loadHistory();
 }
 
@@ -1893,8 +1937,12 @@ function renderCalendar(d){
   } else {
     bits.push('近 ' + (r.days || 30) + ' 天还没有记录');
   }
+  if(r.top_reason){
+    bits.push('最近最常见：' + r.top_reason.label + ' ×' + r.top_reason.count);
+  }
   $('hisSummary').textContent = bits.join(' · ');
 
+  var rmeta = d.reason_meta || {};
   var heads = '';
   ['一', '二', '三', '四', '五', '六', '日'].forEach(function(x){
     heads += '<div class="calhead">' + x + '</div>';
@@ -1914,12 +1962,23 @@ function renderCalendar(d){
            + (x.ok && x.fail ? ' / ' : '')
            + (x.fail ? '失败 ' + x.fail : '');
     }
-    return '<div class="' + cls + '" data-day="' + esc(x.date) + '">'
+    // 悬停就看到"这天为什么红"，不用点开
+    var tip = x.date + '：';
+    if(!x.total){
+      tip += '没有执行记录';
+    } else {
+      tip += '成功 ' + x.ok + ' 次、失败 ' + x.fail + ' 次';
+      var rm = rmeta[x.top_reason];
+      if(rm) tip += '；主要原因：' + rm.label;
+    }
+    return '<div class="' + cls + '" data-day="' + esc(x.date) + '" title="'
+      + esc(tip) + '">'
       + '<div class="dnum">' + x.day + '</div>'
       + '<div class="cmeta">' + esc(meta) + '</div></div>';
   }).join('');
   $('hisGrid').innerHTML = heads + blanks + cells;
   renderDay(d);
+  renderReasons(d);
 }
 
 function renderDay(d){
@@ -1940,9 +1999,13 @@ function renderDay(d){
   }
   var html = '<div class="dhead">' + esc(day.date) + '　共 ' + day.total
     + ' 次（成功 ' + day.ok + '，失败 ' + day.fail + '）</div>';
+  var rmeta = d.reason_meta || {};
   (day.items || []).forEach(function(it){
     var bits = [];
     if(!HIS.site && it.site_name) bits.push('<b>' + esc(it.site_name) + '</b>');
+    // 失败先说"是哪一类"再说站点原话：原话常常只有"未登录"三个字，
+    // 归好类才能一眼看出该去改 Cookie、该看网络、还是该重录。
+    if(!it.ok) bits.push(hisChip(it.reason, rmeta));
     bits.push(it.msg ? esc(it.msg) : (it.ok ? '成功' : '（没有说明）'));
     var tail = [];
     if(it.trigger === 'manual') tail.push('手动执行');
@@ -1961,9 +2024,119 @@ function renderDay(d){
   box.innerHTML = html;
 }
 
+function hisChip(code, rmeta){
+  var m = (rmeta || {})[code] || {};
+  var col = m.color || '#7a828c';
+  return '<span class="rchip" style="color:' + col + ';background:' + col
+    + '14" title="' + esc(m.hint || '') + '">'
+    + esc(m.label || code || '失败') + '</span>';
+}
+
+function hisDate(ts){
+  var d = new Date(ts * 1000);
+  return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' '
+       + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+}
+
+/* 失败原因分布：先按大类（登录/拦截/网络/站点/规则）汇总量级，
+   再在组内列出具体原因。只按 code 平铺会有十几行、每行 1 次，
+   看不出"这个月到底是哪类问题在拖后腿"。 */
+function renderReasons(d){
+  var box = $('hisReasons');
+  if(!box) return;
+  var list = (d && d.reasons) || [];
+  var meta = (d && d.reason_meta) || {};
+  if(!list.length){
+    box.innerHTML = '';
+    return;
+  }
+  var total = 0;
+  list.forEach(function(x){ total += x.count; });
+
+  var groups = {}, order = [];
+  list.forEach(function(x){
+    var m = meta[x.code] || {};
+    var cat = m.category || 'other';
+    if(!groups[cat]){
+      groups[cat] = {label: m.category_label || '其它',
+                     color: m.color || '#7a828c', count: 0, items: []};
+      order.push(cat);
+    }
+    groups[cat].count += x.count;
+    groups[cat].items.push({code: x.code, count: x.count, last_ts: x.last_ts,
+                            sites: x.sites || [], last_msg: x.last_msg || '',
+                            meta: m});
+  });
+  order.sort(function(a, b){ return groups[b].count - groups[a].count; });
+
+  var html = '<div class="rhead">失败原因分布 · 本月共 ' + total
+    + ' 次失败（点一条看它最近几次的原文）</div>';
+  order.forEach(function(cat){
+    var g = groups[cat];
+    var gpct = total ? Math.round(g.count * 100 / total) : 0;
+    html += '<div class="rgroup">'
+      + '<div class="rg"><span class="rdot" style="background:' + g.color
+      + '"></span>' + esc(g.label)
+      + '<span class="rcnt">' + g.count + ' 次 · ' + gpct + '%</span></div>'
+      + '<div class="rbar"><i style="width:' + Math.max(gpct, 2)
+      + '%;background:' + g.color + '"></i></div>';
+    g.items.forEach(function(x){
+      var m = x.meta || {};
+      var on = (HIS.rcode === x.code);
+      var pct = total ? Math.round(x.count * 100 / total) : 0;
+      // 已按站点筛选时站点名是冗余的，换成最近一次的原文更有用
+      var sub = HIS.site ? (x.last_msg || '') : (x.sites || []).join('、');
+      html += '<div class="rrow' + (on ? ' on' : '') + '" data-rcode="'
+        + esc(x.code) + '" title="' + esc(m.hint || '') + '">'
+        + '<span class="rname" style="color:' + (m.color || g.color) + '">'
+        + esc(m.label || x.code) + '</span>'
+        + '<span class="rsite">' + esc(sub) + '</span>'
+        + '<span class="rcnt">' + x.count + ' 次 · ' + pct + '%</span>'
+        + '<span class="rlast">' + esc(x.last_ts ? hisDate(x.last_ts) : '')
+        + '</span></div>';
+      if(on) html += hisReasonRecent(d, x.code);
+    });
+    html += '</div>';
+  });
+  box.innerHTML = html;
+}
+
+/* 某原因在本月的最近几次（数据就来自本月明细，不额外请求接口） */
+function hisReasonRecent(d, code){
+  var rows = [];
+  (d.days || []).forEach(function(day){
+    (day.items || []).forEach(function(it){
+      if(!it.ok && it.reason === code) rows.push(it);
+    });
+  });
+  rows.sort(function(a, b){ return b.ts - a.ts; });
+  rows = rows.slice(0, 6);
+  if(!rows.length){
+    return '<div class="revlist"><div class="hint">本月没有更详细的记录。</div></div>';
+  }
+  var html = '<div class="revlist">';
+  rows.forEach(function(it){
+    var bits = [];
+    if(!HIS.site && it.site_name) bits.push('<b>' + esc(it.site_name) + '</b>');
+    bits.push(esc(it.msg || '（没有说明）'));
+    html += '<div class="it"><span class="rt">' + esc(hisDate(it.ts)) + '</span>'
+      + '<span class="bd">' + bits.join(' · ') + '</span></div>';
+  });
+  return html + '</div>';
+}
+
 document.addEventListener('click', function(e){
-  var cell = e.target && e.target.closest ? e.target.closest('[data-day]') : null;
-  if(!cell || !HIS.data) return;
+  var t = e.target;
+  if(!t || !t.closest || !HIS.data) return;
+  var row = t.closest('[data-rcode]');
+  if(row){
+    var code = row.getAttribute('data-rcode') || '';
+    HIS.rcode = (HIS.rcode === code) ? '' : code;   // 再点一次收起
+    renderReasons(HIS.data);
+    return;
+  }
+  var cell = t.closest('[data-day]');
+  if(!cell) return;
   var day = cell.getAttribute('data-day') || '';
   HIS.day = (HIS.day === day) ? '' : day;      // 再点一次收起
   renderCalendar(HIS.data);
@@ -1974,6 +2147,7 @@ function openSiteHistory(sid){
   HIS.site = sid || '';
   HIS.month = thisMonth();
   HIS.day = '';
+  HIS.rcode = '';
   switchTab('history');
 }
 

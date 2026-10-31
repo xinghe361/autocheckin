@@ -189,6 +189,86 @@ class TestCalendar(HistoryCase):
         self.assertEqual([i['msg'] for i in items], ['先', '后'])
 
 
+class TestCalendarReasons(HistoryCase):
+    """失败原因：明细上要能看出"是哪一类"，月度上要能看出"哪类最多"。"""
+
+    def test_failures_are_grouped_by_reason(self):
+        self.add(ok=False, at=ts(2026, 10, 2, 3, 0), error_kind='http_403')
+        self.add(ok=False, at=ts(2026, 10, 3, 3, 0), error_kind='http_403')
+        self.add(ok=False, at=ts(2026, 10, 4, 3, 0), error_kind='timeout')
+        data = self.cal()
+        counts = {r['code']: r['count'] for r in data['reasons']}
+        self.assertEqual(counts, {'http_403': 2, 'timeout': 1})
+        self.assertEqual(data['reasons'][0]['code'], 'http_403',
+                         '次数多的排前面')
+
+    def test_reason_meta_carries_label_and_color(self):
+        self.add(ok=False, at=ts(2026, 10, 2), error_kind='http_403')
+        m = self.cal()['reason_meta']['http_403']
+        self.assertEqual(m['label'], '被拒绝（403）')
+        self.assertEqual(m['category'], 'block')
+        self.assertTrue(m['color'].startswith('#'))
+
+    def test_item_carries_reason_code(self):
+        self.add(ok=False, at=ts(2026, 10, 2), error_kind='unclear',
+                 msg='请先登录后再签到')
+        it = self.day(self.cal(), '2026-10-02')['items'][0]
+        self.assertEqual(it['reason'], 'not_logged_in',
+                         'unclear 要看消息才能归对类')
+
+    def test_success_items_have_no_reason(self):
+        self.add(ok=True, at=ts(2026, 10, 2))
+        it = self.day(self.cal(), '2026-10-02')['items'][0]
+        self.assertEqual(it['reason'], '')
+        self.assertEqual(self.cal()['reasons'], [])
+
+    def test_day_top_reason(self):
+        self.add(ok=False, at=ts(2026, 10, 2, 3, 0), error_kind='timeout')
+        self.add(ok=False, at=ts(2026, 10, 2, 3, 10), error_kind='timeout')
+        self.add(ok=False, at=ts(2026, 10, 2, 3, 20), error_kind='http_403')
+        self.assertEqual(self.day(self.cal(), '2026-10-02')['top_reason'],
+                         'timeout')
+
+    def test_all_green_month_has_no_reason_block(self):
+        self.add(at=ts(2026, 10, 2))
+        data = self.cal()
+        self.assertEqual(data['reasons'], [])
+        self.assertEqual(data['reason_meta'], {})
+        self.assertEqual(self.day(data, '2026-10-02')['top_reason'], '')
+
+    def test_reason_sites_and_last_ts(self):
+        self.add(site='v2ex', ok=False, at=ts(2026, 10, 5), error_kind='timeout',
+                 msg='旧的失败')
+        self.add(site='nodeseek', ok=False, at=ts(2026, 10, 6),
+                 error_kind='timeout', msg='新的失败')
+        r = self.cal()['reasons'][0]
+        self.assertEqual(sorted(r['sites']), ['NODESEEK', 'V2EX'])
+        self.assertEqual(r['last_ts'], ts(2026, 10, 6))
+        # 单站点视图里拿它顶替站点名（站点名在那时是冗余的）
+        self.assertEqual(r['last_msg'], '新的失败')
+
+    def test_aggregation_respects_site_filter(self):
+        self.add(site='v2ex', ok=False, at=ts(2026, 10, 5), error_kind='timeout')
+        self.add(site='nodeseek', ok=False, at=ts(2026, 10, 5),
+                 error_kind='http_403')
+        only = self.cal(site='v2ex')
+        self.assertEqual([r['code'] for r in only['reasons']], ['timeout'])
+        self.assertEqual(only['reasons'][0]['sites'], ['V2EX'])
+
+    def test_recent_top_reason(self):
+        self.add(ok=False, at=NOW - 100, error_kind='http_403')
+        self.add(ok=False, at=NOW - 200, error_kind='http_403')
+        self.add(ok=False, at=NOW - 300, error_kind='timeout')
+        top = self.h.recent('', 30)['top_reason']
+        self.assertEqual(top['code'], 'http_403')
+        self.assertEqual(top['count'], 2)
+        self.assertEqual(top['label'], '被拒绝（403）')
+
+    def test_recent_top_reason_none_without_failures(self):
+        self.add(at=NOW - 100)
+        self.assertIsNone(self.h.recent('', 30)['top_reason'])
+
+
 class RunnerCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix='ac_hist_run_')
@@ -283,9 +363,14 @@ class TestServiceHistory(RunnerCase):
                       proxy='')
         svc.upsert_site({'id': 'v2ex', 'name': 'V2EX', 'template': 'v2ex',
                          'kind': 'template'})
-        H.get_history(self.dir).append([
-            H.History(self.dir, now_fn=lambda: NOW).make_entry(
-                'v2ex', 'V2EX', True, msg='ok', ts=NOW)])
+        # 冻结 History 的时钟：不传月份时它按"当前月"取，而断言写的是 NOW。
+        # 不冻结的话，这条用例只有在与 NOW 同一个月里跑才绿 ——
+        # 一到月末最后几秒（或隔月）就报 '2026-11' != '2026-10'，
+        # 看着像日历算错月份，其实是测试自己过期了。
+        h = H.get_history(self.dir)
+        h.now_fn = lambda: NOW
+        h.append([H.History(self.dir, now_fn=lambda: NOW).make_entry(
+            'v2ex', 'V2EX', True, msg='ok', ts=NOW)])
         d = svc.history_calendar(None, '')
         self.assertEqual(d['month'], datetime.fromtimestamp(NOW).strftime('%Y-%m'))
         self.assertIn('v2ex', [s['id'] for s in d['sites']])

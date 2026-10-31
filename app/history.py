@@ -25,6 +25,8 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from .reasons import classify, meta_of
+
 HISTORY_FILE = 'history.jsonl'
 # 保留天数。日历是按月翻的，半年足够看出"哪些天有问题"，也不至于把盘写满。
 KEEP_DAYS = 180
@@ -262,6 +264,10 @@ class History:
 
         days = []
         sum_ok = sum_fail = days_ok = days_bad = 0
+        # 失败原因聚合：code -> {count, last_ts, sites}
+        # 按"归类"而不是按原始 error_kind 统计 —— 原始值里 http_403 和
+        # 消息里写着"被拒绝"的两条其实是同一件事，分开数就没意义了。
+        reason_stat: Dict[str, Dict[str, Any]] = {}
         for i in range(days_in_month):
             d = date(first.year, first.month, 1) + timedelta(days=i)
             key = d.isoformat()
@@ -281,6 +287,27 @@ class History:
                     days_ok += 1
                 else:
                     days_bad += 1
+            # 当天最主要的原因（格子鼠标悬停时显示）
+            day_reasons: Dict[str, int] = {}
+            for e in items:
+                if _bool(e.get('ok')):
+                    continue
+                code = self._reason_of(e)
+                day_reasons[code] = day_reasons.get(code, 0) + 1
+                st = reason_stat.setdefault(code, {'count': 0, 'last_ts': 0,
+                                                   'sites': [], 'last_msg': ''})
+                st['count'] += 1
+                if _int(e.get('ts')) >= st['last_ts']:
+                    st['last_ts'] = _int(e.get('ts'))
+                    # 最近一次的原话：单站点视图里站点名是冗余的，
+                    # 换成这条更有用（"Cloudflare 拦截，HTTP 403"）。
+                    st['last_msg'] = _clean_msg(e.get('msg'))
+                name = str(e.get('site_name') or e.get('site_id') or '')
+                if name and name not in st['sites'] and len(st['sites']) < 6:
+                    st['sites'].append(name)
+            top = ''
+            if day_reasons:
+                top = max(day_reasons.items(), key=lambda kv: kv[1])[0]
             days.append({
                 'date': key,
                 'day': d.day,
@@ -290,8 +317,19 @@ class History:
                 'total': len(items),
                 'future': key > today,
                 'is_today': key == today,
+                'top_reason': top,
                 'items': [self._public(e) for e in items[-MAX_ITEMS_PER_DAY:]],
             })
+
+        reasons = sorted(reason_stat.items(),
+                         key=lambda kv: (-kv[1]['count'], -kv[1]['last_ts']))
+        reason_list = [{
+            'code': code,
+            'count': st['count'],
+            'last_ts': st['last_ts'],
+            'sites': st['sites'],
+            'last_msg': st['last_msg'],
+        } for code, st in reasons]
 
         return {
             'month': mon,
@@ -301,6 +339,8 @@ class History:
             # （浏览器时区可能和容器不同，日期算在服务端更稳）
             'first_weekday': first.weekday(),
             'days': days,
+            'reasons': reason_list,
+            'reason_meta': meta_of([r['code'] for r in reason_list]),
             'summary': {
                 'ok': sum_ok,
                 'fail': sum_fail,
@@ -320,24 +360,48 @@ class History:
         ok_n = sum(1 for e in entries if _bool(e.get('ok')))
         fail_n = len(entries) - ok_n
         total = ok_n + fail_n
+        # 近 N 天里最常出现的失败原因：摘要栏一句话就能看出"最近卡在哪"
+        tally: Dict[str, int] = {}
+        for e in entries:
+            if not _bool(e.get('ok')):
+                code = self._reason_of(e)
+                tally[code] = tally.get(code, 0) + 1
+        top = None
+        if tally:
+            code, n = max(tally.items(), key=lambda kv: kv[1])
+            top = {'code': code, 'label': classify(code)['label'], 'count': n}
         return {
             'days': span,
             'total': total,
             'ok': ok_n,
             'fail': fail_n,
             'rate': (round(ok_n * 100.0 / total, 1) if total else None),
+            'top_reason': top,
         }
 
     @staticmethod
-    def _public(e: Dict[str, Any]) -> Dict[str, Any]:
-        """给前端的字段（不额外裁剪：这里本来就不存凭据）。"""
+    def _reason_of(e: Dict[str, Any]) -> str:
+        """一条记录的失败归类（成功记录不调用）。"""
+        return classify(str(e.get('error_kind') or ''),
+                        str(e.get('msg') or ''))['code']
+
+    @classmethod
+    def _public(cls, e: Dict[str, Any]) -> Dict[str, Any]:
+        """给前端的字段（不额外裁剪：这里本来就不存凭据）。
+
+        reason 只放归类 code，label/hint 由接口顶层的 reason_meta 提供 ——
+        明细可能有上千条，每条重复一份中文标签既费流量，也容易和
+        服务端的映射表对不上。
+        """
+        ok = _bool(e.get('ok'))
         return {
             'ts': _int(e.get('ts')),
             'site_id': str(e.get('site_id') or ''),
             'site_name': str(e.get('site_name') or ''),
-            'ok': _bool(e.get('ok')),
+            'ok': ok,
             'msg': _clean_msg(e.get('msg')),
             'error_kind': str(e.get('error_kind') or ''),
+            'reason': '' if ok else cls._reason_of(e),
             'duration_ms': _int(e.get('duration_ms')),
             'trigger': str(e.get('trigger') or ''),
             'attempt': _int(e.get('attempt'), 1),

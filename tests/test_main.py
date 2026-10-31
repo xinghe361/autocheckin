@@ -79,6 +79,31 @@ class TestBuildSettings(EnvCase):
         s2 = M.build_settings(['--proxy', 'http://from-cli:2'])
         self.assertEqual(s2.proxy, 'http://from-cli:2')
 
+    def test_empty_tz_env_falls_back_to_default(self):
+        """TZ= （空值）不能当成一个合法时区。
+
+        os.environ.get('TZ', 默认) 只在**变量不存在**时给默认值，值为空串时
+        会原样拿到 ''。而 TZ='' 在系统层面等于 UTC —— 表现是签到时间整体
+        偏 8 小时，用户看到的是"每天 11 点才跑"，根本联想不到时区。
+        """
+        os.environ['TZ'] = ''
+        self.assertEqual(M.build_settings([]).timezone, 'Asia/Shanghai')
+        os.environ['TZ'] = '   '
+        self.assertEqual(M.build_settings([]).timezone, 'Asia/Shanghai')
+        # 命令行显式给了就以命令行为准
+        self.assertEqual(M.build_settings(['--timezone', 'UTC']).timezone, 'UTC')
+        # 命令行给了空值也不该把时区清成 UTC
+        self.assertEqual(M.build_settings(['--timezone', '']).timezone,
+                         'Asia/Shanghai')
+
+    def test_resolve_timezone_precedence(self):
+        self.assertEqual(M.resolve_timezone('Europe/London', 'UTC'),
+                         'Europe/London')
+        self.assertEqual(M.resolve_timezone(None, 'UTC'), 'UTC')
+        self.assertEqual(M.resolve_timezone('', 'UTC'), 'UTC')
+        self.assertEqual(M.resolve_timezone(None, None), M.DEFAULT_TZ)
+        self.assertEqual(M.resolve_timezone('  ', ''), M.DEFAULT_TZ)
+
     def test_bad_env_port_falls_back(self):
         os.environ['PORT'] = 'not-a-number'
         self.assertEqual(M.build_settings([]).port, 28999)
