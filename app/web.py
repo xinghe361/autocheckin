@@ -2564,6 +2564,12 @@ function renderSiteRows(sites){
     var fail = '';
     if(s.consecutive_failures)
       fail += ' <span class="tag err">连败 '+s.consecutive_failures+'</span>';
+    /* 疑似模板过期：连续失败且失败原因基本是"判定不了/步骤失败"这类规则问题，
+       而不是网络或登录。此时让用户一眼看到该去查模板，而不是干等重试。 */
+    if(s.template_stale)
+      fail += '<div class="hint" style="color:#c0392b">⚠️ 疑似站点改版：'
+            + '最近多次失败都是"判定不了结果"。建议检查模板关键词，'
+            + '或点「编辑」后手动触发 AI 分析。</div>';
     if(s.disabled_reason)
       fail += '<div class="hint" style="color:#c0392b">'+esc(s.disabled_reason)+'</div>';
     if(s.ai_consecutive_failures)

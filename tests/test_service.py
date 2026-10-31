@@ -62,8 +62,71 @@ class TestConfigAndOverview(ServiceCase):
     def test_list_sites_reports_runtime_fields(self):
         s = self.svc.list_sites()[0]
         for k in ('next_run_at', 'consecutive_failures', 'step_count',
-                  'has_credentials', 'last_success_at'):
+                  'has_credentials', 'last_success_at', 'template_stale'):
             self.assertIn(k, s)
+
+
+class TestTemplateStale(ServiceCase):
+    """疑似模板过期：连败且失败原因基本是 rule 类（判定不了/步骤失败）。
+
+    站点改版和网络抽风在界面上都表现为"连败"，但处置完全不同 ——
+    前者该改模板，后者该查网络/Cookie。所以要用历史里的失败原因去区分。
+    """
+
+    def _set_fails(self, sid, n):
+        cfg = self.svc.load_config()
+        s = cfg.site(sid)
+        s.state = dict(s.state or {})
+        s.state['consecutive_failures'] = n
+        self.svc.save_config(cfg)
+
+    def _seed_failures(self, sid, kinds):
+        """往历史里塞失败记录，kinds 是 error_kind 列表（旧→新）。"""
+        import time as _t
+        from app.history import get_history
+        h = get_history(self.dir)
+        now = int(_t.time())
+        entries = []
+        for i, k in enumerate(kinds):
+            entries.append(h.make_entry(
+                sid, sid.upper(), False, msg='失败', error_kind=k,
+                ts=now - (len(kinds) - i) * 3600))
+        h.append(entries)
+
+    def _stale(self, sid):
+        return [s for s in self.svc.list_sites() if s['id'] == sid][0]['template_stale']
+
+    def test_rule_failures_mark_stale(self):
+        self._set_fails('v2ex', 4)
+        self._seed_failures('v2ex', ['unclear', 'unclear', 'step_failed', 'unclear'])
+        self.assertTrue(self._stale('v2ex'))
+
+    def test_network_failures_not_stale(self):
+        self._set_fails('v2ex', 4)
+        self._seed_failures('v2ex', ['timeout', 'refused', 'dns_error', 'timeout'])
+        self.assertFalse(self._stale('v2ex'))
+
+    def test_login_failures_not_stale(self):
+        self._set_fails('v2ex', 3)
+        self._seed_failures('v2ex', ['not_logged_in', 'not_logged_in', 'not_logged_in'])
+        self.assertFalse(self._stale('v2ex'))
+
+    def test_below_threshold_not_stale(self):
+        self._set_fails('v2ex', 2)
+        self._seed_failures('v2ex', ['unclear', 'unclear'])
+        self.assertFalse(self._stale('v2ex'))
+
+    def test_mixed_mostly_network_not_stale(self):
+        """个别 rule 混在网络抖动里不该误报。"""
+        self._set_fails('v2ex', 5)
+        self._seed_failures('v2ex', ['timeout', 'unclear', 'timeout', 'refused', 'timeout'])
+        self.assertFalse(self._stale('v2ex'))
+
+    def test_success_clears_state(self):
+        # 有失败历史但当前没有连败（即最近成功了），不该提示
+        self._set_fails('v2ex', 0)
+        self._seed_failures('v2ex', ['unclear', 'unclear', 'unclear'])
+        self.assertFalse(self._stale('v2ex'))
 
 
 class TestSiteCrud(ServiceCase):

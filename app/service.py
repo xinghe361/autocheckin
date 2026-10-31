@@ -528,6 +528,10 @@ class Service:
                 'consecutive_failures': int(st.get('consecutive_failures') or 0),
                 'last_success_at': st.get('last_success_at'),
                 'next_run_at': state.next_run_at(s.id),
+                # 疑似模板过期：连续失败且失败原因基本都是 rule 大类
+                # （判定不了/步骤失败），而不是网络或登录类。
+                # 这样用户一眼能分辨"该去查模板"还是"该去查网络/Cookie"。
+                'template_stale': self._template_stale(s),
                 # 登录态摘要：界面要显示"未配置 / 已配置 / 已失效"
                 # 注意这里【不含任何 Cookie 内容】，只有状态与数量
                 'has_cookie': bool(s.cookie_enc),
@@ -547,6 +551,31 @@ class Service:
                 'disabled_reason': st.get('disabled_reason') or '',
             })
         return out
+
+    def _template_stale(self, site: SiteConfig) -> bool:
+        """判断某站点是否"疑似模板过期"。
+
+        依据：连续失败达到一定次数，且最近这些失败里绝大多数是 rule 大类
+        （判定不了结果 / 步骤执行失败 / 页面读不出来），而不是网络或登录类。
+        站点改版的典型表现就是"请求能通，但判定词一个都命中不了"。
+
+        为什么不能只看连败次数：连败 3 次可能是网络抽风（network），
+        也可能是 Cookie 过期（登录类）。只报"连败"用户分不清该查什么；
+        回看失败原因本身才能下对结论。
+        """
+        from .reasons import classify
+        st = site.state or {}
+        fails = int(st.get('consecutive_failures') or 0)
+        if fails < 3:
+            return False
+        recent = self.history().recent_failures(site.id, limit=6)
+        if not recent:
+            return False
+        rule_n = sum(1 for r in recent
+                     if classify(r['code'])['category'] == 'rule')
+        # 最近失败里 rule 类占大多数（>=60% 且至少 3 条）才提示，
+        # 容忍个别网络抖动混在其中，避免一两次抽风就误报"模板过期"。
+        return rule_n >= 3 and rule_n * 2 >= len(recent)
 
     def get_site(self, site_id: str) -> Optional[SiteConfig]:
         return self.load_config().site(site_id)

@@ -522,6 +522,23 @@ class History:
         return classify(str(e.get('error_kind') or ''),
                         str(e.get('msg') or ''))['code']
 
+    def recent_failures(self, site_id: str, limit: int = 6) -> List[Dict[str, str]]:
+        """某站点最近 N 次失败（按时间倒序），只含归好类的 code。
+
+        给"疑似模板过期"提示用：站点改版时的失败基本都是 rule 大类
+        （判定不了/步骤失败），而网络抖动是 network 大类。只看连败次数
+        分不出这两种，得回看失败原因本身。
+        """
+        entries = [e for e in self.load(site_id=site_id) if not _bool(e.get('ok'))]
+        entries.sort(key=lambda e: _int(e.get('ts')), reverse=True)
+        out = []
+        for e in entries[:limit]:
+            out.append({
+                'code': self._reason_of(e),
+                'ts': _int(e.get('ts')),
+            })
+        return out
+
     @classmethod
     def _public(cls, e: Dict[str, Any]) -> Dict[str, Any]:
         """给前端的字段（不额外裁剪：这里本来就不存凭据）。
