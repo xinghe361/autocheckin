@@ -148,9 +148,16 @@ class TestV2exFlow(unittest.TestCase):
 
     def test_token_extract_is_required(self):
         steps = [s for s in TPL['flow'] if s.get('action') == 'extract_regex']
-        self.assertEqual(len(steps), 1)
-        self.assertTrue(steps[0].get('required'),
+        token = [s for s in steps if s.get('save_as') == 'once']
+        self.assertEqual(len(token), 1, '令牌提取必须有且只有一步')
+        self.assertTrue(token[0].get('required'),
                         '令牌取不到必须尽早失败，否则会带字面量请求')
+        # 其余提取（如"已连续登录 N 天"）只是给通知加信息，
+        # 页面上没有也不能把整次签到判失败。
+        for s in steps:
+            if s.get('save_as') != 'once':
+                self.assertFalse(s.get('required'),
+                                 '%s 不该是必需步骤' % s.get('save_as'))
 
     def test_success_keyword_is_specific(self):
         """成功关键词必须能区分"已领到"和"还能领"。

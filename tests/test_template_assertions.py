@@ -102,6 +102,69 @@ class TestV2exAssertions(unittest.TestCase):
                                   t['fail_keywords'], t.get('already_keywords'))
         self.assertEqual(kind, 'fail', '未登录应判失败（命中 %s）' % hit)
 
+    def test_consecutive_days_reach_the_message(self):
+        """「已连续登录 N 天」要能抽出来并拼进通知。
+
+        抽不到不影响签到（这步不是 required），但抽到了用户才看得到
+        "连续多少天" —— 签到成功本身是预期内的，连续天数才有信息量。
+        """
+        import app.engine as E
+        from app.httpclient import HttpResponse
+
+        t = tpl('v2ex')
+        before = '<a href="/mission/daily/redeem?once=84123\'">领取</a>'
+        after = ('<span>每日登录奖励已领取</span>'
+                 '<span>已连续登录 12 天</span>')
+        state = {'n': 0}
+
+        def fetch(method, url, data):
+            if 'redeem' in url:
+                return HttpResponse(status=302, text='', url=url)
+            state['n'] += 1
+            return HttpResponse(status=200,
+                                text=(before if state['n'] == 1 else after),
+                                url=url)
+
+        out = E.run_http_flow(
+            fetch,
+            [dict(s, url=s.get('url', '').replace(
+                '{mission_url}', 'https://www.v2ex.com/mission/daily'))
+             for s in t['flow']],
+            t['success_keywords'], t['fail_keywords'],
+            t.get('already_keywords'))
+        self.assertTrue(out.success)
+        self.assertEqual(out.vars.get('log_days'), '12')
+        self.assertIn('已连续登录 12 天', out.message)
+
+    def test_missing_days_text_does_not_break_success(self):
+        """页面上没有那句（改版/老页面）也必须照常判成功。"""
+        import app.engine as E
+        from app.httpclient import HttpResponse
+
+        t = tpl('v2ex')
+        before = '<a href="/mission/daily/redeem?once=84123\'">领取</a>'
+        state = {'n': 0}
+
+        def fetch(method, url, data):
+            if 'redeem' in url:
+                return HttpResponse(status=302, text='', url=url)
+            state['n'] += 1
+            return HttpResponse(status=200,
+                                text=(before if state['n'] == 1
+                                      else '每日登录奖励已领取'),
+                                url=url)
+
+        out = E.run_http_flow(
+            fetch,
+            [dict(s, url=s.get('url', '').replace(
+                '{mission_url}', 'https://www.v2ex.com/mission/daily'))
+             for s in t['flow']],
+            t['success_keywords'], t['fail_keywords'],
+            t.get('already_keywords'))
+        self.assertTrue(out.success)
+        self.assertNotIn('log_days', out.vars)
+        self.assertNotIn('已连续登录', out.message)
+
 
 class TestTemplateSanity(unittest.TestCase):
     """模板层面的基本约束：这些字段缺了会让签到静默失灵。"""
