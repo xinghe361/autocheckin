@@ -41,14 +41,13 @@ def safe_http_url(raw: str) -> str:
 from . import notify as notify_mod
 from . import secrets as S
 from . import webdav as W
-from .models import (AppConfig, NotifyConfig, SiteConfig, Step, WebdavConfig,
-                     AiConfig, KIND_CUSTOM, KIND_TEMPLATE, default_config)
-from .recorder import RawEvent, StepRecorder, merge_steps
+from .models import (AppConfig, NotifyConfig, SiteConfig, Step,
+                     KIND_CUSTOM, KIND_TEMPLATE)
+from .recorder import StepRecorder, merge_steps
 from .runner import Runner
-from .store import RuntimeState, Store, was_ever_initialized
+from .store import RuntimeState, Store
 from . import templates as T
 from .plugins import PluginStore
-from .templates import template_by_id
 
 # 影响"下次运行时间"的站点字段。
 # 这些字段一变，已排的 next_run_at 就必须作废重算 —— 否则旧值会被一直沿用
@@ -121,7 +120,7 @@ class Service:
 
     # ---------------------------------------------------------- 插件模板
     def list_templates(self) -> List[Dict[str, Any]]:
-        """所有可选模板（内置 + 插件），并标注该模板是否已加入站点。
+        """所有可选模板（现在只有插件），并标注该模板是否已加入站点。
 
         界面用它渲染"可选站点"列表：只有**选中（已加入）**的才在站点里展示。
         """
@@ -784,7 +783,6 @@ class Service:
         cfg = self.load_config()
         before = len(cfg.sites)
         cfg.sites = [s for s in cfg.sites if s.id != site_id]
-        # 标记"已显式管理"：即使删到空，也不能让内置站点自动复活
         cfg.sites_initialized = True
         if len(cfg.sites) == before:
             return False

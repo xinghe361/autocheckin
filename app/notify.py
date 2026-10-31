@@ -11,15 +11,14 @@
 
 from __future__ import annotations
 
-import html
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .httpclient import HttpConfig, HttpError, enc_json, normalize_proxy, request
 from .models import (NOTIFY_ALL, NOTIFY_CUSTOM, NOTIFY_FAIL_ONLY, NOTIFY_NONE,
                      NOTIFY_SUCCESS_ONLY, PROXY_CUSTOM, PROXY_DIRECT,
-                     PROXY_INHERIT, NotifyConfig)
+                     NotifyConfig)
 
 CHANNEL_PUSHPLUS = 'pushplus'
 # Server 酱已按要求从界面移除。这里保留常量，只为兼容旧配置里的

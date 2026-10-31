@@ -22,8 +22,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .models import (ACTION_CLICK, ACTION_EXTRACT, ACTION_FILL, ACTION_GOTO,
-                     ACTION_WAIT, ACTION_WAIT_FOR, Step)
+from .models import (ACTION_CLICK, ACTION_FILL, ACTION_GOTO,
+                     ACTION_WAIT, Step)
 
 # 录制时可识别的原始事件类型
 EV_CLICK = 'click'

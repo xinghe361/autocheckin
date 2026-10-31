@@ -23,7 +23,6 @@ import json
 import os
 import re
 import threading
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 # 插件目录名（在数据目录下）

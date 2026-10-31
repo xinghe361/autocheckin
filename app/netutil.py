@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import socket
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from urllib.parse import urlsplit
 
 # 原始 getaddrinfo：在导入时就固定下来，之后任何地方改动它都不会影响"还原"的目标。

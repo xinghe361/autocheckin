@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from . import notify as notify_mod
-from .models import AppConfig, NOTIFY_NONE, SiteConfig
+from .models import AppConfig, SiteConfig
 from .notify import CheckinResult
 from .schedule import plan_next, should_ask_ai
 from .store import RuntimeState, Store

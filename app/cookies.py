@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import re
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import unquote
 
 # Cookie 名字允许的字符（RFC 6265 的 token 字符集）
 _NAME_RE = re.compile(r'^[A-Za-z0-9!#$%&\'*+\-.^_`|~]+$')

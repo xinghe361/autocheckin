@@ -17,9 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .httpclient import HttpConfig, HttpError, HttpResponse, request
-from .models import (ACTION_ASSERT_TEXT, ACTION_CLICK, ACTION_EXTRACT, ACTION_FILL,
-                     ACTION_GOTO, ACTION_WAIT, ACTION_WAIT_FOR, KIND_TEMPLATE,
-                     SiteConfig)
+from .models import KIND_TEMPLATE, SiteConfig
 from .notify import CheckinResult
 from .templates import resolve_options, template_by_id
 
