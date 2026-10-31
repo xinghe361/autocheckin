@@ -789,10 +789,6 @@ class AppConfig:
     auth_password_enc: str = ''
     # 已登录会话令牌的哈希（不存令牌本身）
     session_hashes: List[str] = field(default_factory=list)
-    # 配套浏览器脚本（油猴）用的令牌哈希。
-    # 与浏览器会话令牌分开存：这样可以"只吊销脚本访问权"而不影响你自己的登录，
-    # 也便于在界面上单独看到"当前有几个脚本已授权"。
-    api_token_hashes: List[str] = field(default_factory=list)
 
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     webdav: WebdavConfig = field(default_factory=WebdavConfig)
@@ -822,7 +818,6 @@ class AppConfig:
             'auth_required': self.auth_required,
             'auth_password_enc': self.auth_password_enc,
             'session_hashes': list(self.session_hashes or []),
-            'api_token_hashes': list(self.api_token_hashes or []),
             'notify': self.notify.to_dict(),
             'webdav': self.webdav.to_dict(),
             'ai': self.ai.to_dict(),
@@ -834,7 +829,6 @@ class AppConfig:
             d['ai'].pop('api_key_enc', None)
             d.pop('auth_password_enc', None)
             d.pop('session_hashes', None)
-            d.pop('api_token_hashes', None)
         return d
 
     @staticmethod
@@ -875,7 +869,6 @@ class AppConfig:
             auth_required=_as_bool(d.get('auth_required'), True),
             auth_password_enc=_as_str(d.get('auth_password_enc'), ''),
             session_hashes=_as_str_list(d.get('session_hashes')),
-            api_token_hashes=_as_str_list(d.get('api_token_hashes')),
             notify=NotifyConfig.from_dict(d.get('notify')),
             webdav=WebdavConfig.from_dict(d.get('webdav')),
             ai=AiConfig.from_dict(d.get('ai')),

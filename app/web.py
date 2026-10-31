@@ -24,38 +24,6 @@ MAX_SITE_ID = 64
 # 避免出现含路径分隔符等异常形状的值。
 SITE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\-]{0,%d}$' % (MAX_SITE_ID - 1))
 
-# 容器地址只允许 host[:port]，且字符集收紧。
-# 这个值会进油猴脚本的 JS 字面量，必须挡住引号/斜杠/换行等一切能拼接代码的字符。
-_ORIGIN_HOST_RE = re.compile(
-    r'^(?:(https?)://)?'                      # 可选 scheme
-    r'(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.\-]+)'   # host（含 IPv6 方括号形式）
-    r'(?::(\d{1,5}))?$'                       # 可选端口
-)
-
-
-def _sanitize_origin(raw: str) -> str:
-    """把用户给的容器地址收敛成 `http(s)://host[:port]`，不合法就返回空串。
-
-    为什么不用 urlsplit 直接信任：urlsplit 对 `http://nas';evil()//x`
-    会把 `nas';evil()//x` 当 hostname 保留下来（引号仍在），
-    拼进 JS 照样能闭合字符串。所以这里用白名单字符集重新拼装。
-    """
-    s = (raw or '').strip().strip('/')
-    m = _ORIGIN_HOST_RE.match(s)
-    if not m:
-        return ''
-    scheme, host, port = m.group(1), m.group(2), m.group(3)
-    scheme = (scheme or 'http').lower()
-    if port is not None:
-        try:
-            n = int(port)
-        except ValueError:
-            return ''
-        if not (1 <= n <= 65535):
-            return ''
-        return '%s://%s:%d' % (scheme, host, n)
-    return '%s://%s' % (scheme, host)
-
 
 def validate_site_id(site_id: str) -> str:
     s = (site_id or '').strip()
@@ -91,39 +59,8 @@ class WebApp:
         self._local = threading.local()
         self._register()
 
-    def _public_origin(self, q: Optional[dict] = None) -> str:
-        """推断容器对外的地址，用于注入到油猴脚本里。
-
-        优先用请求里带的 host（用户在浏览器里访问的那个地址最可靠）；
-        没带就退回监听地址与端口。
-
-        ⚠️ 这个值会被拼进油猴脚本的 JS 里（`var CONTAINER = '...';`），
-        所以**必须先校验再使用**：以前直接拿查询参数原样拼接，
-        攻击者构造 `?host=http://nas';<任意JS>//` 就能让用户在 Tampermonkey
-        里装上一个在 v2ex/nodeseek/chiphell 上运行、带 GM_xmlhttpRequest
-        的脚本，用来偷各论坛的 Cookie。
-        现在只接受严格的 host[:port] 形式，并用 json.dumps 生成 JS 字面量。
-        """
-        q = q or {}
-        host = ''
-        for key in ('host', 'origin'):
-            v = q.get(key)
-            if isinstance(v, list):
-                v = v[0] if v else ''
-            if v:
-                host = str(v)
-                break
-        if host:
-            clean = _sanitize_origin(host)
-            if clean:
-                return clean
-            # 不合法就忽略，退回下面的默认值（不报错：用户手填错了也不该炸）
-        import os
-        port = os.environ.get('PORT', '28999')
-        return 'http://127.0.0.1:%s' % port
-
     def _require_auth(self, method: str, path: str, req: Dict[str, Any],
-                      token: str = '', script_token: str = '') -> None:
+                      token: str = '') -> None:
         """未登录时拒绝访问受保护端点。
 
         ⚠️ 令牌必须**按参数传入**（放在 req 里），绝不能存在 self 上：
@@ -131,12 +68,6 @@ class WebApp:
             把"本次请求的令牌"写在实例字段上会让并发请求互相串用 ——
             实测一个没有令牌的请求，只要和一个带合法令牌的请求并发，
             就能被对方的令牌授权而返回 200（确定性复现过）。
-
-        两条通过路径：
-          1. 网页会话令牌（你自己登录）
-          2. 配套浏览器脚本的令牌（X-AC-Token）—— 但它**只能访问极少数端点**，
-             见 SCRIPT_ALLOWED_PATHS。这样即使脚本令牌泄露，最坏情况也只是
-             "有人能覆盖站点 Cookie"，而不是容器被整个接管。
         """
         if not self.auth.required():
             return
@@ -147,12 +78,6 @@ class WebApp:
             raise ApiError('尚未设置访问口令，请先完成初始化', 403)
         if self.auth.is_valid(token):
             return
-        # 脚本令牌
-        if script_token and self.auth.api_token_valid(script_token):
-            if (method.upper(), path) in AUTH.SCRIPT_ALLOWED_PATHS:
-                req['via_script'] = True
-                return
-            raise ApiError('该令牌仅允许写入站点 Cookie，不能访问此接口', 403)
         raise ApiError('未登录或登录已失效，请重新登录', 401)
 
     # ------------------------------------------------------------------
@@ -327,49 +252,6 @@ class WebApp:
                                                       cfg.proxy or '')
             except ValueError as e:
                 raise ApiError(str(e), 400)
-
-        # --- 配套浏览器脚本：配对与令牌 ---
-        @route('POST', '/api/pair/new')
-        def _pair_new(q, body):
-            """生成一次性配对码（需要已登录，所以不会成为免认证后门）。"""
-            code = self.auth.issue_pair_code()
-            return {
-                'code': code,
-                'ttl_seconds': AUTH.PAIR_TTL_SECONDS,
-                'pending': self.auth.pending_pair_codes(),
-            }
-
-        # 公开：脚本拿配对码来换令牌。安全性由"短码本身"保证：
-        # 一次性、10 分钟过期、只存哈希、必须由已登录用户先生成。
-        @route('POST', '/api/pair/redeem')
-        def _pair_redeem(q, body):
-            code = str(body.get('code') or '')
-            token = self.auth.redeem_pair_code(code)
-            if not token:
-                raise ApiError('配对码无效或已过期，请在网页上重新生成', 401)
-            return {'token': token}
-
-        @route('GET', '/api/script/status')
-        def _script_status(q, body):
-            return {
-                'authorized': self.auth.api_token_count(),
-                'cookie_api': '/api/site/cookie',
-            }
-
-        @route('POST', '/api/script/revoke')
-        def _script_revoke(q, body):
-            """吊销全部脚本令牌（不影响你自己的登录）。"""
-            n = self.auth.revoke_api_tokens()
-            return {'ok': True, 'revoked': n}
-
-        # 配套油猴脚本本体：由容器直接提供，省得用户去找/复制。
-        # 用文本接口返回，浏览器访问时会触发 Tampermonkey 的安装询问。
-        @route('GET', '/autocheckin-cookie.user.js')
-        def _userscript(q, body):
-            # 用请求里带的 host 作为容器地址写进脚本（浏览器访问时的地址最准）
-            origin = self._public_origin(q)
-            return Raw(build_userscript(origin),
-                       'text/javascript; charset=utf-8')
 
         # --- 立即执行 ---
         @route('POST', '/api/run')
@@ -666,11 +548,10 @@ class WebApp:
     # ------------------------------------------------------------------
     def dispatch(self, method: str, path: str,
                  query: Dict[str, list], body: Optional[dict] = None,
-                 token: str = '', source: str = '', script_token: str = ''):
+                 token: str = '', source: str = ''):
         """路由分发。返回 (状态码, 内容类型, 字节) 或 (状态码, dict)。
 
         token/source 由 HTTP 层从 Cookie 与请求头解析后传入。
-        script_token 是配套浏览器脚本的令牌（请求头 X-AC-Token）。
 
         ⚠️ 这里**不使用任何实例字段**保存"本次请求"的状态（令牌、来源、
         待下发的 Cookie 标志）。WebApp 是单例，而 HTTP 服务是多线程的，
@@ -683,7 +564,6 @@ class WebApp:
         req = {
             'token': token or '',
             'source': source or '',
-            'script_token': script_token or '',
             'new_token': '',
             'do_logout': False,
         }
@@ -701,7 +581,6 @@ class WebApp:
             # 会重复下发同一个会话 Cookie，甚至"登出"会把会话又塞回去。
             req = self._local.req
             req.update({'token': token or '', 'source': source or '',
-                        'script_token': script_token or '',
                         'new_token': '', 'do_logout': False})
 
         fn = self.routes.get((method.upper(), path))
@@ -714,8 +593,7 @@ class WebApp:
             raise ApiError('未知接口：%s %s' % (method, path), 404)
 
         # 访问控制在这里统一做，避免每个端点各自实现时漏掉
-        self._require_auth(method.upper(), path, req, token or '',
-                           script_token or '')
+        self._require_auth(method.upper(), path, req, token or '')
 
         try:
             out = fn(query or {}, body or {})
@@ -760,324 +638,6 @@ class Raw:
     def __init__(self, text: str, content_type: str = 'text/plain; charset=utf-8'):
         self.data = text.encode('utf-8')
         self.content_type = content_type
-
-
-# ---------------------------------------------------------------- 配套脚本
-
-# 支持的站点：站点标识 -> [域名匹配]
-SCRIPT_SITE_MATCHES = {
-    'v2ex': ['www.v2ex.com', 'v2ex.com'],
-    'nodeseek': ['www.nodeseek.com', 'nodeseek.com'],
-    'chiphell': ['www.chiphell.com', 'chiphell.com'],
-}
-
-
-def _userscript_template(origin: str) -> str:
-    matches = []
-    for domains in SCRIPT_SITE_MATCHES.values():
-        for d in domains:
-            matches.append('// @match        https://%s/*' % d)
-    match_block = '\n'.join(sorted(set(matches)))
-    connects = '\n'.join(
-        '// @connect      %s' % d
-        for d in sorted({d for ds in SCRIPT_SITE_MATCHES.values() for d in ds}))
-
-    return r'''// ==UserScript==
-// @name         自动签到 · Cookie 助手
-// @namespace    autocheckin
-// @version      1.0.0
-// @description  把当前网站的登录 Cookie 一键送到你的自动签到容器，省去来回切换页面
-// @author       autocheckin
-__MATCHES__
-// @connect      __HOST__
-__CONNECTS__
-// @grant        GM_xmlhttpRequest
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_deleteValue
-// @grant        GM_registerMenuCommand
-// @run-at       document-idle
-// ==/UserScript==
-
-/* eslint-disable */
-(function () {
-  'use strict';
-
-  // 容器地址由容器在提供本脚本时注入，不用你手填。
-  var CONTAINER = '__ORIGIN__';
-  var SITES = __SITES__;
-
-  var TOKEN_KEY = 'ac_token';
-
-  // ------------------------------------------------------------ 工具
-  function siteIdFor(hostname) {
-    var h = (hostname || '').toLowerCase();
-    for (var i = 0; i < SITES.length; i++) {
-      var s = SITES[i];
-      for (var j = 0; j < s.domains.length; j++) {
-        var d = s.domains[j];
-        if (h === d || h.slice(-(d.length + 1)) === '.' + d) return s.id;
-      }
-    }
-    return '';
-  }
-
-  function el(tag, style, text) {
-    var e = document.createElement(tag);
-    if (style) e.setAttribute('style', style);
-    if (text != null) e.textContent = text;
-    return e;
-  }
-
-  function setStatus(text, kind) {
-    var box = document.getElementById('ac-ck-status');
-    if (!box) return;
-    var colors = { ok: '#1e6b3a', err: '#a03a30', info: '#5a636e' };
-    box.style.color = colors[kind] || colors.info;
-    box.textContent = text || '';
-  }
-
-  function api(path, payload, cb) {
-    var token = GM_getValue(TOKEN_KEY, '');
-    if (!token) {
-      cb({ error: '还没有配对。请先在容器网页上点「自动导入」生成配对码，再填到上面的框里。' });
-      return;
-    }
-    GM_xmlhttpRequest({
-      method: 'POST',
-      url: CONTAINER + path,
-      headers: { 'Content-Type': 'application/json', 'X-AC-Token': token },
-      data: JSON.stringify(payload || {}),
-      onload: function (r) {
-        var data = {};
-        try { data = JSON.parse(r.responseText || '{}'); } catch (e) { data = {}; }
-        if (r.status >= 200 && r.status < 300) { cb(data); return; }
-        if (r.status === 401 || r.status === 403) {
-          cb({ error: data.error || '配对已失效，请重新配对' });
-          return;
-        }
-        cb({ error: data.error || ('请求失败（HTTP ' + r.status + '）') });
-      },
-      onerror: function () {
-        cb({ error: '连不上容器：' + CONTAINER + '（确认地址、端口和网络可达）' });
-      },
-      ontimeout: function () { cb({ error: '请求超时' }); }
-    });
-  }
-
-  // ------------------------------------------------------------ 界面
-  function buildPanel() {
-    var wrap = el('div',
-      'position:fixed;right:16px;bottom:16px;z-index:2147483647;' +
-      'font:13px/1.6 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;');
-
-    var btn = el('button', null, '🍪 Cookie 助手');
-    btn.id = 'ac-ck-open';
-    btn.setAttribute('style',
-      'padding:8px 14px;border:none;border-radius:20px;cursor:pointer;' +
-      'background:#2d6adc;color:#fff;box-shadow:0 3px 12px rgba(0,0,0,.28);' +
-      'font-size:13px;');
-    btn.onclick = function () { panel.classList.toggle('ac-hide'); };
-    wrap.appendChild(btn);
-
-    var panel = el('div');
-    panel.id = 'ac-ck-panel';
-    panel.className = 'ac-hide';
-    panel.setAttribute('style',
-      'display:none;width:430px;max-width:92vw;background:#fff;color:#242a33;' +
-      'border:1px solid #dde3ec;border-radius:10px;padding:14px 16px;' +
-      'box-shadow:0 10px 34px rgba(0,0,0,.22);margin-bottom:10px;');
-
-    panel.innerHTML =
-      '<div style="display:flex;justify-content:space-between;align-items:center;' +
-      'margin-bottom:8px">' +
-        '<b style="font-size:14px">Cookie 助手</b>' +
-        '<span id="ac-ck-x" style="cursor:pointer;color:#8b95a3;font-size:18px;' +
-        'line-height:1">&times;</span>' +
-      '</div>' +
-      '<div id="ac-ck-site" style="color:#5a636e;margin-bottom:10px"></div>' +
-      '<div id="ac-ck-body"></div>' +
-      '<div id="ac-ck-status" style="margin-top:8px;min-height:18px"></div>' +
-      '<div style="margin-top:10px;border-top:1px solid #eef1f6;padding-top:8px;' +
-      'font-size:11.5px;color:#8b95a3">容器：' + CONTAINER + '</div>';
-
-    wrap.appendChild(panel);
-    document.body.appendChild(wrap);
-
-    panel.querySelector('#ac-ck-x').onclick = function () {
-      panel.style.display = 'none';
-    };
-    return panel;
-  }
-
-  function renderReady(panel, siteId, names) {
-    var body = panel.querySelector('#ac-ck-body');
-    body.innerHTML =
-      '<div style="background:#f7f9fc;border:1px solid #e4e9f2;border-radius:6px;' +
-      'padding:10px;margin-bottom:10px">' +
-        '<div style="margin-bottom:6px">页面可见的 Cookie：<b>' + names.length +
-        '</b> 个</div>' +
-        (names.length
-          ? '<div style="font-size:11.5px;color:#5a636e;word-break:break-all">' +
-            names.join('、') + '</div>'
-          : '<div style="font-size:11.5px;color:#a03a30">' +
-            '一个都读不到，说明关键登录字段是 HttpOnly（脚本读不到值），' +
-            '请按下面的办法复制。</div>') +
-      '</div>' +
-      '<div style="margin-bottom:6px;font-weight:600">拿到完整 Cookie 的办法</div>' +
-      '<ol style="margin:0 0 8px 18px;padding:0;font-size:12.5px;color:#3a424d">' +
-        '<li>按 <b>F12</b> 打开开发者工具，切到 <b>Network</b></li>' +
-        '<li>按 <b>F5</b> 刷新页面</li>' +
-        '<li>点列表里<b>第一条请求</b></li>' +
-        '<li>右键 → <b>Copy</b> → <b>Copy as cURL</b></li>' +
-        '<li>粘到下面框里 → 点「发送到容器」</li>' +
-      '</ol>' +
-      '<div style="font-size:11.5px;color:#8b95a3;margin-bottom:10px">' +
-        '为什么不用控制台：<code>document.cookie</code> 读不到 HttpOnly 的' +
-        '登录字段，用 DevTools 复制才完整。</div>' +
-      '<textarea id="ac-ck-input" spellcheck="false" ' +
-      'style="width:100%;min-height:88px;box-sizing:border-box;padding:8px;' +
-      'border:1px solid #dde3ec;border-radius:6px;font:12px/1.5 Consolas,monospace" ' +
-      'placeholder="把 Copy as cURL 的整段，或 a=1; b=2 这样的 Cookie 串粘到这里"></textarea>' +
-      '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">' +
-        '<button id="ac-ck-send" style="padding:6px 14px;border:none;' +
-        'border-radius:5px;background:#2d6adc;color:#fff;cursor:pointer">' +
-        '发送到容器</button>' +
-        '<button id="ac-ck-clear" style="padding:6px 12px;border:1px solid #dde3ec;' +
-        'border-radius:5px;background:#fff;cursor:pointer">清除本脚本配对</button>' +
-      '</div>';
-
-    body.querySelector('#ac-ck-send').onclick = function () {
-      var v = body.querySelector('#ac-ck-input').value;
-      if (!v || !v.trim()) { setStatus('请先粘贴 Cookie 内容', 'err'); return; }
-      setStatus('正在发送…', 'info');
-      api('/api/site/cookie', { id: siteId, cookie: v }, function (d) {
-        if (d.error) { setStatus('失败：' + d.error, 'err'); return; }
-        setStatus('已保存 ' + d.count + ' 项（识别为：' + d.format + '）。' +
-                  '可以回容器页面点「检查是否有效」。', 'ok');
-        body.querySelector('#ac-ck-input').value = '';
-      });
-    };
-
-    body.querySelector('#ac-ck-clear').onclick = function () {
-      if (!confirm('清除本脚本保存的配对令牌？（容器里的站点 Cookie 不会被删）')) return;
-      GM_deleteValue(TOKEN_KEY);
-      renderPairing(panel, siteId);
-    };
-  }
-
-  function renderPairing(panel, siteId) {
-    var body = panel.querySelector('#ac-ck-body');
-    body.innerHTML =
-      '<div style="margin-bottom:8px">本脚本还没有和容器配对。' +
-      '请在容器的「站点」页点该站点的「自动导入」，把生成的配对码填到这里：</div>' +
-      '<input id="ac-ck-code" placeholder="配对码，例如 K7M2-9QXF" ' +
-      'style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #dde3ec;' +
-      'border-radius:6px;font:13px Consolas,monospace;text-transform:uppercase">' +
-      '<div style="display:flex;gap:8px;margin-top:10px">' +
-        '<button id="ac-ck-pair" style="padding:6px 14px;border:none;' +
-        'border-radius:5px;background:#2d6adc;color:#fff;cursor:pointer">配对</button>' +
-      '</div>';
-    body.querySelector('#ac-ck-pair').onclick = function () {
-      var code = (body.querySelector('#ac-ck-code').value || '').trim();
-      if (!code) { setStatus('请填配对码', 'err'); return; }
-      setStatus('正在配对…', 'info');
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: CONTAINER + '/api/pair/redeem',
-        headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify({ code: code }),
-        onload: function (r) {
-          var d = {};
-          try { d = JSON.parse(r.responseText || '{}'); } catch (e) { d = {}; }
-          if (r.status === 200 && d.token) {
-            GM_setValue(TOKEN_KEY, d.token);
-            setStatus('配对成功。', 'ok');
-            renderReady(panel, siteId, readCookieNames());
-          } else {
-            setStatus('配对失败：' + (d.error || ('HTTP ' + r.status)), 'err');
-          }
-        },
-        onerror: function () { setStatus('连不上容器：' + CONTAINER, 'err'); }
-      });
-    };
-    body.querySelector('#ac-ck-code').focus();
-  }
-
-  function readCookieNames() {
-    var out = [];
-    var raw = document.cookie || '';
-    raw.split(';').forEach(function (p) {
-      p = p.trim();
-      if (!p || p.indexOf('=') < 0) return;
-      var k = p.split('=')[0].trim();
-      if (k) out.push(k);
-    });
-    return out;
-  }
-
-  // ------------------------------------------------------------ 入口
-  function main() {
-    var siteId = siteIdFor(location.hostname);
-    if (!siteId) return;
-    if (document.getElementById('ac-ck-open')) return;
-
-    var panel = buildPanel();
-    var info = panel.querySelector('#ac-ck-site');
-    var found = null;
-    for (var i = 0; i < SITES.length; i++) {
-      if (SITES[i].id === siteId) found = SITES[i];
-    }
-    info.textContent = '当前站点：' + (found ? found.name : siteId) +
-                       '（' + location.hostname + '）';
-
-    if (GM_getValue(TOKEN_KEY, '')) {
-      renderReady(panel, siteId, readCookieNames());
-    } else {
-      renderPairing(panel, siteId);
-    }
-
-    GM_registerMenuCommand('打开 Cookie 助手', function () {
-      panel.style.display = 'block';
-    });
-    GM_registerMenuCommand('清除配对令牌', function () {
-      GM_deleteValue(TOKEN_KEY);
-      location.reload();
-    });
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', main);
-  } else {
-    main();
-  }
-})();
-'''.replace('__ORIGIN__', json.dumps(origin, ensure_ascii=False)[1:-1]) \
-   .replace('__MATCHES__', match_block) \
-   .replace('__CONNECTS__', connects) \
-   .replace('__HOST__', _host_of(origin)) \
-   .replace('__SITES__', json.dumps(
-       [{'id': k, 'name': _site_display_name(k), 'domains': v}
-        for k, v in SCRIPT_SITE_MATCHES.items()], ensure_ascii=False))
-
-
-def _host_of(origin: str) -> str:
-    from urllib.parse import urlsplit
-    try:
-        return urlsplit(origin or '').hostname or 'localhost'
-    except Exception:                                           # noqa: BLE001
-        return 'localhost'
-
-
-def _site_display_name(site_id: str) -> str:
-    from .templates import template_by_id
-    tpl = template_by_id(site_id)
-    return tpl.get('name') or site_id
-
-
-def build_userscript(origin: str) -> str:
-    """生成配套油猴脚本（容器地址已注入）。"""
-    return _userscript_template(origin or 'http://127.0.0.1:28999')
 
 
 # ------------------------------------------------------------------ HTTP 服务器
@@ -1159,10 +719,6 @@ def make_handler(webapp: WebApp, page_html: str):
         def _session_token(self) -> str:
             return AUTH.parse_cookies(self.headers.get('Cookie', '')).get(
                 AUTH.COOKIE_NAME, '')
-
-        def _script_token(self) -> str:
-            """配套浏览器脚本带来的令牌（跨站请求，带不上会话 Cookie）。"""
-            return (self.headers.get('X-AC-Token') or '').strip()
 
         def _send_json(self, status: int, obj: Any, extra_headers=None):
             payload = json.dumps(obj, ensure_ascii=False).encode('utf-8')
@@ -1273,8 +829,7 @@ def make_handler(webapp: WebApp, page_html: str):
                     body = {}
                 status, ctype, out = webapp.dispatch(method, path, query, body,
                                                     token=token,
-                                                    source=self._client_source(),
-                                                    script_token=self._script_token())
+                                                    source=self._client_source())
                 # 登录成功 → 下发会话 Cookie；登出 → 清除 Cookie。
                 # 从**本线程**的请求上下文取，不能从共享实例字段取。
                 ctx = webapp.current_request()
@@ -3402,16 +2957,11 @@ function saveCookieText(id, text){
   });
 }
 
-/* ============ 自动导入：配套浏览器助手（油猴脚本，备用方案） ============ */
+/* ============ 自动导入：承接 QD 的 get-cookies 扩展 ============ */
 
 function originOf(){
   /* 容器对外的地址就用当前页面访问的地址，最准（含端口） */
   return location.origin || (location.protocol+'//'+location.host);
-}
-
-function userscriptUrl(){
-  return originOf() + '/autocheckin-cookie.user.js?host='
-    + encodeURIComponent(location.host);
 }
 
 function openCookieHelper(id){
@@ -3513,16 +3063,11 @@ function openCookieHelper(id){
     + '</div>'
 
     + '<div class="fsec">'
-    +   '<h4>不想装扩展？两条备选</h4>'
+    +   '<h4>不想装扩展？手动粘贴也可以</h4>'
     +   '<div class="tip" style="font-size:12.5px;line-height:1.9;color:#3a424d">'
-    +     '<b>① 手动粘贴（最省事）：</b>'
     +     '在你已登录的浏览器里按 F12 → Network → F5 → 点第一条请求 → '
     +     '右键 Copy as cURL → 粘到上面的输入框。'
-    +     '一次复制就含 HttpOnly 字段，不用装任何东西。<br>'
-    +     '<b>② 用本容器自带的油猴脚本：</b>'
-    +     '<a href="'+esc(userscriptUrl())+'">安装/更新油猴脚本</a>'
-    +     '（需要已装 Tampermonkey）。它在目标网站上开一个面板引导你粘贴，'
-    +     '但受浏览器限制同样读不到 HttpOnly 的值。'
+    +     '一次复制就含 HttpOnly 字段，不用装任何东西。'
     +   '</div>'
     + '</div>'
 
@@ -3551,11 +3096,6 @@ function closeCookieHelper(){
   var b = $('acHelp');
   if(b) b.parentNode.removeChild(b);
 }
-
-/* 说明：原先这里有一组「生成配对码 / 吊销脚本令牌」的界面函数。
-   现在主路径改成了承接 QD 的 get-cookies 扩展 —— 脚本就在本容器页面上跑，
-   浏览器会自动带上本容器的登录会话，所以不再需要配对码。
-   相关后端接口保留（配套油猴脚本仍用它换令牌），但页面不再展示那套流程。 */
 
 /* ---------------- 刷新与"正在编辑"保护 ---------------- */
 

@@ -93,8 +93,7 @@ class TestNoSharedRequestState(unittest.TestCase):
         self.assertEqual(leaked, [], '并发下无令牌请求被授权了（认证绕过回归）')
 
     def test_instance_has_no_per_request_token_attrs(self):
-        for name in ('_current_token', '_current_source', '_script_token',
-                     '_via_script', '_do_logout'):
+        for name in ('_current_token', '_current_source', '_do_logout'):
             self.assertFalse(hasattr(self.app, name),
                              '不该再有共享的每请求字段 %s' % name)
 
@@ -127,7 +126,6 @@ class TestBackupExcludesSecrets(unittest.TestCase):
                                         'url': 'http://a:b@1.2.3.4:9'}})
         self.cfg.auth_password_enc = 'ENC_PW'
         self.cfg.session_hashes = ['HASH_OF_A_LIVE_SESSION']
-        self.cfg.api_token_hashes = ['HASH_OF_A_SCRIPT_TOKEN']
         site = SiteConfig(id='s1', name='S1',
                           proxy_url='http://u2:p2@site-proxy:8080',
                           headers={'Authorization': 'Bearer SITE_SECRET'})
@@ -155,8 +153,7 @@ class TestBackupExcludesSecrets(unittest.TestCase):
         令牌的哈希或自选口令，用户点一次「从云端恢复」他就成了管理员。
         """
         for label, needle in (('登录口令密文', 'ENC_PW'),
-                              ('会话哈希', 'HASH_OF_A_LIVE_SESSION'),
-                              ('脚本令牌哈希', 'HASH_OF_A_SCRIPT_TOKEN')):
+                              ('会话哈希', 'HASH_OF_A_LIVE_SESSION')):
             with self.subTest(label=label):
                 self.assertNotIn(needle, self.out, '备份里不该出现%s' % label)
 
@@ -173,19 +170,16 @@ class TestBackupExcludesSecrets(unittest.TestCase):
         local.auth_required = True
         local.auth_password_enc = 'LOCAL_PW'
         local.session_hashes = ['LOCAL_SESSION']
-        local.api_token_hashes = ['LOCAL_SCRIPT']
 
         malicious = {
             'auth_required': True,
             'auth_password_enc': 'plain:' + base64.b64encode(b'pwned').decode(),
             'session_hashes': ['ATTACKER_SESSION_HASH'],
-            'api_token_hashes': ['ATTACKER_SCRIPT_HASH'],
             'sites': [{'id': 'x', 'name': 'X'}],
         }
         restored = self.store.import_config(malicious, keep_auth_from=local)
         self.assertEqual(restored.auth_password_enc, 'LOCAL_PW')
         self.assertEqual(restored.session_hashes, ['LOCAL_SESSION'])
-        self.assertEqual(restored.api_token_hashes, ['LOCAL_SCRIPT'])
         # 但站点数据要正常恢复
         self.assertEqual([s.id for s in restored.sites], ['x'])
 
@@ -270,51 +264,6 @@ class TestSetupCannotBeHijacked(unittest.TestCase):
             app.dispatch('POST', '/api/auth/setup', {},
                          {'password': 'attacker-pw'})
         self.assertEqual(ctx.exception.status, 403)
-
-
-class TestUserscriptOriginSanitized(unittest.TestCase):
-    """油猴脚本里的容器地址必须来自白名单化的 host。"""
-
-    def setUp(self):
-        self.app = WB.WebApp(SV.Service(tempfile.mkdtemp(prefix='ac_js_'),
-                                        version='t',
-                                        env_key=S.generate_key(), proxy=''),
-                             version='t')
-
-    def test_injection_payload_rejected(self):
-        evil = "http://nas.local';GM_xmlhttpRequest({url:'http://evil/'});"\
-               "//"
-        origin = self.app._public_origin({'host': [evil]})
-        self.assertNotIn("'", origin)
-        self.assertNotIn(';', origin)
-        self.assertNotEqual(origin, evil)
-
-    def test_generated_script_has_no_injection(self):
-        evil = "http://nas.local';alert(1);//"
-        js = WB.build_userscript(self.app._public_origin({'host': [evil]}))
-        # CONTAINER 那行必须是一段合法的单引号字符串字面量
-        m = re.search(r"var CONTAINER = ('[^']*');", js)
-        self.assertIsNotNone(m, 'CONTAINER 应是单引号字面量')
-        self.assertNotIn('alert(1)', m.group(1))
-
-    def test_valid_hosts_accepted(self):
-        cases = {
-            'http://nas.local:28999': 'http://nas.local:28999',
-            'nas.local:28999': 'http://nas.local:28999',
-            'https://10.0.0.5': 'https://10.0.0.5',
-            '192.168.1.10:8080': 'http://192.168.1.10:8080',
-        }
-        for raw, expect in cases.items():
-            with self.subTest(raw=raw):
-                self.assertEqual(self.app._public_origin({'host': [raw]}),
-                                 expect)
-
-    def test_bad_input_falls_back_to_default(self):
-        for bad in ('', 'http://a b', 'http://h:99999', 'javascript:alert(1)'):
-            with self.subTest(bad=bad):
-                got = self.app._public_origin({'host': [bad]})
-                self.assertTrue(got.startswith('http://127.0.0.1'),
-                                '非法输入应退回本机默认值，得到 %r' % got)
 
 
 class TestSiteIdSanitized(unittest.TestCase):

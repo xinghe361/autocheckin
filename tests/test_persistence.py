@@ -87,31 +87,6 @@ class TestStaleSnapshotDoesNotRollBack(Case):
         self.assertFalse(after.password_matches('old-pw-111'),
                          '旧口令被回滚成可用（安全回归）')
 
-    def test_token_revocation_survives_stale_writeback(self):
-        """吊销脚本令牌不能被回滚。
-
-        手动把令牌哈希写进配置（这才是"已签发"的状态），
-        然后模拟：长任务持旧快照 → 用户吊销 → 长任务写回。
-        改回去会怎样：吊销被回滚，**已吊销的令牌重新有效**。
-        """
-        am = AuthManager(self.svc)
-        am.set_password('pw-123456')
-        tok = A.new_api_token()
-        cfg = self.svc.load_config()
-        cfg.api_token_hashes = [A.hash_api_token(tok)]
-        self.svc.save_config(cfg)
-        self.assertTrue(AuthManager(self.svc).api_token_valid(tok),
-                        '前置条件：令牌应先有效')
-
-        stale = self.svc.load_config()            # 长任务手里的旧快照
-        AuthManager(self.svc).revoke_api_tokens()  # 用户吊销
-        self.assertFalse(AuthManager(self.svc).api_token_valid(tok))
-
-        self.svc.store.merge_site_runtime(stale.sites)
-
-        self.assertFalse(AuthManager(self.svc).api_token_valid(tok),
-                         '已吊销的令牌被回滚成有效（安全回归）')
-
     def test_user_config_edit_survives(self):
         """用户在长任务期间改的站点设置不能被覆盖。"""
         stale = self.svc.load_config()

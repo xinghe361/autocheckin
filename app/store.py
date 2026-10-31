@@ -382,7 +382,7 @@ class Store:
            * 全局代理 URL 里常带 user:pass。
            * 站点级独立代理地址、站点自定义请求头（可能放 Authorization）。
 
-        2) **认证状态**（auth_password_enc / session_hashes / api_token_hashes）：
+        2) **认证状态**（auth_password_enc / session_hashes）：
            备份若把它当"用户数据"整包恢复，那么任何能写备份文件的人
            （明文 http 上的中间人、被攻陷的网盘账号、拿到的他人备份）
            只要在里面塞一条**自己令牌的哈希**或一个自选口令，
@@ -404,7 +404,7 @@ class Store:
         if src:
             data['plugin_sync_source'] = _strip_url_secrets(src)
         # 认证状态不进备份，恢复时保留本机现有的认证信息
-        for k in ('auth_password_enc', 'session_hashes', 'api_token_hashes'):
+        for k in ('auth_password_enc', 'session_hashes'):
             data.pop(k, None)
         notify = data.get('notify')
         if isinstance(notify, dict):
@@ -460,7 +460,6 @@ class Store:
             cfg.auth_required = keep_auth_from.auth_required
             cfg.auth_password_enc = keep_auth_from.auth_password_enc
             cfg.session_hashes = list(keep_auth_from.session_hashes or [])
-            cfg.api_token_hashes = list(keep_auth_from.api_token_hashes or [])
             # 控制面字段也一律以本机为准（不只认证）。
             #
             # 为什么必须在这里钉住，而不是只靠调用方记得覆盖：这些字段决定

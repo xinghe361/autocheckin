@@ -113,14 +113,6 @@ try:
     check('自动导入复用现有会话（不需要配对码）',
           '/api/pair/redeem' not in html)   # 页面不该再去换脚本令牌
 
-    st, body = get('/autocheckin-cookie.user.js?host=nas.local:28999')
-    js = body.decode('utf-8', 'replace') if isinstance(body, bytes) else str(body)
-    check('油猴脚本可下载', st == 200 and 'UserScript' in js)
-    check('油猴脚本注入了正确的容器地址',
-          'http://nas.local:28999' in js, js[:160])
-    check('油猴脚本无占位符残留',
-          not any(p in js for p in ('__ORIGIN__', '__MATCHES__', '__SITES__')))
-
     # ---- 界面：正在编辑时不能被自动刷新冲掉 ----
     # 用户反馈"还没填完就刷新，填不了"。根因是 30 秒定时 refreshAll()，
     # 而它会重渲染整个站点卡片，把表单里的内容替换掉。
