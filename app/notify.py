@@ -70,6 +70,10 @@ class CheckinResult:
     at: int = field(default_factory=lambda: int(time.time()))
     # AI 分析给出的结论（若有）
     ai_note: str = ''
+    # 这次签到走过的每一步（GET 某地址 -> 200 / 提取 xx / 命中关键词…）。
+    # 引擎一直在记，但以前出了函数就丢了 —— 失败时只能看到一句结论，
+    # 看不出是第几步、哪个地址出的问题。现在往上传，由 history 落盘。
+    trace: List[str] = field(default_factory=list)
 
 
 def should_notify(result: CheckinResult, cfg: NotifyConfig) -> bool:

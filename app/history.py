@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -33,6 +34,10 @@ KEEP_DAYS = 180
 # 超过这个体积就压缩一次（按 KEEP_DAYS 保留）。正常一年也就几百 KB。
 MAX_BYTES = 4 * 1024 * 1024
 MSG_LIMIT = 300
+# 单次执行最多留多少步、每步多长。截断是必须的：一条记录的步骤链会长到
+# 一两 KB，180 天 × 多站点累积起来会把 history.jsonl 顶到压缩阈值。
+STEPS_LIMIT = 12
+STEP_LIMIT = 160
 # 单日明细最多返回多少条（防止某站点疯狂重试把页面撑爆）
 MAX_ITEMS_PER_DAY = 60
 
@@ -69,6 +74,63 @@ def _clean_msg(raw: Any) -> str:
     if len(s) > MSG_LIMIT:
         s = s[:MSG_LIMIT] + '…'
     return s
+
+
+# 步骤链里会有 URL 和"提取到的值"，两处都可能带令牌：
+#   GET https://x.com/mission/daily/redeem?once=84123 -> 302
+#   提取 once=84123
+# 落盘前把**像令牌的部分**打码：历史文件是"给人看发生了什么"的，
+# 不是凭据仓库，留着就等于把一次性令牌写进一个要存半年的文件里。
+#
+# 但也不能一刀切把 query 全遮了 —— `?random=false`、`?page=2` 这类
+# 是排查时最想看到的东西，遮掉等于把日志削成没用的形式。
+# 所以按参数名判断（令牌类），外加"值长得像随机串就遮"兜底。
+_QUERY_RE = re.compile(r'([?&][^=\s&]+=)([^\s&]*)')
+_SENSITIVE_KEY_RE = re.compile(
+    r'(token|once|key|secret|auth|session|sign|ticket|code|passw|pwd|'
+    r'cookie|csrf|nonce|ticket|hash)', re.I)
+_LONG_VALUE = 20        # 超过这个长度的 query 值一律当令牌处理
+_EXTRACTED_RE = re.compile(r'(提取\s+[^=\s]+=).*')
+
+
+def _mask_query(text: str) -> str:
+    def repl(m):
+        head, val = m.group(1), m.group(2)
+        if not val:
+            return m.group(0)
+        if _SENSITIVE_KEY_RE.search(head) or len(val) >= _LONG_VALUE:
+            return head + '***'
+        return m.group(0)
+
+    return _QUERY_RE.sub(repl, text)
+
+
+def scrub_step(line: Any) -> str:
+    """把一步痕迹压成单行、去掉令牌值、截断。"""
+    s = str(line or '')
+    for ch in ('\r\n', '\r', '\n', '\t'):
+        s = s.replace(ch, ' ')
+    s = ' '.join(s.split())
+    s = _mask_query(s)
+    # 提取出来的值可能是任何东西（令牌、积分、用户名），一律打码
+    s = _EXTRACTED_RE.sub(r'\1***', s)
+    if len(s) > STEP_LIMIT:
+        s = s[:STEP_LIMIT] + '…'
+    return s
+
+
+def _clean_steps(raw: Any) -> List[str]:
+    """步骤链入库前的清洗。坏数据/超长一律吞掉，绝不让它拖累签到。"""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: List[str] = []
+    for line in raw:
+        s = scrub_step(line)
+        if s:
+            out.append(s)
+        if len(out) >= STEPS_LIMIT:
+            break
+    return out
 
 
 def day_of(ts: int) -> str:
@@ -115,7 +177,8 @@ class History:
     def make_entry(self, site_id: str, site_name: str, ok: bool,
                    msg: str = '', error_kind: str = '', duration_ms: int = 0,
                    ts: Optional[int] = None, trigger: str = 'schedule',
-                   attempt: int = 1) -> Dict[str, Any]:
+                   attempt: int = 1,
+                   trace: Optional[List[str]] = None) -> Dict[str, Any]:
         return {
             'ts': _int(ts if ts is not None else self.now_fn()),
             'site_id': str(site_id or ''),
@@ -126,6 +189,7 @@ class History:
             'duration_ms': _int(duration_ms),
             'trigger': str(trigger or 'schedule')[:20],
             'attempt': max(1, _int(attempt, 1)),
+            'steps': _clean_steps(trace),
         }
 
     def append(self, entries: List[Dict[str, Any]]) -> int:
@@ -405,6 +469,9 @@ class History:
             'duration_ms': _int(e.get('duration_ms')),
             'trigger': str(e.get('trigger') or ''),
             'attempt': _int(e.get('attempt'), 1),
+            # 这一步链只有展开某条明细时才显示；老记录没有这个字段，给空数组
+            'steps': [str(x) for x in (e.get('steps') or [])
+                      if isinstance(x, str)][:STEPS_LIMIT],
         }
 
 

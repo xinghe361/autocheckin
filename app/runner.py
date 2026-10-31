@@ -581,6 +581,8 @@ class Runner:
                     ts=ts,
                     trigger=trigger,
                     attempt=int(getattr(result, 'attempt', 1) or 1),
+                    # 步骤链（脱敏在 history 里做，别在这里漏掉）
+                    trace=list(getattr(result, 'trace', None) or []),
                 ))
             self.history.append(entries)
         except Exception:                                       # noqa: BLE001

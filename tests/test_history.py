@@ -120,6 +120,74 @@ class TestStorage(HistoryCase):
         self.assertIsNot(a, H.get_history(os.path.join(self.dir, 'other')))
 
 
+# NOW 固定在 10-15，所有 add() 都落在这一天
+_DAY = '2026-10-15'
+
+
+class TestSteps(HistoryCase):
+    """执行步骤链（trace）：落盘、脱敏、截断、回读。
+    这一层最要紧的不是"能不能存"，而是**存进去的东西干不干净**：
+    trace 里既有 URL 也可能有提取到的令牌，写进一个要留半年的文件里，
+    遮不住就等于多了一个凭据泄露面。
+    """
+
+    def test_steps_round_trip(self):
+        self.add(ok=False, error_kind='http_403',
+                 trace=['GET https://a.com/x -> 403', '命中失败关键词'])
+        d = [x for x in self.cal()['days'] if x['date'] == _DAY][0]
+        self.assertEqual(len(d['items'][0]['steps']), 2)
+        self.assertIn('403', d['items'][0]['steps'][0])
+
+    def test_token_in_query_is_masked(self):
+        e = self.h.make_entry('v2ex', 'V2EX', False,
+                              trace=['GET https://x.com/redeem?once=84123 -> 302'])
+        self.assertEqual(e['steps'][0],
+                         'GET https://x.com/redeem?once=*** -> 302')
+
+    def test_harmless_query_kept_for_debugging(self):
+        """`random=false`、`page=2` 这类是排查时最想看的东西，不能一起遮。"""
+        e = self.h.make_entry('nodeseek', 'NodeSeek', True,
+                              trace=['POST https://x.com/a?random=false -> 200'])
+        self.assertIn('random=false', e['steps'][0])
+
+    def test_long_value_masked_even_with_dull_name(self):
+        e = self.h.make_entry('x', 'X', False,
+                              trace=['GET https://x.com/a?s=0123456789abcdefghij -> 200'])
+        self.assertIn('s=***', e['steps'][0])
+
+    def test_extracted_value_masked(self):
+        e = self.h.make_entry('v2ex', 'V2EX', False,
+                              trace=['提取 once=84123'])
+        self.assertEqual(e['steps'][0], '提取 once=***')
+
+    def test_steps_are_truncated(self):
+        e = self.h.make_entry('x', 'X', False,
+                              trace=['step %d' % i for i in range(50)])
+        self.assertEqual(len(e['steps']), H.STEPS_LIMIT)
+        e2 = self.h.make_entry('x', 'X', False, trace=['a' * 500])
+        self.assertLessEqual(len(e2['steps'][0]), H.STEP_LIMIT + 1)
+
+    def test_garbage_trace_is_safe(self):
+        for bad in (None, 'abc', 123, ['', '  ', None, 'ok']):
+            e = self.h.make_entry('x', 'X', False, trace=bad)
+            self.assertIsInstance(e['steps'], list)
+            for s in e['steps']:
+                self.assertIsInstance(s, str)
+                self.assertTrue(s.strip())
+
+    def test_old_entry_without_steps_still_works(self):
+        """升级前写的记录没有 steps 字段，读的时候不能炸。"""
+        self.h.append([{'ts': NOW, 'site_id': 'v2ex', 'site_name': 'V2EX',
+                        'ok': True, 'msg': '旧记录'}])
+        d = [x for x in self.cal()['days'] if x['date'] == _DAY][0]
+        self.assertEqual(d['items'][0]['steps'], [])
+
+    def test_steps_never_contain_newlines(self):
+        e = self.h.make_entry('x', 'X', False, trace=['a\nb\r\nc'])
+        self.assertNotIn('\n', e['steps'][0])
+        self.assertNotIn('\r', e['steps'][0])
+
+
 class TestCalendar(HistoryCase):
     def test_status_ok_fail_none(self):
         self.add(at=ts(2026, 10, 1, 3, 0))                 # 全绿
@@ -304,6 +372,27 @@ class RunnerCase(unittest.TestCase):
 
 
 class TestRunnerRecordsHistory(RunnerCase):
+    def test_trace_is_passed_into_history(self):
+        """引擎产出的步骤链要一路带到 history —— 以前出了函数就丢了。"""
+        self.results['s1'] = CheckinResult(
+            site_id='s1', site_name='S1', success=False, message='403',
+            error_kind='http_403',
+            trace=['GET https://a.com/x -> 403', '命中失败关键词'])
+        self.make_runner().run_once(self.cfg, only_site='s1')
+        e = self.history().load()[0]
+        self.assertEqual(len(e['steps']), 2)
+        self.assertIn('403', e['steps'][0])
+
+    def test_trace_is_scrubbed_before_writing(self):
+        """落盘前必须脱敏：这条是防"日志变凭据仓库"的底线。"""
+        self.results['s1'] = CheckinResult(
+            site_id='s1', site_name='S1', success=True, message='ok',
+            trace=['GET https://a.com/redeem?once=84123 -> 302'])
+        self.make_runner().run_once(self.cfg, only_site='s1')
+        with open(self.history().path, encoding='utf-8') as f:
+            raw = f.read()
+        self.assertNotIn('84123', raw, '令牌被原样写进了 history.jsonl')
+
     def test_success_is_recorded(self):
         r = self.make_runner()
         r.run_once(self.cfg, only_site='s1', trigger='manual')

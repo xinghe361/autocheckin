@@ -1450,6 +1450,14 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
   font-size:11.5px;flex:none;width:42px}
 .daylist .st{flex:none;width:46px;font-size:11.5px}
 .daylist .bd{flex:1;min-width:0;word-break:break-word}
+/* 执行步骤（点开某条明细才展开）。
+   默认收起：大部分时候只想知道"成没成"，只有要排查时才需要看走了哪几步。 */
+.itstep{margin:-2px 0 8px 52px;font-size:11.5px;color:var(--mut)}
+.itstep summary{cursor:pointer;color:#5b6470;outline:none;user-select:none}
+.itstep summary:hover{color:var(--pri)}
+.itstep ol{margin:4px 0 0;padding-left:18px;line-height:1.7}
+.itstep li{word-break:break-all;font-family:ui-monospace,Consolas,monospace;
+  font-size:11px}
 /* 失败原因：明细里的小色块，以及下方的「按大类汇总」。
    颜色跟着大类走（登录/拦截/网络/站点/规则），不用读文字也能分出该找谁。 */
 .rchip{display:inline-block;padding:0 6px;border-radius:8px;font-size:11px;
@@ -2071,6 +2079,14 @@ function renderDay(d){
                                      : '<span class="tag err">失败</span>') + '</span>'
       + '<span class="bd">' + bits.join(' · ') + '</span>'
       + '</div>';
+    /* 步骤链默认收起：看"成没成"不需要它，排查时才展开。
+       用原生 details，不占 JS 状态，翻月份重渲染也不会丢。 */
+    if(it.steps && it.steps.length){
+      html += '<details class="itstep"><summary>执行步骤（'
+        + it.steps.length + ' 步）</summary><ol>'
+        + it.steps.map(function(x){ return '<li>' + esc(x) + '</li>'; }).join('')
+        + '</ol></details>';
+    }
   });
   box.innerHTML = html;
 }

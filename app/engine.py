@@ -462,4 +462,6 @@ def checkin_site(site: SiteConfig, proxy: str = '', password: str = '',
         error_kind='' if outcome.success else (outcome.error_kind or 'failed'),
         attempt=attempt,
         duration_ms=int((time.time() - started) * 1000),
+        # 步骤链一路带着走：失败时这是唯一能看出"卡在哪一步"的东西
+        trace=list(outcome.trace or []),
     )
