@@ -226,14 +226,22 @@ class Runner:
             out.append(site)
         return out
 
-    def ensure_scheduled(self, cfg: AppConfig, state: RuntimeState, now: int) -> None:
-        """给还没排过期的站点安排首次运行时间（不会立即执行）。"""
+    def ensure_scheduled(self, cfg: AppConfig, state: RuntimeState, now: int) -> int:
+        """给还没排过期的站点安排首次运行时间（不会立即执行）。
+
+        返回**真正补了排期的站点数**。调度器靠这个返回值决定要不要写盘：
+        每分钟 tick 一次，绝大多数时候一个站点都不需要补，此时写盘纯属浪费
+        （见 scheduler.tick 的说明）。
+        """
         from .schedule import next_run_at
+        changed = 0
         for site in cfg.sites:
             if not site.enabled:
                 continue
             if not state.next_run_at(site.id):
                 state.set_next_run_at(site.id, next_run_at(now, site.to_schedule(), self.rng))
+                changed += 1
+        return changed
 
     # ------------------------------------------------------------------
     def run_site(self, site: SiteConfig, cfg: AppConfig, state: RuntimeState,

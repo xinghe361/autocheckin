@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import json
+import gzip
 import json
 import re
 import threading
@@ -1070,6 +1070,14 @@ def build_userscript(origin: str) -> str:
 
 def make_handler(webapp: WebApp, page_html: str):
     """构造请求处理器。"""
+    # 首页是恒定内容（登录页/主界面由前端查 /api/auth/state 决定），
+    # 提前编码并压好一份放这里：每次打开都要重传这个页面，而页面是
+    # no-store 不能缓存，所以不能每次都花时间重新压。
+    page_bytes = page_html.encode('utf-8')
+    try:
+        page_gzip = gzip.compress(page_bytes, 6)
+    except Exception:                                           # noqa: BLE001
+        page_gzip = b''
 
     class Handler(BaseHTTPRequestHandler):
         server_version = 'AutoCheckin'
@@ -1079,17 +1087,50 @@ def make_handler(webapp: WebApp, page_html: str):
             pass
 
         # -- 工具 --
+        # 低于这个体积不压：gzip 自带约 20 字节的头尾，小响应压完反而更大。
+        GZIP_MIN = 1024
+        # 只压文本：图片/字体之类本来就已经压过，再压是白烧 CPU。
+        GZIP_TYPES = ('text/', 'application/json', 'application/javascript',
+                      'image/svg+xml')
+
+        def _wants_gzip(self) -> bool:
+            """客户端是否接受 gzip。
+
+            整个页面（HTML+CSS+JS）内联在同一个响应里，约 120KB，压完 39KB。
+            页面本身是 no-store（含会话状态，不能缓存），所以每次打开都要重传
+            —— 手机上走公网时这 80KB 的差别是实打实的几百毫秒。
+            """
+            enc = (self.headers.get('Accept-Encoding') or '').lower()
+            if 'gzip' not in enc:
+                return False
+            # `gzip;q=0` 是明确拒绝；顺手去掉空格好比对写法差异
+            return 'gzip;q=0' not in enc.replace(' ', '')
+
+        def _compressible(self, content_type: str) -> bool:
+            ct = (content_type or '').lower()
+            return any(ct.startswith(t) for t in self.GZIP_TYPES)
+
         def _send(self, status: int, content_type: str, payload: bytes,
                   extra_headers=None):
+            headers = dict(extra_headers or {})
+            if (len(payload) >= self.GZIP_MIN
+                    and self._compressible(content_type)
+                    and 'Content-Encoding' not in headers
+                    and self._wants_gzip()):
+                payload = gzip.compress(payload, 6)
+                headers['Content-Encoding'] = 'gzip'
             self.send_response(status)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(payload)))
             self.send_header('Cache-Control', 'no-store')
+            # 响应体随 Accept-Encoding 变化，必须声明，否则中间的代理可能
+            # 把压缩过的版本发给不支持 gzip 的客户端
+            self.send_header('Vary', 'Accept-Encoding')
             # 基础安全响应头
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('X-Frame-Options', 'DENY')
             self.send_header('Referrer-Policy', 'no-referrer')
-            for k, v in (extra_headers or {}).items():
+            for k, v in headers.items():
                 self.send_header(k, v)
             self.end_headers()
             try:
@@ -1199,8 +1240,11 @@ def make_handler(webapp: WebApp, page_html: str):
                 return
             if path in ('/', '/index.html'):
                 # 登录页还是主界面由前端查 /api/auth/state 决定，这里只发同一个页面
-                self._send(200, 'text/html; charset=utf-8',
-                           page_html.encode('utf-8'))
+                if page_gzip and self._wants_gzip():
+                    self._send(200, 'text/html; charset=utf-8', page_gzip,
+                               {'Content-Encoding': 'gzip'})
+                else:
+                    self._send(200, 'text/html; charset=utf-8', page_bytes)
                 return
 
             token = self._session_token()

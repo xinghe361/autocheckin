@@ -57,8 +57,14 @@ class Scheduler:
             cfg = self.service.load_config()
             state = self.service.load_state()
             runner = self.service.make_runner(cfg)
-            runner.ensure_scheduled(cfg, state, int(self.now_fn()))
-            self.service.store.save_state(state)
+            # 只在"确实补了排期"时才写盘。
+            # 这一步以前是无条件 save_state，而 tick 每分钟一次 —— 每次都是
+            # 临时文件 + fsync + rename，等于每天 1440 次强制刷盘。在 NAS 上
+            # 后果具体：机械盘被每分钟叫醒一次，永远进不了休眠；eMMC/SSD 上是
+            # 白白多出来的写入放大。而绝大多数 tick 一个站点都不需要补排期，
+            # 写下去的其实是和盘上一模一样的字节。
+            if runner.ensure_scheduled(cfg, state, int(self.now_fn())):
+                self.service.store.save_state(state)
 
             due = runner.due_sites(cfg, state, int(self.now_fn()))
             if not due:
