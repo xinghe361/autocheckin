@@ -82,14 +82,32 @@ NODESEEK = {
     'id': 'nodeseek',
     'name': 'NodeSeek',
     'homepage': 'https://www.nodeseek.com/board',
-    # 签到走 API，不是网页。random=true 就是"试试手气"（随机鸡腿数）；
-    # 想改成固定 5 鸡腿，把 url 里的 random=true 换成 random=false。
-    'mission_url': 'https://www.nodeseek.com/api/attendance?random=true',
+    # 签到走 API，不是网页。random 参数就是站内那两个签到按钮：
+    #   random=true  试试手气（鸡腿数随机，站内默认）
+    #   random=false 鸡腿×5（固定拿 5 个）
+    # 具体选哪个由**每个站点自己的设置**决定（下面的 options），
+    # 这里只留占位符，引擎回放前会替换成站点选中的值。
+    'mission_url': 'https://www.nodeseek.com/api/attendance?random={attendance}',
+    # 模板可选项：界面上「站点 → 编辑 → 签到方式」会出现一个下拉框。
+    # value 直接就是接口要的字符串（拼进 URL），所以只有 true/false 两种。
+    'options': [
+        {
+            'key': 'attendance',
+            'label': '签到方式',
+            'default': 'true',
+            'choices': [
+                {'value': 'true', 'label': '试试手气（鸡腿数随机）'},
+                {'value': 'false', 'label': '鸡腿 ×5（固定拿 5 个）'},
+            ],
+            'note': '对应站内两个签到按钮。选「试试手气」时拿到的数量不固定，'
+                    '选「鸡腿 ×5」固定 5 个。',
+        },
+    ],
     'need_browser': False,          # 实测：API 端点不在 Cloudflare 防线后面
     'verify_ssl': True,
     'flow': [
         {'action': 'post',
-         'url': 'https://www.nodeseek.com/api/attendance?random=true'},
+         'url': 'https://www.nodeseek.com/api/attendance?random={attendance}'},
         # 顺带把获得数量与余额抽出来，便于在通知里看到"这次拿了多少、总共多少"。
         # 不是必需项（extract 失败不影响判定），所以不加 required。
         {'action': 'extract_regex', 'pattern': r'"gain":\s*(\d+)', 'save_as': 'gain'},
@@ -251,6 +269,89 @@ def available_templates() -> List[Dict[str, Any]]:
     for t in plugin_templates():
         out[t['id']] = dict(t, source='plugin')
     return sorted(out.values(), key=lambda t: t['id'])
+
+
+def option_specs(tpl: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """模板声明的"可选项"，供界面渲染下拉、供引擎校验取值。
+
+    只有形状正确的才认：要 key、要非空 choices、每个 choice 要有 value。
+    插件模板是外部 JSON，写歪了不能把界面和签到流程搞崩 ——
+    认不出来的那一项直接当不存在，其余项照常工作。
+    """
+    raw = (tpl or {}).get('options')
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    seen_keys = set()
+    for spec in raw:
+        if not isinstance(spec, dict):
+            continue
+        key = str(spec.get('key') or '').strip()
+        if not key or key in seen_keys:
+            continue
+        choices_raw = spec.get('choices')
+        if not isinstance(choices_raw, list):
+            continue
+        choices: List[Dict[str, str]] = []
+        for c in choices_raw:
+            if not isinstance(c, dict):
+                continue
+            val = c.get('value')
+            if val is None:
+                continue
+            val = str(val)
+            if not val or any(x['value'] == val for x in choices):
+                continue
+            choices.append({'value': val,
+                            'label': str(c.get('label') or val)})
+        if not choices:
+            continue
+        default = str(spec.get('default') or choices[0]['value'])
+        if default not in [c['value'] for c in choices]:
+            # 默认值写错时退回第一项，而不是让界面出现"没有选中"的下拉
+            default = choices[0]['value']
+        seen_keys.add(key)
+        out.append({
+            'key': key,
+            'label': str(spec.get('label') or key),
+            'default': default,
+            'choices': choices,
+            'note': str(spec.get('note') or ''),
+        })
+    return out
+
+
+def resolve_options(tpl: Dict[str, Any], values: Any) -> Dict[str, str]:
+    """把站点上存的值对齐到模板声明：认不出的键/取值一律丢掉，缺的补默认值。
+
+    为什么必须校验而不是照单全收：这些值最终会**拼进请求 URL**
+    （NodeSeek 就是 `?random={attendance}`）。放任任意字符串进去，
+    等于把一份用户可写的配置当成 URL 片段使用；只认白名单里的取值，
+    拼进去的就永远是 true/false 这种已知常量。
+    """
+    specs = option_specs(tpl)
+    src = values if isinstance(values, dict) else {}
+    out: Dict[str, str] = {}
+    for spec in specs:
+        allowed = [c['value'] for c in spec['choices']]
+        got = str(src.get(spec['key']) or '').strip()
+        out[spec['key']] = got if got in allowed else spec['default']
+    return out
+
+
+def site_option_specs(site: Any) -> List[Dict[str, Any]]:
+    """某个站点该显示哪些可选项（只有内置/插件模板站点才有）。"""
+    if getattr(site, 'kind', '') != KIND_TEMPLATE:
+        return []
+    return option_specs(template_by_id(getattr(site, 'template', '')))
+
+
+def site_options(site: Any) -> Dict[str, str]:
+    """某个站点当前生效的可选项取值（没设过就是模板默认值）。"""
+    if getattr(site, 'kind', '') != KIND_TEMPLATE:
+        return {}
+    return resolve_options(template_by_id(getattr(site, 'template', '')),
+                           getattr(site, 'options', None))
 
 
 def builtin_sites() -> List[SiteConfig]:

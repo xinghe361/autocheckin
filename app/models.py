@@ -258,6 +258,16 @@ class SiteConfig:
     # 这里按站点配置，回放时合并进请求头。
     headers: Dict[str, str] = field(default_factory=dict)
 
+    # --- 模板可选项（键 -> 取值）---
+    # 模板里用 `options` 声明能给用户选的东西，这里存用户实际选的。
+    # 目前唯一的用处是 NodeSeek 的签到方式（试试手气 / 鸡腿×5）。
+    #
+    # 只存"用户明确设置过"的项：留空表示"用模板默认值"，
+    # 这样以后改模板默认值对所有没动过的人自动生效。
+    # 取值在写入与回放两处都会按模板声明校验（templates.resolve_options），
+    # 因为这些东西最终会拼进请求 URL。
+    options: Dict[str, str] = field(default_factory=dict)
+
     # --- 站点级代理策略 ---
     # inherit = 跟随全局设置（默认）
     # direct  = 这个站点强制直连（比如国内站点不需要代理）
@@ -397,6 +407,9 @@ class SiteConfig:
             fail_keywords=_as_str_list(d.get('fail_keywords')),
             headers={str(k): _as_str(v)
                      for k, v in _as_dict(d.get('headers')).items()},
+            options={str(k): _as_str(v)
+                     for k, v in _as_dict(d.get('options')).items()
+                     if _as_str(v)},
             proxy_mode=_as_str(d.get('proxy_mode'), PROXY_INHERIT),
             proxy_url=_as_str(d.get('proxy_url'), ''),
             username=_as_str(d.get('username'), ''),

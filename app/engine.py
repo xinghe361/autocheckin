@@ -21,7 +21,7 @@ from .models import (ACTION_ASSERT_TEXT, ACTION_CLICK, ACTION_EXTRACT, ACTION_FI
                      ACTION_GOTO, ACTION_WAIT, ACTION_WAIT_FOR, KIND_TEMPLATE,
                      SiteConfig)
 from .notify import CheckinResult
-from .templates import template_by_id
+from .templates import resolve_options, template_by_id
 
 
 @dataclass
@@ -255,9 +255,18 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
         flow = [s.to_dict() for s in site.steps] or flow
 
     mission = tpl.get('mission_url') or site.homepage
+    # 模板可选项（NodeSeek 的"试试手气 / 鸡腿×5"）。
+    #
+    # 必须先解析出实际取值，**再**用它渲染 mission_url ——
+    # mission_url 自己就带占位符（?random={attendance}），若不先渲染，
+    # 步骤里引用 {mission_url} 就会把带花括号的地址原样发出去。
+    opts = resolve_options(tpl, getattr(site, 'options', None))
+    mission = _render(mission, opts)
+
     variables = {'mission_url': mission, 'homepage': site.homepage,
                  'username': site.username, 'password': password,
                  'cookie': cookie_header}
+    variables.update(opts)
 
     # 站点自定义头里的 {cookie} / {password} 占位符要替换掉
     # （有些模板把 Cookie 写在 headers 里）。

@@ -14,7 +14,7 @@ import unittest
 sys.path.insert(0, '.')
 from app.engine import run_http_flow                        # noqa: E402
 from app.httpclient import HttpResponse                     # noqa: E402
-from app.templates import BUILTIN                           # noqa: E402
+from app.templates import BUILTIN, resolve_options          # noqa: E402
 
 TPL = [t for t in BUILTIN if t['id'] == 'nodeseek'][0]
 
@@ -90,10 +90,20 @@ class TestNodeSeekClassify(unittest.TestCase):
         self.assertIsNone(out.vars.get('gain'))
 
     def test_flow_uses_post_with_random(self):
+        """签到走 POST /api/attendance，random 参数由站点选项决定。
+
+        这里原来断言的是写死的 `random=true`；现在这个值可以由用户
+        在「站点 → 编辑 → 签到选项」里选（试试手气 / 鸡腿×5），
+        流程里只剩占位符。所以断言改成两件事：
+          1) 走的是 attendance 接口，且参数走占位符；
+          2) **默认仍是试试手气**（random=true）—— 老用户升级后行为不变。
+        """
         urls = [s.get('url', '') for s in TPL['flow'] if s.get('action') == 'post']
         self.assertTrue(any('attendance' in u for u in urls), urls)
-        self.assertTrue(any('random=true' in u for u in urls),
-                        '「试试手气」用 random=true')
+        self.assertTrue(any('random={attendance}' in u for u in urls),
+                        'random 参数应由站点选项提供：%s' % urls)
+        self.assertEqual(resolve_options(TPL, {})['attendance'], 'true',
+                         '默认必须是「试试手气」')
 
     def test_origin_and_referer_preset(self):
         """实测：缺 Origin/Referer 会 403（不是 Cloudflare 拦的）。"""

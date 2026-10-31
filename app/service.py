@@ -458,7 +458,7 @@ class Service:
                 'retry_count': s.retry_count,
                 'retry_interval_minutes': s.retry_interval_minutes,
                 'success_interval_minutes': s.success_interval_minutes,
-            'success_anchor_minutes': s.success_anchor_minutes,
+                'success_anchor_minutes': s.success_anchor_minutes,
                 'ai_enabled': s.ai_enabled,
                 'ai_after_failures': s.ai_after_failures,
                 'notify': s.notify or '',
@@ -474,6 +474,10 @@ class Service:
                 'cookie_status': int(s.cookie_status or 0),
                 'cookie_updated_at': int(s.cookie_updated_at or 0),
                 'headers': dict(s.headers or {}),
+                # 模板可选项：specs 是"有哪些可选项"（界面据此渲染下拉），
+                # options 是"现在生效的值"（已补默认值，界面直接显示即可）
+                'option_specs': T.site_option_specs(s),
+                'options': T.site_options(s),
                 # 站点级代理策略：界面要显示"直连 / 独立代理"标签
                 'proxy_mode': s.proxy_mode or 'inherit',
                 'proxy_url': s.proxy_url or '',
@@ -554,6 +558,14 @@ class Service:
         if 'steps' in data and isinstance(data['steps'], list):
             site.steps = [Step.from_dict(x) if isinstance(x, dict) else x
                           for x in data['steps']]
+
+        # 模板可选项（如 NodeSeek 的签到方式）。
+        # 只在**确实传了字典**时覆盖：前端表单没展开时不会带这个字段，
+        # 那时传空对象会把用户选过的值冲回默认值。
+        # 取值按模板声明校验，认不出的直接落回默认（这些值会拼进请求 URL）。
+        if isinstance(data.get('options'), dict):
+            site.options = T.resolve_options(T.template_by_id(site.template),
+                                             data['options'])
 
         # 凭据：只写不回显
         if 'username' in data and data['username'] is not None:

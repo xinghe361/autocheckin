@@ -254,12 +254,19 @@ class WebApp:
 
         @route('GET', '/api/site')
         def _site(q, body):
+            from .templates import site_option_specs, site_options
             sid = q.get('id', [''])[0]
             site = self.service.get_site(sid)
             if not site:
                 raise ApiError('站点不存在：%s' % sid, 404)
             # 不返回任何凭据明文
-            return {'site': site.to_dict(include_secrets=False)}
+            out = site.to_dict(include_secrets=False)
+            # 模板可选项：表单要按它渲染下拉框。
+            # 必须挂在**这个**接口上，因为编辑表单取的是 /api/site 而不是列表接口
+            # （只加在 list_sites 里的话，界面上永远看不到这一栏 —— 踩过）。
+            out['option_specs'] = site_option_specs(site)
+            out['options'] = site_options(site)
+            return {'site': out}
 
         @route('POST', '/api/site')
         def _site_save(q, body):
@@ -2851,6 +2858,31 @@ function siteFormHtml(s, c){
   var cookieNames = (c.names&&c.names.length)
     ? '<div class="hint">已保存字段：'+esc(c.names.join('、'))+'</div>' : '';
 
+  /* ---- 模板可选项（目前是 NodeSeek 的签到方式：试试手气 / 鸡腿×5） ----
+     由模板声明、由用户按站点选。id 里带 key，所以 key 只允许词字符：
+     插件模板是外部 JSON，key 里混进引号会把 DOM id 搞坏，
+     宁可不显示这一项，也不要拼出一个选择器都不对的下拉框。 */
+  var optSpecs = (s.option_specs || []).filter(function(sp){
+    return sp && /^[A-Za-z0-9_]+$/.test(sp.key || '');
+  });
+  var optSec = '';
+  if(optSpecs.length){
+    optSec = '<div class="fsec"><h4>签到选项</h4><div class="fgrid">'
+      + optSpecs.map(function(sp){
+          var cur = (s.options && s.options[sp.key]) || sp.default;
+          var items = (sp.choices || []).map(function(ch){
+            return '<option value="'+esc(ch.value)+'"'
+              + (ch.value === cur ? ' selected' : '') + '>'
+              + esc(ch.label) + '</option>';
+          }).join('');
+          return '<div><label>'+esc(sp.label)+'</label>'
+            + '<select id="'+p+'opt_'+esc(sp.key)+'">'+items+'</select>'
+            + (sp.note? '<div class="hint">'+esc(sp.note)+'</div>' : '')
+            + '</div>';
+        }).join('')
+      + '</div></div>';
+  }
+
   /* ---- 表单 ---- */
   return '<form onsubmit="return false">'
 
@@ -2871,6 +2903,8 @@ function siteFormHtml(s, c){
   +     '</select></div>'
   +   '</div>'
   + '</div>'
+
+  + optSec
 
   + '<div class="fsec"><h4>签到时间</h4>'
   +   '<div class="radios">'
@@ -3091,6 +3125,19 @@ function saveSite(id){
   var p = 'f_'+id+'_';
   var daily = document.querySelector('input[name="'+p+'mode"][value="daily"]');
   var isDaily = !!(daily && daily.checked);
+
+  /* 模板可选项（NodeSeek 的签到方式等）。
+     ⚠️ 只在**确实取到值**时才提交：表单没展开时这些 select 根本不在 DOM 里，
+       传一个空对象上去会被后端当成"用户清空了设置"，把选好的值冲回默认。 */
+  var optPatch = null;
+  var specs = (SITE_CACHE[id] && SITE_CACHE[id].option_specs) || [];
+  specs.forEach(function(sp){
+    var el = $(p+'opt_'+sp.key);
+    if(!el) return;
+    optPatch = optPatch || {};
+    optPatch[sp.key] = el.value;
+  });
+
   var patch = {
     id: id,
     name: $(p+'name').value.trim(),
@@ -3127,6 +3174,7 @@ function saveSite(id){
     proxy_url: ($(p+'proxy') ? $(p+'proxy').value.trim() : ''),
     headers: collectHeaders(id)
   };
+  if(optPatch) patch.options = optPatch;
   api('POST','/api/site',patch).then(function(){
     OPEN_SITE = '';
     loadSites();
