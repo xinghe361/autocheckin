@@ -120,6 +120,31 @@ class TestStorage(HistoryCase):
         self.assertIsNot(a, H.get_history(os.path.join(self.dir, 'other')))
 
 
+class TestTimezonePayload(HistoryCase):
+    """前端要按**容器**时区显示月份与时刻，所以偏移必须由服务端下发。
+
+    前端自己用浏览器时钟算"当前月"时，容器跑 UTC、浏览器在 +8 就会问到一个
+    还没数据的月份 —— 打开记录页一片空白，像从来没跑过。
+    """
+
+    def test_payload_carries_tz_offset(self):
+        d = self.cal()
+        self.assertIn('tz_offset_minutes', d)
+        self.assertIsInstance(d['tz_offset_minutes'], int)
+        self.assertEqual(d['tz_offset_minutes'], H.tz_offset_minutes())
+
+    def test_offset_is_sane(self):
+        off = H.tz_offset_minutes()
+        self.assertGreaterEqual(off, -12 * 60)
+        self.assertLessEqual(off, 14 * 60)
+        self.assertEqual(off % 15, 0, '现实中的时区偏移都是 15 分钟的整数倍')
+
+    def test_today_is_server_local_date(self):
+        """today 也必须是容器时区的今天，前端拿它高亮。"""
+        d = self.cal()
+        self.assertEqual(d['today'], H.day_of(NOW))
+
+
 # NOW 固定在 10-15，所有 add() 都落在这一天
 _DAY = '2026-10-15'
 

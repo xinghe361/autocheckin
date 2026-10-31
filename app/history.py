@@ -163,6 +163,20 @@ def month_bounds(month: str) -> tuple:
     return int(start.timestamp()), int(end.timestamp())
 
 
+def tz_offset_minutes() -> int:
+    """本机时区相对 UTC 的偏移（分钟，东八区为 480）。
+
+    给前端用：记录是按容器时区分天归档的，界面上的"几月几号 几点"也必须
+    按容器时区算。否则容器跑 UTC、浏览器在 +8 时，昨天 23:30 的记录会被
+    显示成"今天 07:30"，和它所在的日历格子对不上。
+    """
+    try:
+        off = datetime.now().astimezone().utcoffset()
+        return int(off.total_seconds() // 60) if off else 0
+    except Exception:                                           # noqa: BLE001
+        return 0
+
+
 def day_bounds(day: str) -> tuple:
     """'2026-10-31' -> (当天 0 点, 次日 0 点) 的本地时间戳。"""
     d = datetime.strptime(day[:10], '%Y-%m-%d')
@@ -406,6 +420,12 @@ class History:
             'month': mon,
             'site_id': str(site_id or ''),
             'today': today,
+            # 服务端时区相对 UTC 的偏移（分钟）。
+            # 界面上的"几点几分"必须按**容器的**时区显示：
+            # 记录是按容器时区分天归档的，若用浏览器本地时间去格式化，
+            # "昨天 23:30 的记录"会在 +8 的浏览器里显示成"今天 07:30"，
+            # 和它所在的日历格子对不上，看起来像串了天。
+            'tz_offset_minutes': tz_offset_minutes(),
             # 0=周一 … 6=周日：前端据此补前置空格，不用自己算星期
             # （浏览器时区可能和容器不同，日期算在服务端更稳）
             'first_weekday': first.weekday(),

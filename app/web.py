@@ -1939,26 +1939,35 @@ var HIS = {month:'', site:'', data:null, day:'', rcode:''};
 
 function pad2(n){ return (n < 10 ? '0' : '') + n; }
 
-function thisMonth(){
-  var d = new Date();
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+function hisTime(ts){
+  /* 按**服务端**时区格式化，不用浏览器本地时间。
+     容器和浏览器时区不同（容器 UTC、手机 +8 很常见）时，
+     昨天 23:30 的记录会显示成"今天 07:30"，和它所在的日历格子对不上。 */
+  var p = hisDateParts(ts);
+  return pad2(p.hh) + ':' + pad2(p.mi) + ':' + pad2(p.ss);
 }
 
-function hisTime(ts){
-  var d = new Date(ts * 1000);
-  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+/* 把时间戳换算成"服务端时区的年月日时分秒"。
+   做法是先加上服务端偏移、再用 UTC 取值 —— 这样不受浏览器时区影响。 */
+function hisDateParts(ts){
+  var off = (HIS.data && HIS.data.tz_offset_minutes) || 0;
+  var d = new Date((Number(ts) + off * 60) * 1000);
+  return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, dd: d.getUTCDate(),
+           hh: d.getUTCHours(), mi: d.getUTCMinutes(), ss: d.getUTCSeconds() };
 }
 
 function hisPickSite(){
   HIS.site = $('hisSite').value || '';
   HIS.day = '';
   HIS.rcode = '';
-  HIS.month = HIS.month || thisMonth();
+  /* 没选过月份时留空，让服务端按容器时钟给当前月（见 loadHistory 的说明） */
   loadHistory();
 }
 
 function hisMonth(delta){
-  var m = (HIS.data && HIS.data.month) || HIS.month || thisMonth();
+  /* 基准月优先用服务端给的那个，绝不回退到浏览器时钟 */
+  var m = (HIS.data && HIS.data.month) || HIS.month;
+  if(!m){ loadHistory(); return; }
   var y = parseInt(m.slice(0, 4), 10);
   var mo = parseInt(m.slice(5, 7), 10) - 1 + delta;
   while(mo < 0){ mo += 12; y -= 1; }
@@ -1970,9 +1979,15 @@ function hisMonth(delta){
 }
 
 function loadHistory(){
-  var m = HIS.month || thisMonth();
-  var url = '/api/history?month=' + encodeURIComponent(m)
-          + '&id=' + encodeURIComponent(HIS.site || '');
+  /* 月份交给服务端决定。
+     浏览器时区和容器可能不一致（容器 UTC、手机 +8 是常见组合），
+     前端自己算"当前月"会问到一个还没有数据的月份 —— 用户打开记录页
+     看到一片空白，以为从来没跑过。所以 HIS.month 为空时不带参数，
+     由服务端按容器时钟给当前月，再用响应里的 month 回填。 */
+  var url = '/api/history?id=' + encodeURIComponent(HIS.site || '');
+  if(HIS.month){
+    url += '&month=' + encodeURIComponent(HIS.month);
+  }
   api('GET', url).then(function(d){
     HIS.data = d;
     HIS.month = d.month;
@@ -2123,9 +2138,8 @@ function hisChip(code, rmeta){
 }
 
 function hisDate(ts){
-  var d = new Date(ts * 1000);
-  return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' '
-       + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  var p = hisDateParts(ts);
+  return pad2(p.mo) + '-' + pad2(p.dd) + ' ' + pad2(p.hh) + ':' + pad2(p.mi);
 }
 
 /* 失败原因分布：先按大类（登录/拦截/网络/站点/规则）汇总量级，
@@ -2232,10 +2246,11 @@ document.addEventListener('click', function(e){
   renderCalendar(HIS.data);
 });
 
-/* 从站点卡片点「记录」进来：锁定该站点 + 回到本月 */
+/* 从站点卡片点「记录」进来：锁定该站点 + 回到本月。
+   "本月"不在这里算 —— 交给服务端，避免浏览器与容器时区不一致时落到空月份。 */
 function openSiteHistory(sid){
   HIS.site = sid || '';
-  HIS.month = thisMonth();
+  HIS.month = '';
   HIS.day = '';
   HIS.rcode = '';
   switchTab('history');
