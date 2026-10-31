@@ -20,5 +20,5 @@
     "Referer": "https://www.right.com.cn/forum/",
     "X-Requested-With": "XMLHttpRequest"
   },
-  "note": "恩山无线论坛 erling 签到插件。需先粘贴登录 Cookie；签到成功判定依赖返回 JSON 里的 \"success\":true 或「签到成功」字样。若签到接口要求 u_atoken/u_asig，请改用浏览器录制。"
+  "note": "恩山无线论坛 erling 签到插件。Discuz 论坛的 formhash 与登录会话绑定：先 GET 签到页取 formhash，再带它 POST 签到。需粘贴登录 Cookie；若实际还要求 u_atoken/u_asig，请改用浏览器录制。"
 }
