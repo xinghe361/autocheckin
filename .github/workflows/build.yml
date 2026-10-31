@@ -39,7 +39,10 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install cryptography
+          # cryptography：凭据加密；PySocks：socks 代理（test_socks_proxy 依赖它）。
+          # 刻意不装 playwright：测试对 playwright 是延迟导入 + 容错，
+          # 且它 36MB 会拖慢 CI；真正用到浏览器的地方走 build 阶段。
+          pip install cryptography PySocks
 
       - name: 运行单测
         run: python -m unittest discover -s tests -v

@@ -50,6 +50,7 @@ class SocksCase(unittest.TestCase):
         return 'http://127.0.0.1:%d%s' % (self.port, path)
 
 
+@unittest.skipUnless(SP.available(), 'PySocks 未安装，跳过 socks 解析测试')
 class TestParse(unittest.TestCase):
     def test_socks5_without_auth(self):
         self.assertEqual(SP.parse_proxy('socks5://127.0.0.1:1080'),
@@ -83,6 +84,7 @@ class TestParse(unittest.TestCase):
         self.assertTrue(H._is_socks(H.normalize_proxy('socks5://a:1')))
 
 
+@unittest.skipUnless(SP.available(), 'PySocks 未安装，跳过 socks 接线测试')
 class TestWiring(SocksCase):
     """代理参数必须真的到达建连接那一步。"""
 
@@ -152,6 +154,7 @@ class TestMissingDependency(SocksCase):
         self.assertNotIn('unknown url type', err.message)
 
 
+@unittest.skipUnless(SP.available(), 'PySocks 未安装，跳过 socks 坏 URL 测试')
 class TestBadUrl(SocksCase):
     def test_unparsable_url_has_its_own_kind(self):
         with self.assertRaises(H.HttpError) as ctx:
