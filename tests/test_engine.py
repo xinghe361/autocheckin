@@ -234,7 +234,8 @@ class TestCheckinSiteDispatch(unittest.TestCase):
 
     def test_browser_site_uses_injected_browser(self):
         class FakeBrowser:
-            def run(self, site, proxy='', password='', cookie_header=None):
+            def run(self, site, proxy='', password='', cookie_header=None,
+                    deadline=None):
                 return E.FlowOutcome(True, '浏览器签到成功')
 
         r = E.checkin_site(self._browser_site(), browser=FakeBrowser())
@@ -247,7 +248,8 @@ class TestCheckinSiteDispatch(unittest.TestCase):
         seen = {}
 
         class SpyBrowser:
-            def run(self, site, proxy='', password='', cookie_header=None):
+            def run(self, site, proxy='', password='', cookie_header=None,
+                    deadline=None):
                 seen['cookie'] = cookie_header
                 seen['proxy'] = proxy
                 return E.FlowOutcome(True, 'ok')
@@ -259,7 +261,8 @@ class TestCheckinSiteDispatch(unittest.TestCase):
 
     def test_browser_exception_becomes_failure_result(self):
         class BoomBrowser:
-            def run(self, site, proxy='', password='', cookie_header=None):
+            def run(self, site, proxy='', password='', cookie_header=None,
+                    deadline=None):
                 raise RuntimeError('浏览器崩了')
 
         r = E.checkin_site(self._browser_site(), browser=BoomBrowser())

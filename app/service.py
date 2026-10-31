@@ -461,6 +461,7 @@ class Service:
                 'success_anchor_minutes': s.success_anchor_minutes,
                 'ai_enabled': s.ai_enabled,
                 'ai_after_failures': s.ai_after_failures,
+                'timeout_seconds': s.timeout_seconds,
                 'notify': s.notify or '',
                 'notify_override': s.notify_override,
                 'has_credentials': bool(s.username or s.password_enc),
@@ -535,7 +536,7 @@ class Service:
                 setattr(site, k, bool(data[k]))
         for k in ('daily_hour', 'daily_minute', 'jitter_seconds', 'retry_count',
                   'retry_interval_minutes', 'ai_after_failures',
-                  'success_interval_minutes'):
+                  'success_interval_minutes', 'timeout_seconds'):
             if k in data and data[k] is not None and str(data[k]) != '':
                 setattr(site, k, int(data[k]))
         # 初始基准时刻（-1 表示没设置过）。

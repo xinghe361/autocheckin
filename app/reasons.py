@@ -79,6 +79,9 @@ _CODES: Dict[str, Tuple[str, str, str]] = {
                  '改用 http 代理，或重建镜像带上 PySocks'),
     'bad_socks_url': ('socks 地址写错了', 'network',
                       '代理地址格式不对，示例：socks5://127.0.0.1:1080'),
+    'site_timeout': ('执行超时', 'network',
+                     '一次签到超过了设定的时长上限，多半是代理或站点太慢；'
+                     '可在「站点 → 编辑 → 失败重试」里调大上限'),
     'tls_error': ('证书校验失败', 'network', ''),
     'http_error': ('请求失败', 'network',
                    'HTTP 层就失败了，没拿到有效响应；看消息里的状态码'),

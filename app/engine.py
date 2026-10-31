@@ -110,7 +110,8 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
                   already_kw: Optional[List[str]] = None,
                   initial_vars: Optional[Dict[str, str]] = None,
                   initial_text: str = '',
-                  initial_status: int = 200) -> FlowOutcome:
+                  initial_status: int = 200,
+                  deadline: Optional[float] = None) -> FlowOutcome:
     """按声明式流程执行一次纯请求签到。
 
     flow 支持的动作：
@@ -129,6 +130,17 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
 
     for step in (flow or []):
         action = (step.get('action') or '').lower()
+        # 整站超时：每步之前看一眼。单步自己有时间上限，但"很多步各自超时"
+        # 叠起来可以拖到十几分钟，把当天的整轮跑挂住。
+        # 放在步骤之间而不是强杀线程：Python 没法安全地掐断一个正在阻塞的调用，
+        # 能保证的是"下一步不会开始"。
+        if deadline and time.time() > deadline:
+            return FlowOutcome(
+                success=False,
+                message='执行超时：跑完 %d 步后已超过这个站点的时长上限，已中止'
+                        '（最后一步：%s）' % (len(trace), trace[-1] if trace else '—'),
+                hit='fail', error_kind='site_timeout',
+                vars=variables, trace=trace + ['超时中止'])
         try:
             if action == 'get':
                 url = _render(step.get('url', ''), variables)
@@ -243,7 +255,8 @@ def _http_fetcher(site: SiteConfig, proxy: str,
 
 def checkin_via_http(site: SiteConfig, proxy: str = '',
                      password: str = '',
-                     cookie_header: str = '') -> FlowOutcome:
+                     cookie_header: str = '',
+                     deadline: Optional[float] = None) -> FlowOutcome:
     """纯请求站点（V2EX / NodeSeek / Chiphell 等）的签到入口。
 
     cookie_header：该站点的登录 Cookie 头。没有它就只能拿到未登录页面。
@@ -288,6 +301,7 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
         fail_kw=list(site.fail_keywords or tpl.get('fail_keywords') or []),
         already_kw=list(tpl.get('already_keywords') or []),
         initial_vars=variables,
+        deadline=deadline,
     )
 
 
@@ -429,6 +443,10 @@ def checkin_site(site: SiteConfig, proxy: str = '', password: str = '',
     """
     started = time.time()
     attempt = int((site.state or {}).get('_attempt', 1) or 1)
+    # 整站时长上限（0 = 不限）。单个请求有自己的超时，但一个站点可能有很多步，
+    # 叠加起来足以把当天的整轮跑挂住 —— 尤其是代理半死不活的时候。
+    limit = max(0, int(getattr(site, 'timeout_seconds', 0) or 0))
+    deadline = (started + limit) if limit else None
     try:
         if needs_browser(site):
             if browser is None:
@@ -442,10 +460,12 @@ def checkin_site(site: SiteConfig, proxy: str = '', password: str = '',
                     error_kind='browser_unavailable', attempt=attempt,
                     duration_ms=int((time.time() - started) * 1000))
             outcome = browser.run(site, proxy=proxy, password=password,
-                                  cookie_header=cookie_header)
+                                  cookie_header=cookie_header,
+                                  deadline=deadline)
         else:
             outcome = checkin_via_http(site, proxy=proxy, password=password,
-                                      cookie_header=cookie_header)
+                                      cookie_header=cookie_header,
+                                      deadline=deadline)
     except HttpError as e:
         return CheckinResult(site_id=site.id, site_name=site.name, success=False,
                              message=str(e), error_kind=e.kind, attempt=attempt,

@@ -240,6 +240,14 @@ class SiteConfig:
     ai_enabled: bool = True
     ai_after_failures: int = 3
 
+    # 单次执行的时长上限（秒），0 = 不限。
+    #
+    # 单个请求自己有超时（默认 20 秒），但一个站点可能有好几步，
+    # 代理半死不活时"每步都超时"叠加起来足以把当天整轮拖死 ——
+    # 表现就是"今天的签到一直没动静"，而且没有任何报错。
+    # 超时后按失败处理并继续跑下一个站点，失败原因记为 site_timeout。
+    timeout_seconds: int = 300
+
     # --- 通知 ---
     notify: str = ''      # 留空 = 跟随全局策略
     notify_override: Optional[str] = None
@@ -399,6 +407,7 @@ class SiteConfig:
                 d.get('retry_interval_minutes'), 30, 1, 1440),
             ai_enabled=_as_bool(d.get('ai_enabled'), True),
             ai_after_failures=_as_int(d.get('ai_after_failures'), 3, 0, 100),
+            timeout_seconds=_as_int(d.get('timeout_seconds'), 300, 0, 3600),
             notify=_as_str(d.get('notify'), ''),
             notify_override=(None if d.get('notify_override') is None
                              else _as_str(d.get('notify_override'))),

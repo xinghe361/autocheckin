@@ -2965,6 +2965,12 @@ function siteFormHtml(s, c){
   +       s.retry_count+'"></div>'
   +     '<div><label>重试间隔（分钟）</label><input type="number" id="'+p+'ri" min="1" max="1440" value="'
   +       s.retry_interval_minutes+'"></div>'
+  +     '<div><label>单次执行超时（秒，0＝不限）</label>'
+  +       '<input type="number" id="'+p+'tmo" min="0" max="3600" value="'
+  +         (s.timeout_seconds == null ? 300 : s.timeout_seconds)+'">'
+  +       '<div class="hint">一次签到最多跑多久。单个请求自己有超时，'
+  +         '但很多步各自超时叠加起来会把当天整轮拖住 —— '
+  +         '超过这个时间就判失败，继续跑下一个站点。</div></div>'
   +   '</div>'
   + '</div>'
 
@@ -3169,6 +3175,15 @@ function saveSite(id){
     retry_enabled: $(p+'retryOn').checked,
     retry_count: parseInt($(p+'rc').value||'0',10),
     retry_interval_minutes: parseInt($(p+'ri').value||'30',10),
+    /* 单次执行超时。0 = 不限；输入框被清空时按默认 300 秒走，
+       不要变成 0 —— 那等于"永远不超时"，正好是用户想避免的情况。 */
+    timeout_seconds: (function(){
+      var el = $(p+'tmo');
+      if(!el) return 300;
+      var v = parseInt(el.value, 10);
+      if(isNaN(v) || v < 0) return 300;
+      return Math.min(3600, v);
+    })(),
     success_interval_minutes: Math.max(60, parseInt($(p+'ival').value||'1440',10)),
     /* 初始基准时刻：-1 = 还没锁定。
        ⚠️ 必须看 data-locked 而不是 hidden 的值：未锁定时 hidden 里放的是

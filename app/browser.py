@@ -82,7 +82,8 @@ def _read_text(driver: PageDriver):
 
 def run_steps(driver: PageDriver, steps: List[Step], success_kw: List[str],
               fail_kw: List[str], already_kw: Optional[List[str]] = None,
-              variables: Optional[Dict[str, str]] = None) -> FlowOutcome:
+              variables: Optional[Dict[str, str]] = None,
+              deadline: Optional[float] = None) -> FlowOutcome:
     """在页面上按顺序执行步骤，然后按关键词判定结果。
 
     判定优先级与 http 流程一致：已领过 > 失败关键词 > 成功关键词。
@@ -97,6 +98,16 @@ def run_steps(driver: PageDriver, steps: List[Step], success_kw: List[str],
         action = (step.action or '').lower()
         target = _render(step.target, variables)
         value = _render(step.value, variables)
+        # 整站超时：每步之前看一眼。单步有 timeout_ms，但多步各自超时叠加
+        # 同样能把一轮拖死（浏览器模式下尤其明显：每步默认都可能等 20 秒）。
+        if deadline and time.time() > deadline:
+            return FlowOutcome(
+                success=False,
+                message='执行超时：跑完 %d 步后已超过这个站点的时长上限，已中止'
+                        '（最后一步：%s）' % (len(trace),
+                                            trace[-1] if trace else '—'),
+                hit='fail', error_kind='site_timeout',
+                vars=variables, trace=trace + ['超时中止'])
         try:
             if action == ACTION_GOTO:
                 driver.goto(target, step.timeout_ms)
@@ -329,7 +340,8 @@ class BrowserRunner:
     # -- 执行 ----------------------------------------------------------
 
     def run(self, site, proxy: str = '', password: str = '',
-            capture_excerpt: bool = False, cookie_header: str = ''):
+            capture_excerpt: bool = False, cookie_header: str = '',
+            deadline=None):
         """执行站点签到。site 是 SiteConfig。
 
         整个浏览器交互过程都持有 _lock：
@@ -342,10 +354,11 @@ class BrowserRunner:
         """
         with self._lock:
             return self._run_locked(site, proxy, password, capture_excerpt,
-                                    cookie_header)
+                                    cookie_header, deadline=deadline)
 
     def _run_locked(self, site, proxy: str, password: str,
-                    capture_excerpt: bool, cookie_header: str = ''):
+                    capture_excerpt: bool, cookie_header: str = '',
+                    deadline=None):
         from .models import KIND_TEMPLATE
         from .templates import template_by_id
 
@@ -409,6 +422,7 @@ class BrowserRunner:
                 already_kw=list(tpl.get('already_keywords') or []),
                 variables={'username': site.username, 'password': password,
                            'homepage': site.homepage},
+                deadline=deadline,
             )
             if capture_excerpt:
                 try:
