@@ -369,6 +369,13 @@ class WebApp:
         def _run(q, body):
             return self.service.run_now(body.get('id') or None)
 
+        # --- 执行记录（日历）---
+        @route('GET', '/api/history')
+        def _history(q, body):
+            # id 为空 = 全部站点合并显示；month 为空 = 当前月
+            return self.service.history_calendar(
+                q.get('id', [''])[0] or None, q.get('month', [''])[0])
+
         # --- 录制（新增站点）---
         @route('POST', '/api/record/start')
         def _rec_start(q, body):
@@ -1353,6 +1360,45 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .kvrow input:first-child{flex:0 0 34%}
 .kvrow input{flex:1}
 .paths{font-size:12px;color:var(--mut);margin-top:4px}
+
+/* ===== 执行记录（日历） =====
+   配色只用"绿=全部成功 / 红=有失败 / 灰=没跑过"三态。
+   刻意不加黄/橙：一眼扫过去要能立刻分出"这天有没有问题"，
+   中间态会让人每天都要点开确认一次。 */
+.calbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.calbar select{width:auto;min-width:170px}
+.calbar .mtitle{font-weight:600;font-size:13.5px;min-width:104px;text-align:center}
+.calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:12px}
+.calhead{font-size:11.5px;color:var(--mut);text-align:center;padding:2px 0}
+.calcell{position:relative;border:1px solid var(--bd);border-radius:6px;
+  min-height:58px;padding:5px 6px;cursor:pointer;background:#fff;
+  font-size:12px;transition:box-shadow .12s}
+.calcell:hover{box-shadow:0 1px 6px rgba(0,0,0,.13)}
+.calcell.ok{background:#e8f8ee;border-color:#b7e3c6}
+.calcell.fail{background:#fdecea;border-color:#f3c0bb}
+.calcell.none{background:#fafbfc;color:#a7aeb8}
+.calcell.future{opacity:.45}
+.calcell.sel{outline:2px solid var(--pri);outline-offset:1px}
+.calcell.empty{background:transparent;border:none;cursor:default;min-height:0}
+.calcell .dnum{font-weight:600;font-size:12.5px}
+.calcell.ok .dnum{color:var(--ok)}
+.calcell.fail .dnum{color:var(--err)}
+.calcell .cmeta{font-size:10.5px;line-height:1.35;margin-top:2px;color:#5a636e}
+.calcell.today::after{content:'';position:absolute;top:4px;right:4px;width:5px;
+  height:5px;border-radius:50%;background:var(--pri)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--mut);
+  margin-top:10px}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:3px;
+  border:1px solid var(--bd);margin-right:4px;vertical-align:-1px}
+.daylist{margin-top:12px}
+.daylist .dhead{font-size:12.5px;font-weight:600;margin-bottom:4px}
+.daylist .it{display:flex;gap:10px;padding:6px 2px;border-bottom:1px solid #f2f4f7;
+  font-size:12.5px;align-items:baseline}
+.daylist .it:last-child{border-bottom:none}
+.daylist .tm{color:var(--mut);font-family:ui-monospace,Consolas,monospace;
+  font-size:11.5px;flex:none;width:42px}
+.daylist .st{flex:none;width:46px;font-size:11.5px}
+.daylist .bd{flex:1;min-width:0;word-break:break-word}
 </style>
 </head>
 <body>
@@ -1361,6 +1407,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
   <span class="mut" id="ver"></span>
   <nav id="mainNav">
     <button data-tab="sites" class="on">站点</button>
+    <button data-tab="history">记录</button>
     <button data-tab="add">新增站点</button>
     <button data-tab="settings">设置</button>
     <button id="btnLogout" style="margin-left:8px">退出登录</button>
@@ -1411,6 +1458,31 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <div id="siteRows"><div class="mut">加载中…</div></div>
     <div class="hint">点「编辑」会在该站点下方展开设置表单（开关 / 下拉 / 时间），
     保存后收起。<b>每个站点都需要先配置登录 Cookie</b>，否则签到只会拿到未登录页面。</div>
+  </div>
+</section>
+
+<!-- ============ 执行记录（日历） ============ -->
+<section id="tab-history" class="hide">
+  <div class="card">
+    <h2>执行记录</h2>
+    <div class="calbar">
+      <select id="hisSite" onchange="hisPickSite()"></select>
+      <button class="b" onclick="hisMonth(-1)">&lsaquo; 上一月</button>
+      <span class="mtitle" id="hisTitle">—</span>
+      <button class="b" onclick="hisMonth(1)">下一月 &rsaquo;</button>
+      <button class="b" onclick="loadHistory()">刷新</button>
+    </div>
+    <div class="hint" id="hisSummary"></div>
+    <div class="calgrid" id="hisGrid"></div>
+    <div class="legend">
+      <span><i style="background:#e8f8ee;border-color:#b7e3c6"></i>当天全部成功</span>
+      <span><i style="background:#fdecea;border-color:#f3c0bb"></i>当天有失败</span>
+      <span><i style="background:#fafbfc"></i>没跑过</span>
+      <span>点某一天看当天明细</span>
+    </div>
+    <div id="hisDay" class="daylist"></div>
+    <div class="hint">记录从升级到本版本后开始积累（旧版本没存历史，补不回来）。
+      只保留最近 <span id="hisKeep">180</span> 天。</div>
   </div>
 </section>
 
@@ -1725,14 +1797,185 @@ function switchTab(name){
   document.querySelectorAll('#mainNav button[data-tab]').forEach(function(x){
     x.className = (x.dataset.tab === name) ? 'on' : '';
   });
-  ['sites','add','settings'].forEach(function(t){
+  ['sites','add','settings','history'].forEach(function(t){
     $('tab-'+t).className = (t === name) ? '' : 'hide';
   });
   if(name === 'settings'){ loadSettings(); loadAutoRefreshSetting(); }
+  if(name === 'history'){ loadHistory(); }
 }
 document.querySelectorAll('#mainNav button[data-tab]').forEach(function(b){
   b.onclick = function(){ switchTab(b.dataset.tab); };
 });
+
+/* ==================== 执行记录（日历） ====================
+   数据全部由服务端算好再返回：哪天是哪天、这月从周几开始，都不在
+   浏览器里算 —— 容器时区与访问设备的时区可能不同，两边各算一遍
+   会出现"日历上今天高亮在昨天"这种对不上的问题。 */
+var HIS = {month:'', site:'', data:null, day:''};
+
+function pad2(n){ return (n < 10 ? '0' : '') + n; }
+
+function thisMonth(){
+  var d = new Date();
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+}
+
+function hisTime(ts){
+  var d = new Date(ts * 1000);
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+}
+
+function hisPickSite(){
+  HIS.site = $('hisSite').value || '';
+  HIS.day = '';
+  HIS.month = HIS.month || thisMonth();
+  loadHistory();
+}
+
+function hisMonth(delta){
+  var m = (HIS.data && HIS.data.month) || HIS.month || thisMonth();
+  var y = parseInt(m.slice(0, 4), 10);
+  var mo = parseInt(m.slice(5, 7), 10) - 1 + delta;
+  while(mo < 0){ mo += 12; y -= 1; }
+  while(mo > 11){ mo -= 12; y += 1; }
+  HIS.month = y + '-' + pad2(mo + 1);
+  HIS.day = '';
+  loadHistory();
+}
+
+function loadHistory(){
+  var m = HIS.month || thisMonth();
+  var url = '/api/history?month=' + encodeURIComponent(m)
+          + '&id=' + encodeURIComponent(HIS.site || '');
+  api('GET', url).then(function(d){
+    HIS.data = d;
+    HIS.month = d.month;
+    renderSitePicker(d.sites || []);
+    renderCalendar(d);
+    $('hisKeep').textContent = d.retention_days || 180;
+  }).catch(function(e){
+    $('hisGrid').innerHTML = '';
+    $('hisSummary').innerHTML = '<span style="color:#c0392b">读取失败：'
+      + esc(e.message) + '</span>';
+  });
+}
+
+/* 站点下拉：只有站点集合变了才重建，否则每次刷新都会把用户的选择冲掉 */
+function renderSitePicker(sites){
+  var sel = $('hisSite');
+  if(!sel) return;
+  var want = HIS.site || '';
+  var sig = sites.map(function(s){ return s.id; }).join(',');
+  if(sel.getAttribute('data-sig') !== sig){
+    var html = '<option value="">全部站点</option>';
+    sites.forEach(function(s){
+      html += '<option value="' + esc(s.id) + '">' + esc(s.name || s.id) + '</option>';
+    });
+    sel.innerHTML = html;
+    sel.setAttribute('data-sig', sig);
+  }
+  sel.value = want;
+  // 行注释而不是 /* */：docs/check_webjs.py 与安全回归测试都用"块注释 +
+  // function"的正则从本文件里抽函数，内联块注释会把中间的代码一起吞掉。
+  if(sel.value !== want){        // 站点被删了：退回"全部"
+    sel.value = '';
+    HIS.site = '';
+  }
+}
+
+function renderCalendar(d){
+  $('hisTitle').textContent = d.month;
+  var s = d.summary || {}, r = d.recent || {};
+  var bits = ['本月成功 ' + (s.ok || 0) + ' 次、失败 ' + (s.fail || 0) + ' 次'
+    + '；全绿 ' + (s.green_days || 0) + ' 天，有问题 ' + (s.problem_days || 0) + ' 天'];
+  if(r.total){
+    bits.push('近 ' + r.days + ' 天成功率 ' + r.rate + '%（' + r.ok + '/' + r.total + '）');
+  } else {
+    bits.push('近 ' + (r.days || 30) + ' 天还没有记录');
+  }
+  $('hisSummary').textContent = bits.join(' · ');
+
+  var heads = '';
+  ['一', '二', '三', '四', '五', '六', '日'].forEach(function(x){
+    heads += '<div class="calhead">' + x + '</div>';
+  });
+  var blanks = '';
+  for(var i = 0; i < (d.first_weekday || 0); i++){
+    blanks += '<div class="calcell empty"></div>';
+  }
+  var cells = (d.days || []).map(function(x){
+    var cls = 'calcell ' + x.status;
+    if(x.future) cls += ' future';
+    if(x.is_today) cls += ' today';
+    if(HIS.day === x.date) cls += ' sel';
+    var meta = '';
+    if(x.total){
+      meta = (x.ok ? '成功 ' + x.ok : '')
+           + (x.ok && x.fail ? ' / ' : '')
+           + (x.fail ? '失败 ' + x.fail : '');
+    }
+    return '<div class="' + cls + '" data-day="' + esc(x.date) + '">'
+      + '<div class="dnum">' + x.day + '</div>'
+      + '<div class="cmeta">' + esc(meta) + '</div></div>';
+  }).join('');
+  $('hisGrid').innerHTML = heads + blanks + cells;
+  renderDay(d);
+}
+
+function renderDay(d){
+  var box = $('hisDay');
+  if(!d || !HIS.day){
+    box.innerHTML = '';
+    return;
+  }
+  var day = null;
+  (d.days || []).forEach(function(x){ if(x.date === HIS.day) day = x; });
+  if(!day){
+    box.innerHTML = '';
+    return;
+  }
+  if(!day.total){
+    box.innerHTML = '<div class="hint">' + esc(day.date) + ' 这天没有执行记录。</div>';
+    return;
+  }
+  var html = '<div class="dhead">' + esc(day.date) + '　共 ' + day.total
+    + ' 次（成功 ' + day.ok + '，失败 ' + day.fail + '）</div>';
+  (day.items || []).forEach(function(it){
+    var bits = [];
+    if(!HIS.site && it.site_name) bits.push('<b>' + esc(it.site_name) + '</b>');
+    bits.push(it.msg ? esc(it.msg) : (it.ok ? '成功' : '（没有说明）'));
+    var tail = [];
+    if(it.trigger === 'manual') tail.push('手动执行');
+    if(it.attempt > 1) tail.push('第 ' + it.attempt + ' 次尝试');
+    if(it.duration_ms) tail.push((it.duration_ms / 1000).toFixed(1) + 's');
+    if(it.error_kind) tail.push(it.error_kind);
+    if(tail.length) bits.push('<span style="color:#7a828c">'
+                              + esc(tail.join(' · ')) + '</span>');
+    html += '<div class="it">'
+      + '<span class="tm">' + esc(hisTime(it.ts)) + '</span>'
+      + '<span class="st">' + (it.ok ? '<span class="tag ok">成功</span>'
+                                     : '<span class="tag err">失败</span>') + '</span>'
+      + '<span class="bd">' + bits.join(' · ') + '</span>'
+      + '</div>';
+  });
+  box.innerHTML = html;
+}
+
+document.addEventListener('click', function(e){
+  var cell = e.target && e.target.closest ? e.target.closest('[data-day]') : null;
+  if(!cell || !HIS.data) return;
+  var day = cell.getAttribute('data-day') || '';
+  HIS.day = (HIS.day === day) ? '' : day;      // 再点一次收起
+  renderCalendar(HIS.data);
+});
+
+/* 从站点卡片点「记录」进来：锁定该站点 + 回到本月 */
+function openSiteHistory(sid){
+  HIS.site = sid || '';
+  HIS.month = thisMonth();
+  HIS.day = '';
+  switchTab('history');
+}
 
 /* ---------------- 登录 ---------------- */
 var AUTH = {required: true, configured: false, needs_setup: false};
@@ -2058,6 +2301,7 @@ function renderSiteRows(sites){
       +     '</span>'+fail+'</div>'
       + '</div><div class="acts">'
       +   '<button class="b" data-act="run" data-id="'+esc(s.id)+'">立即</button>'
+      +   '<button class="b" data-act="history" data-id="'+esc(s.id)+'">记录</button>'
       +   '<button class="b" data-act="toggle" data-id="'+esc(s.id)+'"'
       +     ' data-on="'+(s.enabled?0:1)+'">'+(s.enabled?'停用':'启用')+'</button>'
       +   '<button class="b'+(open?' pri':'')+'" data-act="edit" data-id="'
@@ -2149,6 +2393,7 @@ document.addEventListener('click', function(e){
   var act = btn.getAttribute('data-act');
   var sid = btn.getAttribute('data-id') || '';
   if(act === 'run') runSite(sid);
+  else if(act === 'history') openSiteHistory(sid);
   else if(act === 'toggle') toggleSite(sid, btn.getAttribute('data-on') === '1');
   else if(act === 'edit') toggleEdit(sid);
   else if(act === 'del') delSite(sid);

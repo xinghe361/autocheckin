@@ -108,7 +108,8 @@ class Runner:
                  now_fn: Callable[[], int] = None, rng: random.Random = None,
                  checkin_fn: Callable = None, analyze_fn: Callable = None,
                  notify_fn: Callable = None, alert_fn: Callable = None,
-                 version: str = '', global_proxy_mode: str = ''):
+                 version: str = '', global_proxy_mode: str = '',
+                 history=None):
         self.store = store
         self.box = box                  # SecretBox，用于解出站点密码/API Key
         self.browser = browser
@@ -123,6 +124,10 @@ class Runner:
         # 系统级告警（AI 也失败、站点被自动停用）走这里，不受站点通知策略限制
         self.alert_fn = alert_fn or notify_mod.send_alert
         self.version = version
+        # 执行历史（日历）。默认按数据目录取共享实例 —— Runner 是每次执行
+        # 新建一个的，各自 new 一个 History 会各自持锁，压缩与追加可能撞上。
+        from .history import get_history
+        self.history = history or get_history(store.data_dir)
 
     # ------------------------------------------------------------------
     def _proxy_for(self, site: SiteConfig) -> str:
@@ -483,8 +488,13 @@ class Runner:
     # ------------------------------------------------------------------
     def run_once(self, cfg: Optional[AppConfig] = None,
                  state: Optional[RuntimeState] = None,
-                 only_site: Optional[str] = None) -> RunReport:
-        """跑一轮：只处理到期的站点（only_site 可强制只跑某个）。"""
+                 only_site: Optional[str] = None,
+                 trigger: str = 'schedule') -> RunReport:
+        """跑一轮：只处理到期的站点（only_site 可强制只跑某个）。
+
+        trigger 只影响历史记录里那一条的来源（schedule / manual），
+        用来回答"这次是我点的还是它自己跑的"，不参与任何调度判断。
+        """
         now = self.now_fn()
         cfg = cfg or self.store.load_config()
         state = state or self.store.load_state()
@@ -511,6 +521,9 @@ class Runner:
 
         state.last_run_at = now
         report.finished_at = self.now_fn()
+        # 历史先落盘：日历数据宁可"多记一条成功的"，也不能因为后面
+        # 回写配置出错而丢（那个 try 外面还有调度循环兜底）。
+        self._record_history(report, trigger, now)
         # ⚠️ 绝不整包写回 cfg / state。
         #
         # 这两个对象是**几分钟前**读的快照（浏览器签到很慢）。整包写回会把
@@ -528,6 +541,42 @@ class Runner:
         # 不动用户改过的其它设置（整包写回会把用户改动一起覆盖掉）。
         self.store.merge_site_patch(targets)
         return report
+
+    def _record_history(self, report: RunReport, trigger: str, now: int) -> None:
+        """把本轮每个站点的结果追加进 history.jsonl（界面日历用）。
+
+        记的是"每一次尝试"而不是"每天一条汇总"：
+          * 失败重试也各记一条 —— 用户能看到"03:00 失败、03:10 重试成功"
+            这种真实过程，而不是只看到一个笼统的"今天成功"；
+          * 汇总（哪天全绿、哪天有问题）在读取时算，写的时候不动旧数据，
+            天然不会因为并发写而互相覆盖。
+
+        任何异常都吞掉：历史记不上是小事，签到本身不能因此失败。
+        """
+        try:
+            entries = []
+            for run in report.runs:
+                result = run.result
+                ts = int(getattr(result, 'at', 0) or 0)
+                # 结果里的 at 是"构造结果那一刻"的真实时间。测试里注入假时钟时
+                # 它会是墙钟时间，和 now 差出很远 —— 那样日历就会跳到别的月份。
+                # 相差超过一天就认为不可信，退回本轮的时间。
+                if not ts or abs(ts - now) > 86400:
+                    ts = now
+                entries.append(self.history.make_entry(
+                    site_id=run.site_id,
+                    site_name=run.site_name,
+                    ok=bool(result.success),
+                    msg=result.message,
+                    error_kind=result.error_kind,
+                    duration_ms=result.duration_ms,
+                    ts=ts,
+                    trigger=trigger,
+                    attempt=int(getattr(result, 'attempt', 1) or 1),
+                ))
+            self.history.append(entries)
+        except Exception:                                       # noqa: BLE001
+            pass
 
     def _persist_state_delta(self, state: RuntimeState, targets, now: int
                              ) -> None:

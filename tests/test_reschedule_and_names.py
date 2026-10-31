@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,7 +31,18 @@ def fmt(ts):
 
 
 class TestRescheduleOnConfigChange(unittest.TestCase):
+    """全部断言都是"相对 NOW 的绝对时刻"，所以必须把时钟冻在 NOW。
+
+    踩过的坑：这里原来直接用真实时间跑，锚点却写死成 2026-10-06 09:35。
+    于是只有正好在 10-05~10-06 那两天跑才绿，隔一个月再跑就报
+    "2244492 不小于 3600" —— 看起来像调度算错了，其实是测试自己过期了。
+    真实的当前时间对断言毫无意义，冻住它。
+    """
+
     def setUp(self):
+        clock = mock.patch('app.service.time.time', return_value=NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.dir = tempfile.mkdtemp(prefix='ac_resched_')
         self.svc = Service(self.dir, version='t', env_key=S.generate_key(),
                            proxy='')

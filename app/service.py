@@ -735,7 +735,7 @@ class Service:
             state.clear_site_flag(str(site_id), 'day_problem_reason')
             self.store.save_state(state)
         runner = self.make_runner(cfg)
-        report = runner.run_once(cfg, only_site=site_id)
+        report = runner.run_once(cfg, only_site=site_id, trigger='manual')
         return {
             'summary': report.summary(),
             'runs': [{
@@ -751,6 +751,27 @@ class Service:
                 'notified': r.notified,
             } for r in report.runs],
         }
+
+    # ------------------------------------------------------------ 历史
+    def history(self):
+        """取当前数据目录的历史读写对象（进程内共享同一个实例）。"""
+        from .history import get_history
+        return get_history(self.data_dir)
+
+    def history_calendar(self, site_id: Optional[str] = None,
+                         month: str = '', recent_days: int = 30
+                         ) -> Dict[str, Any]:
+        """日历数据：这个月每天成没成、以及最近 N 天的成功率。
+
+        site_id 为空 = 全部站点合并看（那天只要有站点失败就算"有问题"）。
+        """
+        h = self.history()
+        data = h.calendar(str(site_id or ''), month)
+        data['recent'] = h.recent(str(site_id or ''), recent_days)
+        # 站点列表：前端下拉框要用（含已停用的，历史还在）
+        data['sites'] = [{'id': s.id, 'name': s.name}
+                         for s in self.load_config().sites]
+        return data
 
     # ------------------------------------------------------------ 录制
     def start_recording(self, site_id: str, name: str, start_url: str) -> Dict[str, Any]:
