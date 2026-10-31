@@ -12,3 +12,14 @@ playwright==1.48.0
 
 # 凭据加密（Fernet = AES-128-CBC + HMAC）
 cryptography==43.0.3
+
+# socks4/socks5/socks5h 代理。
+#
+# 为什么要单独装：urllib **原生不支持 socks** —— 把 socks5:// 塞进
+# ProxyHandler 之后，无论装没装 PySocks 都会一路拖到 urlopen 才报
+# "unknown url type: socks5"（实测 PySocks 1.7.1 仍然如此）。
+# 真正起作用的是 app/socks_proxy.py 里自己实现的连接层，
+# 这个包只负责按 socks 协议建 socket。
+#
+# 纯 Python，几十 KB，不影响镜像体积那本账。
+PySocks==1.7.1

@@ -26,6 +26,7 @@ from http.cookiejar import CookieJar
 from typing import Any, Dict, Optional
 
 from . import netutil
+from . import socks_proxy
 
 DEFAULT_TIMEOUT = 20
 
@@ -162,13 +163,48 @@ class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new
 
 
+def _is_socks(proxy: str) -> bool:
+    """是不是 socks 代理（socks4/5、socks5h 都算）。"""
+    return (proxy or '').strip().lower().startswith('socks')
+
+
+def _scheme_of(proxy: str) -> str:
+    p = (proxy or '').strip()
+    return p.split('://', 1)[0].lower() if '://' in p else 'http'
+
+
+def have_socks() -> bool:
+    """PySocks 是否可用（urllib 自己不认 socks5，全靠它建连接）。"""
+    return socks_proxy.available()
+
+
 def build_opener(cfg: HttpConfig, global_proxy: str = '',
                  cookie_jar: Optional[CookieJar] = None):
     """按配置构造 urllib 的 opener。"""
     handlers = []
     proxy = normalize_proxy(global_proxy)
     if proxy:
-        handlers.append(urllib.request.ProxyHandler({'http': proxy, 'https': proxy}))
+        # socks 代理走不了 urllib 自带的 ProxyHandler：它只认 http/https，
+        # 遇到 socks5 会一路拖到 urlopen 才炸，报 "unknown url type: socks5"
+        # —— 用户只会以为是自己地址填错了。这里分两条路走，缺依赖时直接说清楚。
+        if _is_socks(proxy):
+            if not socks_proxy.available():
+                raise HttpError(
+                    'no_socks',
+                    '这个镜像没有内置 socks 代理支持，无法使用 %s。'
+                    '请改用 http 代理，或安装 PySocks（pip install PySocks）后重建镜像'
+                    % _scheme_of(proxy))
+            spec = socks_proxy.parse_proxy(proxy)
+            if not spec:
+                raise HttpError('bad_socks_url',
+                                '看不懂这个代理地址：%s。示例：'
+                                'socks5://127.0.0.1:1080' % proxy)
+            ctx = None if cfg.verify_ssl else netutil.build_ssl_context(
+                verify=False)
+            handlers.extend(socks_proxy.handlers(spec, context=ctx))
+        else:
+            handlers.append(urllib.request.ProxyHandler(
+                {'http': proxy, 'https': proxy}))
     if not cfg.verify_ssl:
         handlers.append(urllib.request.HTTPSHandler(
             context=netutil.build_ssl_context(verify=False)))
@@ -190,12 +226,15 @@ def request(method: str, url: str, cfg: Optional[HttpConfig] = None,
     proxy = normalize_proxy(global_proxy)
 
     try:
-        if proxy:
-            opener = build_opener(cfg, proxy, cookie_jar)
-            return _do_open(opener, req, cfg, url)
-        # 未配置代理：在"无代理环境"下构造并执行，保证真正直连
+        # 无论走不走代理，一律在"没有环境代理"的环境下执行：
+        #   * 直连时不用说了，环境变量会把请求偷偷劫走；
+        #   * 走代理时也不该让环境变量插手 —— 尤其 socks 分支，
+        #     我们根本没装 ProxyHandler（改成了自定义连接层），
+        #     urllib 于是会回退去读 http_proxy，请求就走了别人家的代理。
+        #     这个坑只在"机器上恰好设了 http_proxy"时才出现，
+        #     本地跑全量测试就撞上了（单跑却全绿）。
         with _no_proxy_env():
-            opener = build_opener(cfg, '', cookie_jar)
+            opener = build_opener(cfg, proxy, cookie_jar)
             return _do_open(opener, req, cfg, url)
     except HttpError:
         raise

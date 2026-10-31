@@ -74,6 +74,11 @@ _CODES: Dict[str, Tuple[str, str, str]] = {
     'proxy_refused': ('代理拒绝连接', 'network', ''),
     'no_proxy': ('代理不可用', 'network',
                  '配置了走代理但代理没法用；检查「设置 → 网络」'),
+    'no_socks': ('缺少 socks 支持', 'network',
+                 '这个镜像没装 PySocks，socks 代理用不了；'
+                 '改用 http 代理，或重建镜像带上 PySocks'),
+    'bad_socks_url': ('socks 地址写错了', 'network',
+                      '代理地址格式不对，示例：socks5://127.0.0.1:1080'),
     'tls_error': ('证书校验失败', 'network', ''),
     'http_error': ('请求失败', 'network',
                    'HTTP 层就失败了，没拿到有效响应；看消息里的状态码'),
