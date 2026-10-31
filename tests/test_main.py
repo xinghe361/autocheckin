@@ -142,6 +142,15 @@ class TestBuildSettings(EnvCase):
             M.build_settings(['--version'])
         self.assertEqual(ctx.exception.code, 0)
 
+    def test_version_follows_the_bump_rule(self):
+        """版本号约定：三段式，每次发版只加末位。
+
+        判断不了"有没有跳号"（那要跟上一个 tag 比），但能钉住格式 ——
+        写成 v1.4.7、1.4、1.4.7-beta 都会让 tag 与 VERSION 对不上，
+        而发布脚本是直接拿 VERSION 当 tag 的。
+        """
+        self.assertRegex(M.VERSION, r'^[0-9]+\.[0-9]+\.[0-9]+$')
+
     def test_unknown_flag_errors(self):
         with self.assertRaises(SystemExit):
             M.build_settings(['--nope'])

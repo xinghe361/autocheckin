@@ -8,7 +8,7 @@ WebDAV 备份，以及**录制你的操作**来新增任意站点。
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-linux%2Famd64-lightgrey)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
-![Tests](https://img.shields.io/badge/tests-450%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-917%20passed-brightgreen)
 
 **特点一览**
 
@@ -539,8 +539,8 @@ docker run --rm xinghe361/autocheckin:latest python -c "from cryptography.fernet
 ## 五、本地开发与自测
 
 ```bash
-python -m unittest discover -s tests   # 410 项单测
-python smoke_web.py                    # 27 项 HTTP 冒烟检查
+python -m unittest discover -s tests   # 917 项单测
+python smoke_web.py                    # 84 项 HTTP 冒烟检查
 python -m app --no-scheduler           # 本地起服务（只开界面）
 ```
 
@@ -552,3 +552,13 @@ python -m app --no-scheduler           # 本地起服务（只开界面）
 python build_image.py --name 你的用户名/autocheckin --tag latest
 python build_image.py --name 你的用户名/autocheckin --tag latest --push
 ```
+
+### 版本号约定
+
+版本号在 `app/main.py` 的 `VERSION`，三段式 `主.次.修订`。
+**每次发版只把最后一位加 1**（1.4.6 → 1.4.7 → 1.4.8），不跳号、不整十进位。
+tag 与 `VERSION` 保持一致（`v1.4.7`）。
+
+为什么不按"改得多就进位"：这个项目的改动几乎每次都是"加一个小功能 + 修几个边界"，
+按语义化版本去判断该进位到 1.5.0 还是 1.6.0 只会吵；末位单调递增的好处是
+**看版本号就知道隔了几个版本**，出问题时能直接对上是哪一次。
