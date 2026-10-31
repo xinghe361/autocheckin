@@ -2854,12 +2854,12 @@ function clearCookie(id){
  * 通信方式（已实测确认）：
  *   它在容器页面里监听 click，命中 [data-toggle="get-cookie"] 就去读 Cookie，
  *   然后 window.postMessage({info:'cookieRaw', data:{名字:值,...}}, '*')
- * 所以我们只要两件事：
+ * 所以只要两件事：
  *   ① 页面上放一个带那些 data-* 属性的按钮
  *   ② 监听 message，收到 cookieRaw 就转成 Cookie 串调我们自己的接口存起来
  *
- * 这里不需要配对码：脚本是在**我们自己的页面**上跑的，
- * 浏览器会自动带上本容器的登录会话 Cookie，直接复用现有认证即可。
+ * 扩展是在**我们自己的页面**上跑的，浏览器会自动带上本容器的登录会话 Cookie，
+ * 直接复用现有认证即可，不需要额外的令牌。
  */
 
 var COOKIE_IMPORT_PENDING = '';

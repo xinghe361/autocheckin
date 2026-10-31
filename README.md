@@ -190,7 +190,7 @@ services:
 > **为什么登录字段一定要用上面两种办法拿？**
 > 关键登录字段（如 V2EX 的 `PB3_SESSION`、Discuz 的 `auth`）都带 `HttpOnly`
 > 标记，**JavaScript 读不到** —— 实测确认过。
-> 所以控制台里的 `document.cookie`、以及任何油猴脚本都拿不到它们；
+> 所以控制台里的 `document.cookie` 拿不到它们；
 > 只有浏览器扩展的特权接口、或 DevTools 的 `Copy as cURL` 才能拿到完整登录态。
 
 配好后：

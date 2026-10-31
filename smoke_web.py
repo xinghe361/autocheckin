@@ -110,8 +110,8 @@ try:
     check('页面含扩展识别的按钮生成逻辑',
           'data-toggle=\\"get-cookie' in html or "data-toggle=\"get-cookie" in html)
     check('页面区分扩展消息与无关消息', "d.info !== 'cookieRaw'" in html)
-    check('自动导入复用现有会话（不需要配对码）',
-          '/api/pair/redeem' not in html)   # 页面不该再去换脚本令牌
+    check('自动导入复用现有会话（不再需要配对码）',
+          '/api/pair/redeem' not in html)
 
     # ---- 界面：正在编辑时不能被自动刷新冲掉 ----
     # 用户反馈"还没填完就刷新，填不了"。根因是 30 秒定时 refreshAll()，
