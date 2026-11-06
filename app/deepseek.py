@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import html as _html
 import json
 import re
 import time
@@ -246,6 +247,50 @@ def redact_steps(steps) -> List[Dict[str, Any]]:
     return out
 
 
+# ---------------------------------------------------------------- 页面片段
+# 只在用户显式打开「AI 分析时附带页面片段」后才会走到这里。
+# 页面正文明文发给第三方模型，必须先把"一眼就是隐私"的东西抹掉：
+#   * script/style 整块（含内嵌 JSON 里的令牌、埋点）
+#   * HTML 标签本身（模型看正文就够，不需要标签）
+#   * Cookie / Authorization / token / csrf / password 这类键值
+#   * 邮箱、9 位以上纯数字（UID、手机号、动态 id 等）
+PAGE_EXCERPT_LIMIT = 4000
+
+_STRIP_BLOCK_RE = re.compile(r'<(script|style)\b[^>]*>.*?</\1\s*>', re.I | re.S)
+_COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
+_TAG_RE = re.compile(r'<[^>]{0,2000}>')
+_SECRET_KV_RE = re.compile(
+    r'(?i)\b(cookie|authorization|set-cookie|token|csrf[_-]?\w*|session[_-]?\w*|'
+    r'passwd|password|secret|api[_-]?key)\b\s*[:=]\s*'
+    r'(?:bearer\s+)?'
+    r'("[^"]{0,200}"|\'[^\']{0,200}\'|[^\s;,<>"\']{1,200})')
+# 裸的 sk-xxx 密钥（没有 key= 前缀的场合，比如错误信息里）
+_APIKEY_RE = re.compile(r'\bsk-[A-Za-z0-9_\-]{8,}')
+_EMAIL_RE = re.compile(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')
+_LONG_NUM_RE = re.compile(r'\b\d{9,}\b')
+
+
+def redact_page_text(text: str, limit: int = PAGE_EXCERPT_LIMIT) -> str:
+    """把页面正文压成"能当线索看、但不含明显隐私"的一段。
+
+    不能指望这一步做到"绝对安全"——真要绝对安全就别开这个开关。
+    这里的目标是：即使开了，也别把 Cookie、邮箱、UID 原样送出去。
+    """
+    s = str(text or '')
+    if not s:
+        return ''
+    s = _STRIP_BLOCK_RE.sub(' ', s)
+    s = _COMMENT_RE.sub(' ', s)
+    s = _TAG_RE.sub(' ', s)
+    s = _html.unescape(s)
+    s = ' '.join(s.split())
+    s = _SECRET_KV_RE.sub(lambda m: '%s=(已省略)' % m.group(1), s)
+    s = _APIKEY_RE.sub('(密钥已省略)', s)
+    s = _EMAIL_RE.sub('(邮箱已省略)', s)
+    s = _LONG_NUM_RE.sub('(数字已省略)', s)
+    return s[:limit]
+
+
 def build_prompt(site: SiteConfig, result: CheckinResult,
                  page_excerpt: str = '', trace: Optional[List[str]] = None) -> str:
     """构造给模型的用户提示。"""
@@ -307,6 +352,11 @@ def analyze(site: SiteConfig, result: CheckinResult, ai: AiConfig,
         return AiSuggestion(False, error='AI 分析已关闭')
     if not api_key:
         return AiSuggestion(False, error='未配置 DeepSeek API Key')
+
+    # 页面片段：先脱敏再进提示词。
+    # 放在这里而不是调用方，是为了保证**任何**调用路径都不会漏掉这一步。
+    if page_excerpt:
+        page_excerpt = redact_page_text(page_excerpt)
 
     prompt = build_prompt(site, result, page_excerpt, trace)
     base = (ai.base_url or DEEPSEEK_DEFAULT_BASE).rstrip('/')

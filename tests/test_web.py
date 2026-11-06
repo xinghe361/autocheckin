@@ -303,6 +303,21 @@ class TestCredentialsNeverLeak(WebCase):
         self.assertTrue(d['notify']['pushplus_token_masked'].startswith('PUS'))
         self.assertIn('*', d['notify']['pushplus_token_masked'])
 
+    def test_ai_page_excerpt_switch_roundtrip(self):
+        """AI「附带页面片段」开关：默认关，保存后能读回来。"""
+        d = self.json('GET', '/api/settings')
+        self.assertFalse(d['ai'].get('include_page_excerpt'))
+
+        self.json('POST', '/api/settings',
+                  {'ai': {'include_page_excerpt': True}})
+        d = self.json('GET', '/api/settings')
+        self.assertTrue(d['ai'].get('include_page_excerpt'))
+
+        self.json('POST', '/api/settings',
+                  {'ai': {'include_page_excerpt': False}})
+        d = self.json('GET', '/api/settings')
+        self.assertFalse(d['ai'].get('include_page_excerpt'))
+
     def test_site_list_has_no_credentials(self):
         self.json('POST', '/api/site', {'id': 'x', 'name': 'X', 'password': 'SEC'})
         blob = json.dumps(self.json('GET', '/api/sites'), ensure_ascii=False)

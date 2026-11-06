@@ -72,8 +72,19 @@ def _default_checkin(site: SiteConfig, proxy: str, password: str, browser,
 
 def _default_analyze(site: SiteConfig, result: CheckinResult, ai_cfg, api_key: str,
                      proxy: str) -> Any:
+    """默认的 AI 分析入口。
+
+    页面片段从 result 上取，**不扩展 analyze_fn 的签名** —— 那是可注入的
+    测试/扩展点，多一个必填参数会把所有现有实现打挂；而 result 本来就在参数里。
+    是否附带由开关决定（默认关），脱敏在 deepseek 内部再做一次。
+    """
     from .deepseek import analyze
-    return analyze(site, result, ai_cfg, api_key, proxy=proxy)
+
+    excerpt = ''
+    if getattr(ai_cfg, 'include_page_excerpt', False):
+        excerpt = str(getattr(result, 'page_excerpt', '') or '')
+    return analyze(site, result, ai_cfg, api_key, proxy=proxy,
+                   page_excerpt=excerpt)
 
 
 def _looks_like_cookie_header(raw: str) -> bool:

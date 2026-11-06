@@ -53,6 +53,10 @@ RAW_HOSTS = ('raw.githubusercontent.com',)
 
 UA = 'autocheckin-plugin-sync'
 
+# 首次安装时「模板来源」默认填的项目地址。
+# 只是给界面预填 + 手动点「立即同步」时的兜底；自动同步仍需用户自己打开开关。
+DEFAULT_TEMPLATE_SOURCE = 'xinghe361/autocheckin/site-plugins'
+
 
 class SyncError(Exception):
     """同步失败（网络/来源格式/远端返回异常）。"""

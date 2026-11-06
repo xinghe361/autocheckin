@@ -272,11 +272,12 @@ class Service:
     def sync_plugins(self, source: str = '', manual: bool = True
                      ) -> Dict[str, Any]:
         """拉一次远端模板。manual=True 时失败直接把原因抛给调用方。"""
-        from .pluginsync import SyncError
+        from .pluginsync import DEFAULT_TEMPLATE_SOURCE, SyncError
         cfg = self.load_config()
-        src = (source or getattr(cfg, 'plugin_sync_source', '') or '').strip()
-        if not src:
-            raise SyncError('没有填同步来源（形如 owner/repo 或 https 地址）')
+        # 没填就用项目自带的模板目录作为默认来源：
+        # 界面本来就预填了它，这里是手滑清空后点「立即同步」的兜底。
+        src = ((source or getattr(cfg, 'plugin_sync_source', '') or '').strip()
+               or DEFAULT_TEMPLATE_SOURCE)
         report = self._plugin_sync().sync(src)
         now = int(time.time())
         state = self.load_state()

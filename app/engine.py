@@ -35,6 +35,23 @@ class FlowOutcome:
     vars: Dict[str, str] = field(default_factory=dict)
     # 便于调试：记录每步做了什么
     trace: List[str] = field(default_factory=list)
+    # 判定时用的页面正文（**只在需要给 AI 分析时用**，默认不进历史/通知）。
+    # 这里就截断并去空白：原文可能有几十万字符，留着纯占内存。
+    page_excerpt: str = ''
+
+
+# 页面片段在本层先截到 8K，AI 那层再按需脱敏并截到 4K。
+# 为什么两层都截：本层防内存/传递开销，AI 那层防 token 爆炸。
+PAGE_EXCERPT_CAP = 8000
+
+
+def _take_excerpt(text: str) -> str:
+    """把页面正文压成一小段（去多余空白 + 截断）。"""
+    s = str(text or '')
+    if not s:
+        return ''
+    s = ' '.join(s.split())
+    return s[:PAGE_EXCERPT_CAP]
 
 
 # 供流程使用的取数函数签名： (method, url, data) -> HttpResponse
@@ -222,17 +239,20 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
                            'already', vars=variables, trace=trace)
     if kind == 'fail':
         return FlowOutcome(False, '站点提示需要处理（命中「%s」）%s' % (kw, extra),
-                           'fail', vars=variables, trace=trace)
+                           'fail', vars=variables, trace=trace,
+                           page_excerpt=_take_excerpt(text))
 
     status = last_resp.status if last_resp else 0
     # 无法判定时区分两种情况：HTTP 层就失败（把状态码带出来）还是页面看不懂
     if status and (status < 200 or status >= 300):
         return FlowOutcome(
             False, 'HTTP %d，且页面未命中任何已知关键词' % status,
-            'unknown', error_kind='http_%d' % status, vars=variables, trace=trace)
+            'unknown', error_kind='http_%d' % status, vars=variables, trace=trace,
+            page_excerpt=_take_excerpt(text))
 
     return FlowOutcome(False, '无法判断签到结果（HTTP %s，页面未命中任何已知关键词）' % status,
-                       'unknown', error_kind='unclear', vars=variables, trace=trace)
+                       'unknown', error_kind='unclear', vars=variables, trace=trace,
+                       page_excerpt=_take_excerpt(text))
 
 
 def _http_fetcher(site: SiteConfig, proxy: str,
@@ -521,4 +541,7 @@ def checkin_site(site: SiteConfig, proxy: str = '', password: str = '',
         duration_ms=int((time.time() - started) * 1000),
         # 步骤链一路带着走：失败时这是唯一能看出"卡在哪一步"的东西
         trace=list(outcome.trace or []),
+        # 页面片段只在失败时有用；成功时留空，别白占内存
+        page_excerpt=('' if outcome.success
+                      else str(getattr(outcome, 'page_excerpt', '') or '')),
     )

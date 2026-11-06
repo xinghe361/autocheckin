@@ -697,6 +697,14 @@ class AiConfig:
     # 之前 auto_disable 只是这个数字的开关，语义重复（用户指出）。
     fail_threshold: int = 2
 
+    # 是否把"失败页面的正文片段"一起发给 AI 分析。
+    #
+    # 默认关：页面正文属于不可控内容（可能含用户名、未读消息、页面里的令牌），
+    # 而且每次都会多花 token。但它是"判定不了结果"这类失败最有用的线索 ——
+    # 模型能看到页面到底写了什么，而不是只凭关键词配置猜。
+    # 打开后仍会先做脱敏（去标签/抹 Cookie·token·邮箱·长数字/截断 4000 字符）。
+    include_page_excerpt: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -730,6 +738,8 @@ class AiConfig:
             src.get('max_calls_per_day'), base.max_calls_per_day, 0, 100000)
         base.fail_threshold = _as_int(
             src.get('fail_threshold'), base.fail_threshold, 0, 1000)
+        base.include_page_excerpt = _as_bool(
+            src.get('include_page_excerpt'), base.include_page_excerpt)
 
         if legacy_per_day is not None:
             n = _as_int(legacy_per_day, -1, 0)

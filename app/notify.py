@@ -73,6 +73,12 @@ class CheckinResult:
     # 引擎一直在记，但以前出了函数就丢了 —— 失败时只能看到一句结论，
     # 看不出是第几步、哪个地址出的问题。现在往上传，由 history 落盘。
     trace: List[str] = field(default_factory=list)
+    # 失败页面的正文片段（已压缩 + 截断）。
+    #
+    # ⚠️ 刻意**不落历史、不进通知、不进任何接口**：它可能含用户名、未读消息、
+    #    页面里的令牌等。唯一的去处是「AI 分析时附带页面片段」这个开关打开后
+    #    的提示词（那边还会再脱敏一次）。
+    page_excerpt: str = ''
 
 
 def should_notify(result: CheckinResult, cfg: NotifyConfig) -> bool:

@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import auth as AUTH
 from . import recorder as RC
+from .pluginsync import DEFAULT_TEMPLATE_SOURCE
 
 MAX_BODY = 4 * 1024 * 1024      # 4MB，够放录制事件流
 MAX_SITE_ID = 64
@@ -437,6 +438,8 @@ class WebApp:
                 'notify_modes': list(NOTIFY_MODES),
                 'channels': list(ALL_CHANNELS),
                 'proxy_modes': [PROXY_INHERIT, PROXY_DIRECT, PROXY_CUSTOM],
+                # 首次安装时「模板来源」输入框默认填这个，省得用户去翻文档
+                'default_template_source': DEFAULT_TEMPLATE_SOURCE,
                 'actions': ['goto', 'click', 'fill', 'wait', 'wait_for',
                             'assert_text', 'extract'],
             }
@@ -543,6 +546,9 @@ class WebApp:
             # AI 分析本身失败：连续几次后暂停该站点（0 = 不限制）
             if 'fail_threshold' in a and str(a['fail_threshold']) != '':
                 ac.fail_threshold = max(0, int(a['fail_threshold']))
+            # AI 分析时是否附带失败页面片段（默认关；见 AiConfig 的说明）
+            if 'include_page_excerpt' in a:
+                ac.include_page_excerpt = bool(a['include_page_excerpt'])
             if a.get('api_key'):
                 ac.api_key_enc = self.service.box.encrypt(str(a['api_key']))
 
@@ -1243,11 +1249,13 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <h2>可选站点同步（从 GitHub 拉模板）</h2>
     <div class="hint">
       把仓库里某个目录下的 <code>.json</code> 站点模板同步进来，**不用重建镜像**。
-      同步只是把模板变成「可选」，还要在上面「可选站点」里选中才会真正签到。
+      同步只是把模板变成「可选」，还要在上面「可选站点」里选中才会真正签到。<br>
+      <b>来源已默认填好本项目地址</b>，直接点「立即同步」即可；想用别人的模板库再改成对方地址。
     </div>
     <div class="row">
       <div><label>来源</label>
-        <input id="set_sync_src" placeholder="用户名/仓库名/目录，或 https 地址"></div>
+        <input id="set_sync_src" placeholder="用户名/仓库名/目录，或 https 地址"
+               value=""></div>
       <div><label>每天同步时刻</label>
         <input id="set_sync_time" placeholder="03:00" style="max-width:120px"></div>
       <div><label>间隔（天）</label>
@@ -1371,6 +1379,22 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
         <b>0</b> = 不限制，分析每次都失败也照样继续、站点不会被停用；<br>
         <b>1</b> = 第一次分析失败就暂停；<b>2</b>（默认）= 连续两次后暂停。<br>
         暂停后不会再消耗 AI 额度；修好后到「站点」页手动「启用」。
+      </div>
+    </div>
+
+    <div class="fsec">
+      <h4>AI 分析时附带页面片段</h4>
+      <label style="margin-top:2px">
+        <input type="checkbox" id="set_aiexcerpt"> 把失败页面的正文片段一起发给 AI（默认关）
+      </label>
+      <div class="hint" style="margin-top:6px">
+        对「判定不了结果」这类失败最有帮助：模型能看到页面到底写了什么，
+        而不是只凭关键词配置猜。<br>
+        代价：每次分析多花一点 token；页面正文不可控，发送前会先脱敏
+        ——去掉 HTML 标签与 script/style、抹掉 Cookie / Authorization / token /
+        邮箱 / 9 位以上数字，最后截断到 4000 字符。<br>
+        <b>打开后页面内容会发给第三方模型服务</b>（你配置的 DeepSeek 地址）。
+        介意就别开，关着也能正常用 AI 分析。
       </div>
     </div>
 
@@ -3391,7 +3415,9 @@ function loadSettings(){
     $('set_cdp').value = d.remote_cdp_url || '';
     /* 站点模板同步 */
     $('set_sync_on').checked = !!d.plugin_sync_enabled;
-    $('set_sync_src').value = d.plugin_sync_source || '';
+    /* 没配过就预填项目地址：初次安装不必去翻文档找来源 */
+    $('set_sync_src').value = d.plugin_sync_source
+      || (META.default_template_source || '');
     $('set_sync_time').value = d.plugin_sync_time || '03:00';
     $('set_sync_days').value = d.plugin_sync_interval_days || 1;
     loadSyncStatus();
@@ -3414,6 +3440,8 @@ function loadSettings(){
     /* 每天调用次数的硬上限；0 = 不限制 */
     $('set_maxai').value = (ai.max_calls_per_day === undefined
                             ? 20 : ai.max_calls_per_day);
+    /* 是否把失败页面片段一起发给 AI（默认关） */
+    $('set_aiexcerpt').checked = !!ai.include_page_excerpt;
     calcAiCalls();
     $('set_wdurl').value = (d.webdav && d.webdav.url) || '';
     $('set_wduser').value = (d.webdav && d.webdav.username) || '';
@@ -3579,7 +3607,8 @@ function saveSettings(){
     ai: {api_key: $('set_aikey').value, model: $('set_model').value.trim(),
          ai_after_failures: parseInt($('set_aiafter').value||'0', 10),
          max_calls_per_day: parseInt($('set_maxai').value||'0', 10),
-         fail_threshold: parseInt($('set_aifail').value||'0', 10)}
+         fail_threshold: parseInt($('set_aifail').value||'0', 10),
+         include_page_excerpt: $('set_aiexcerpt').checked}
   };
   api('POST','/api/settings', body).then(function(){
     show('setMsg','已保存。','ok'); refreshAll(); loadSettings();
