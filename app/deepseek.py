@@ -307,7 +307,7 @@ def build_prompt(site: SiteConfig, result: CheckinResult,
         '失败关键词：%s' % (site.fail_keywords or []),
         # ⚠️ 用 redact_steps：填写内容不发给 AI（可能含站点密码）
         '步骤：%s' % json.dumps(redact_steps(site.steps), ensure_ascii=False)
-        if site.steps else '步骤：(无，使用内置模板)',
+        if site.steps else '步骤：(无，使用站点模板)',
         '',
         '## 失败情况',
         '连续失败次数：%s' % ((site.state or {}).get('consecutive_failures', '?')),

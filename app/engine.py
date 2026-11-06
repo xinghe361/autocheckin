@@ -511,7 +511,7 @@ def checkin_site(site: SiteConfig, proxy: str = '', password: str = '',
                     site_id=site.id, site_name=site.name, success=False,
                     message='该站点需要浏览器（录制的站点用的是点击/填表这类'
                             '浏览器动作），但当前镜像没有浏览器。'
-                            '内置站点不受影响；如需这类站点，请换用带浏览器的'
+                            '纯请求站点不受影响；如需这类站点，请换用带浏览器的'
                             '镜像，或把站点改成纯请求流程'
                             '（纯请求只支持 get / post / extract_regex 三种步骤）。',
                     error_kind='browser_unavailable', attempt=attempt,

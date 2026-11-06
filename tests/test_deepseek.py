@@ -150,10 +150,11 @@ class TestBuildPrompt(unittest.TestCase):
         p = D.build_prompt(site, CheckinResult('c', 'C', False))
         self.assertIn('#go', p)
 
-    def test_no_steps_says_builtin(self):
+    def test_no_steps_mentions_template(self):
+        """没有录制步骤时要说明"走的是站点模板"，而不是留空让人猜。"""
         site = SiteConfig(id='c', name='C')
         p = D.build_prompt(site, CheckinResult('c', 'C', False))
-        self.assertIn('内置模板', p)
+        self.assertIn('站点模板', p)
 
 
 class TestAnalyze(unittest.TestCase):

@@ -409,5 +409,24 @@ class TestNotifyTest(ServiceCase):
         self.assertIn('pushplus', out['report'])
 
 
+class TestActionableErrors(ServiceCase):
+    """"点了没反应"类问题的回归：没有渠道/没有模板时必须给出可操作的错误。"""
+
+    def test_notify_test_without_channels_says_so(self):
+        cfg = self.svc.load_config()
+        cfg.notify.channels = []
+        cfg.notify.pushplus_token = ''
+        self.svc.save_config(cfg)
+        with self.assertRaises(ValueError) as ctx:
+            self.svc.test_notify()
+        self.assertIn('通知渠道', str(ctx.exception))
+
+    def test_install_missing_template_hints_sync(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.svc.install_template('not-synced-yet')
+        msg = str(ctx.exception)
+        self.assertIn('同步', msg, '要告诉用户去哪儿把模板拉下来')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

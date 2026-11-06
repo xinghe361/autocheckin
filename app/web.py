@@ -1168,7 +1168,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     </div>
     <label>主页地址（录制从这里开始）</label>
     <input id="ns_url" placeholder="https://example.com/">
-    <div class="hint">也可以直接从内置模板复制一份再改。内置模板：
+    <div class="hint">也可以照着现成模板改（先在「设置 → 可选站点同步」拉一次）。当前可用模板：
       <span id="tplList" class="mono"></span></div>
   </div>
 
@@ -1359,14 +1359,10 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
             data-needs-sync="1" data-sid=""></div>
       </div>
       <div class="hint" style="margin-top:6px">
-        <b>签到重试次数由各站点自己的设置决定</b>（「站点」页 → 编辑 → 失败重试），
-        这里只控制<b>什么时候调用 AI</b>：在连续失败次数的<b>整数倍</b>处调用一次。<br>
-        例：站点重试 3 次 → 设为 3 表示"试 3 次后调用一次 AI"；
-        因为一轮最多只有 4 次尝试，所以实际上每天最多调用 1 次。<br>
-        想<b>只调用一次</b>就把它设成<b>大于站点重试次数</b>（站点重试 3 次就设 4）。<br>
-        设为 <b>0</b> ＝ 完全不启用 AI 分析。<br><br>
-        「每天最多分析几次」是<b>硬上限</b>：到了这个次数，即使倍数规则还要求调用
-        也不再调用。设为 <b>0</b> ＝ 不限制（完全由上面的倍数决定）。
+        重试次数在「站点 → 编辑 → 失败重试」里设；这里只控制<b>何时调用 AI</b>：
+        在连败次数的<b>整数倍</b>处调一次（重试 3 次、这里填 3 → 一轮结束时分析一次）。
+        填 <b>0</b> ＝ 不启用 AI。<br>
+        「每天最多分析几次」是<b>硬上限</b>，填 <b>0</b> ＝ 不限制。
         <span id="set_aicalc"></span>
       </div>
     </div>
@@ -1388,13 +1384,9 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
         <input type="checkbox" id="set_aiexcerpt"> 把失败页面的正文片段一起发给 AI（默认关）
       </label>
       <div class="hint" style="margin-top:6px">
-        对「判定不了结果」这类失败最有帮助：模型能看到页面到底写了什么，
-        而不是只凭关键词配置猜。<br>
-        代价：每次分析多花一点 token；页面正文不可控，发送前会先脱敏
-        ——去掉 HTML 标签与 script/style、抹掉 Cookie / Authorization / token /
-        邮箱 / 9 位以上数字，最后截断到 4000 字符。<br>
-        <b>打开后页面内容会发给第三方模型服务</b>（你配置的 DeepSeek 地址）。
-        介意就别开，关着也能正常用 AI 分析。
+        「判定不了结果」时最有用的线索：让模型看到页面原文，而不是只凭关键词猜。<br>
+        发送前自动脱敏（去标签、抹 Cookie/token/邮箱/长数字，截断 4000 字符）。<br>
+        <b>开启后页面内容会发给你配置的 DeepSeek 服务</b>；介意就别开。
       </div>
     </div>
 
@@ -2072,7 +2064,12 @@ var _sitesSig = '';
    GET /api/sites 里的 next_run_at 每次都变，所以不能拿它算签名。 */
 var _forceSitesRefresh = false;
 
-var VOLATILE_FIELDS = ['next_run_at', 'last_success_at', 'cookie_checked_at'];
+/* 这些字段变了不值得重建整个列表（地图/表单会被销毁重建）：
+   下次运行时间每分钟都在变；登录检查结果有 cookieTag() 就地刷新。
+   cookie_status/cookie_error 一度不在这个名单里 —— 结果就是"点检查有效期，
+   消息刚写进提示区就被整行重建冲掉了"，表现成"点了没反应"（已修）。 */
+var VOLATILE_FIELDS = ['next_run_at', 'last_success_at', 'cookie_checked_at',
+                       'cookie_status', 'cookie_error'];
 
 function sitesSignature(sites){
   var stable = (sites||[]).map(function(s){
@@ -2647,7 +2644,7 @@ function siteFormHtml(s, c){
   +       '<button type="button" class="b pri" data-fact="saveCookie"'
   +         ' data-sid="'+esc(id)+'">保存 Cookie</button>'
   +       '<button type="button" class="b" data-fact="checkCookie"'
-  +         ' data-sid="'+esc(id)+'">检查是否有效</button>'
+  +         ' data-sid="'+esc(id)+'">检查登录状态</button>'
   +       '<button type="button" class="b danger" data-fact="clearCookie"'
   +         ' data-sid="'+esc(id)+'">清除</button>'
   +       '<span class="grow"></span>'
@@ -2680,7 +2677,7 @@ function siteFormHtml(s, c){
 
   + '<div class="fsec"><h4>自定义请求头</h4>'
   +   '<div class="hint" style="margin:0 0 6px">有些站点的接口会校验来源，'
-  +     '缺了会返回 403。内置站点已预置好，一般不用改。</div>'
+  +     '缺了会返回 403。模板通常已预置常用的头，一般不用改。</div>'
   +   '<div id="'+p+'hdr">'+headerRows(s.headers)+'</div>'
   +   '<button type="button" class="b" data-fact="addHeader"'
   +     ' data-sid="'+esc(id)+'">+ 增加一行</button>'
@@ -2852,13 +2849,16 @@ function saveCookie(id){
 }
 
 function checkCookie(id){
-  show('f_'+id+'_ckmsg','检查中…','');
+  showCookieMsg(id, '检查中…（最多 25 秒）', '');
   api('POST','/api/site/cookie/check',{id:id}).then(function(d){
     var cls = d.status===1? 'ok' : (d.status===2? 'err' : '');
-    show('f_'+id+'_ckmsg', d.message, cls);
+    /* 先存到"待显示"，再刷新：刷新可能重建整行（连败数/模板状态变化时），
+       直接写在旧 DOM 上的字会被冲掉，用户就以为按钮没反应。 */
+    CK_PENDING_MSG[id] = {text: d.message, kind: cls};
+    showCookieMsg(id, d.message, cls);
     loadSites();
   }).catch(function(e){
-    show('f_'+id+'_ckmsg','检查失败：'+e.message,'err');
+    showCookieMsg(id, '检查失败：'+e.message, 'err');
   });
 }
 
@@ -2974,7 +2974,7 @@ function saveCookieText(id, text){
     /* 先把提示写下来再刷新列表 —— 刷新会重渲染整个表单，
        直接写在旧 DOM 上会被冲掉，用户就看不到"已保存"了。 */
     var msg = '已保存 ' + d.count + ' 项（识别为：' + d.format + '）。'
-            + '可以点「检查是否有效」。';
+            + '可点「检查登录状态」。';
     CK_PENDING_MSG[id] = { text: msg, kind: 'ok' };
     loadSites();
   }).catch(function(e){
@@ -3074,7 +3074,7 @@ function openCookieHelper(id){
     +     '<li>回到本页面，点「<b>⚡ 从浏览器读取 Cookie</b>」</li>'
     +     '<li>扩展会弹一个确认框，点<b>确定</b></li>'
     +     '<li>Cookie 会自动送进来并保存，下面会显示「已保存 N 项」</li>'
-    +     '<li>再点「<b>检查是否有效</b>」确认</li>'
+    +     '<li>再点「<b>检查登录状态</b>」确认</li>'
     +   '</ol>'
     +   '<div class="tip" style="font-size:11.5px;color:#8b95a3;margin-top:8px;'
     +     'line-height:1.7">'

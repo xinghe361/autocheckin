@@ -1,7 +1,8 @@
 """站点与全局配置模型。
 
 设计要点：
-  * 每个站点既能用内置模板（V2EX / Chiphell / NodeSeek），也能用"录制"出来的自定义流程
+  * 每个站点既能用模板（site-plugins/*.json，如 V2EX / Chiphell / NodeSeek），
+ * 也能用"录制"出来的自定义流程
   * 每站点独立控制：调度方式、随机偏移、重试、AI 触发、通知策略、证书校验
   * 全部可序列化成 dict，便于 WebDAV 备份与恢复
 """
@@ -120,7 +121,7 @@ NOTIFY_MODES = (NOTIFY_ALL, NOTIFY_FAIL_ONLY, NOTIFY_SUCCESS_ONLY,
                 NOTIFY_CUSTOM, NOTIFY_NONE)
 
 # 站点类型
-KIND_TEMPLATE = 'template'   # 内置模板
+KIND_TEMPLATE = 'template'   # 站点模板（数据来自 site-plugins/*.json）
 KIND_CUSTOM = 'custom'       # 用户新增（录制/手填选择器）
 
 # 一个"步骤"的动作类型（自定义站点用）
@@ -204,7 +205,7 @@ class SiteConfig:
     name: str
     enabled: bool = True
     kind: str = KIND_TEMPLATE
-    # 内置模板名（v2ex / chiphell / nodeseek）
+    # 模板 id（对应 templates/<id>.json，如 v2ex / chiphell / nodeseek）
     template: str = ''
     homepage: str = ''
     # 需要浏览器（Cloudflare / 复杂交互）时开启
@@ -774,10 +775,8 @@ class AppConfig:
     # 是否允许通过 CDP 连接外部已有的 Chrome（如 NAS 上的 Kasm Chrome）
     remote_cdp_url: str = ''
     # 站点列表是否已被"显式管理"过（新增/删除站点、或加载过带站点的配置）。
-    # 用途：区分两种"站点为空" ——
-    #   False：全新配置或老配置，从没管理过 → 启动时补上内置站点
-    #   True ：用户主动把站点全删了 → **绝不能**让内置站点复活
-    # 只判断"站点是否为空"分不出这两者，实测过站点会自己回来继续签到。
+    # 现在内置站点已经没有了，这个标记只用于区分"真的管过"和"从没管过"，
+    # 便于以后做迁移/播种时不去覆盖用户的选择。
     sites_initialized: bool = False
 
     # --- 站点模板插件同步（从 GitHub / https 地址拉模板）---
@@ -868,7 +867,6 @@ class AppConfig:
             headless=_as_bool(d.get('headless'), True),
             remote_cdp_url=_as_str(d.get('remote_cdp_url'), ''),
             # 老配置没有这个键 → 看它有没有站点：有站点就说明管过站点列表了。
-            # 两者都没有时保持 False，首次启动仍会补上内置站点（行为不变）。
             sites_initialized=_as_bool(d.get('sites_initialized'), False)
             or bool(sites_raw),
             plugin_sync_enabled=_as_bool(d.get('plugin_sync_enabled'), False),

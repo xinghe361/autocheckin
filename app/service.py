@@ -222,7 +222,10 @@ class Service:
         """
         tpl = T.template_by_id(tid)
         if not tpl:
-            raise ValueError('没有这个模板：%s' % tid)
+            # 说清"为什么没有"：多半是还没同步/文件缺失，而不是这个模板不存在
+            raise ValueError(
+                '找不到模板「%s」：可能还没同步到本地。'
+                '到「设置 → 可选站点同步」点「立即同步」后再试' % tid)
         cfg = self.load_config()
         if cfg.site(tid):
             return {'ok': True, 'already': True, 'id': tid}
@@ -1169,6 +1172,9 @@ class Service:
     def test_notify(self, channel: str = '') -> Dict[str, Any]:
         """发一条测试通知，验证渠道配置是否可用。"""
         cfg = self.load_config()
+        # 一个渠道都没配就明说，别返回空 report 让界面"点了没反应"。
+        if not channel and not notify_mod.has_any_channel(cfg.notify):
+            raise ValueError('还没有配置任何通知渠道')
         result = notify_mod.CheckinResult(
             site_id='__test__', site_name='测试通知', success=True,
             message='这是一条测试通知。收到即表示该渠道配置正确。')
@@ -1178,7 +1184,11 @@ class Service:
             ncfg.channels = [channel]
         else:
             ncfg = cfg.notify
-        report = notify_mod.send_all(ncfg, result, cfg.proxy)
+        # 代理要按"模式"算：直连模式下哪怕地址栏还留着旧地址也不该走代理
+        from .models import effective_global_proxy
+        report = notify_mod.send_all(ncfg, result,
+                                     effective_global_proxy(cfg.proxy,
+                                                            cfg.proxy_mode))
         return {'report': report}
 
     def test_alert(self) -> Dict[str, Any]:
