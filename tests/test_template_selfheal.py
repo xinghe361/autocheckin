@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -199,6 +200,84 @@ class TestStepFromField(unittest.TestCase):
         self.assertTrue(out.success)
         self.assertEqual(out.vars['tk'], '222')
         self.assertEqual(out.vars['tk_first'], '111')
+
+
+class TestRestorePathSafety(SelfHealCase):
+    def test_traversal_template_id_is_ignored(self):
+        """template 字段可手改：含 ../ 时绝不能拿来拼路径写文件。"""
+        svc = self._svc()
+        cfg = svc.load_config()
+        cfg.sites.append(SiteConfig(id='bad', name='bad', kind=KIND_TEMPLATE,
+                                    template='../../evil'))
+        svc.save_config(cfg)
+        self._wipe_templates()
+
+        self._svc()
+
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '..', 'evil.json')),
+                         '模板 id 里的 ../ 逃出了数据目录')
+
+
+class TestFailureIndex(SelfHealCase):
+    """list_sites 用的一次性失败索引，结果必须和"逐站点查"一致。"""
+
+    def _seed(self, svc):
+        # 用"刚刚"的时间戳：历史文件超过保留期会被压缩掉，
+        # 写死 100/200 这种远古 ts 会让记录在压缩时消失（踩过）。
+        base = int(time.time()) - 10
+        svc.history().append([
+            {'ts': base + 1, 'site_id': 'a', 'ok': False, 'error_kind': 'unclear'},
+            {'ts': base + 2, 'site_id': 'a', 'ok': False, 'error_kind': 'timeout'},
+            {'ts': base + 3, 'site_id': 'a', 'ok': False, 'error_kind': 'unclear'},
+            {'ts': base + 4, 'site_id': 'a', 'ok': True,  'error_kind': ''},
+            {'ts': base + 5, 'site_id': 'b', 'ok': False, 'error_kind': 'http_403'},
+        ])
+
+    def test_matches_per_site_query(self):
+        svc = self._svc()
+        self._seed(svc)
+        h = svc.history()
+
+        batch = h.recent_failure_codes(limit=6)
+        one = [r['code'] for r in h.recent_failures('a', limit=6)]
+
+        self.assertEqual(batch['a'], one)
+        self.assertEqual(batch['a'], ['unclear', 'timeout', 'unclear'])
+        self.assertEqual(batch['b'], ['http_403'])
+
+    def test_limit_keeps_newest(self):
+        svc = self._svc()
+        self._seed(svc)
+        got = svc.history().recent_failure_codes(limit=2)
+        self.assertEqual(got['a'], ['unclear', 'timeout'])
+
+
+class TestTemplateFieldFallback(SelfHealCase):
+    """kind=template 但 template 字段空着的老配置。"""
+
+    def test_restore_uses_site_id_when_template_empty(self):
+        svc = self._svc()
+        cfg = svc.load_config()
+        cfg.sites.append(SiteConfig(id='v2ex', name='V2EX',
+                                    kind=KIND_TEMPLATE, template='',
+                                    homepage='https://www.v2ex.com/'))
+        svc.save_config(cfg)
+        self._wipe_templates()
+
+        self._svc()
+
+        self.assertTrue(os.path.isfile(self._tpl_path()), '应按站点 id 补回模板')
+
+    def test_engine_resolves_by_site_id(self):
+        from app.engine import _tpl_of
+        self._write_site()
+        svc = self._svc()                       # 重启一次，模板被补回
+        self.assertTrue(_tpl_of(svc.load_config().site('v2ex')).get('flow'))
+
+        bare = SiteConfig(id='v2ex', name='V2EX', kind=KIND_TEMPLATE,
+                          template='', homepage='https://www.v2ex.com/')
+        self.assertTrue(_tpl_of(bare).get('flow'),
+                        'template 空时要用站点 id 找到模板')
 
 
 if __name__ == '__main__':

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import re
@@ -515,6 +516,29 @@ class History:
             'rate': (round(ok_n * 100.0 / total, 1) if total else None),
             'top_reason': top,
         }
+
+    def recent_failure_codes(self, limit: int = 6) -> Dict[str, List[str]]:
+        """一次扫描，给出**每个站点**最近 N 次失败的归类 code（时间倒序）。
+
+        为什么要有批量版：站点列表里每个站点都要这份数据，而逐个调用
+        recent_failures() 会把同一个历史文件**重复解析 N 遍** ——
+        站点越多越慢，而列表页每 60 秒就会刷一次。这里一次读完即可。
+
+        只统计失败记录；成功记录不参与。
+        """
+        buckets: Dict[str, List] = {}
+        for e in self.iter_entries():
+            if _bool(e.get('ok')):
+                continue
+            sid = str(e.get('site_id') or '')
+            buckets.setdefault(sid, []).append(
+                (_int(e.get('ts')), self._reason_of(e)))
+        out: Dict[str, List[str]] = {}
+        for sid, items in buckets.items():
+            # 只需要最近 limit 条：用堆比整体排序省一半以上（历史可能上万条）
+            top = heapq.nlargest(limit, items, key=lambda x: x[0])
+            out[sid] = [code for _, code in top]
+        return out
 
     @staticmethod
     def _reason_of(e: Dict[str, Any]) -> str:

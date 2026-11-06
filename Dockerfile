@@ -48,9 +48,19 @@ RUN set -eux; \
 
 WORKDIR /app
 
-# 先装依赖，利用镜像层缓存：改代码不会重新装依赖
+# playwright 包自带 driver（几十 MB，但不含浏览器二进制），只服务"连外部 Chrome 回放
+# 录制站点"这一条路径。默认装上，行为与以前完全一致。
+#
+# 完全不需要浏览器时可以构建更小的镜像：
+#     docker build --build-arg WITH_BROWSER=0 -t autocheckin .
+# ⚠️ 装完必须**在同一个 RUN 里**卸载：跨层删除不会减小镜像体积
+#    （文件仍在上一层里，拉取照样要下载）。
+ARG WITH_BROWSER=1
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt \
+ && if [ "$WITH_BROWSER" = "0" ]; then \
+        pip uninstall -y playwright pyee greenlet >/dev/null 2>&1 || true; \
+    fi
 
 COPY app /app/app
 

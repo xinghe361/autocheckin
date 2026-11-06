@@ -20,7 +20,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .models import (ACTION_CLICK, ACTION_FILL, ACTION_GOTO,
                      ACTION_WAIT, Step)

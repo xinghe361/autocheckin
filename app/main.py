@@ -218,40 +218,41 @@ def create_service(settings: Settings):
     """构建服务对象（含加密盒与浏览器）。"""
     from . import service as SV
 
-    browser = None
+    # 只建一个 Service。
+    # 以前为了先读 remote_cdp_url 又建了个临时 Service —— 启动时等于把
+    # 密钥文件、配置、模板目录各走一遍（模板自愈也会跑两次），纯属白做。
+    # 现在先建好服务，再从它读配置，最后把浏览器挂上去。
+    svc = SV.Service(settings.data_dir, version=settings.version,
+                     env_key=settings.env_key or None,
+                     proxy=settings.proxy)
+
     if not _env_bool('DISABLE_BROWSER', False):
         try:
             from .browser import BrowserRunner, browser_available
             if browser_available():
-                # remote_cdp_url / browser_path / headless 都存在配置里，
-                # 所以在建服务之前先读一次配置。
+                # remote_cdp_url / browser_path / headless 都存在配置里。
                 #
                 # ⚠️ 以前这里只写 BrowserRunner(headless=True)，**没把配置传进去** ——
                 # 于是界面上填的"连接外部 Chrome 调试端口"被完全忽略，
                 # 而且不报错（用户会以为配好了却一直走本地浏览器/不可用）。
                 # 实测发现。
                 try:
-                    _cfg = SV.Service(settings.data_dir,
-                                      version=settings.version,
-                                      env_key=settings.env_key or None,
-                                      proxy=settings.proxy).load_config()
+                    _cfg = svc.load_config()
                     _cdp = getattr(_cfg, 'remote_cdp_url', '') or ''
                     _bpath = getattr(_cfg, 'browser_path', '') or ''
                     _headless = bool(getattr(_cfg, 'headless', True))
                 except Exception:                               # noqa: BLE001
                     _cdp, _bpath, _headless = '', '', True
-                browser = BrowserRunner(headless=_headless,
-                                        browser_path=_bpath,
-                                        remote_cdp_url=_cdp)
+                svc.browser = BrowserRunner(headless=_headless,
+                                            browser_path=_bpath,
+                                            remote_cdp_url=_cdp)
                 if _cdp:
                     print('[启动] 浏览器：连接外部 Chrome（%s）'
                           % _cdp.split('@')[-1])
         except Exception:  # noqa: BLE001
-            browser = None
+            pass
 
-    return SV.Service(settings.data_dir, version=settings.version,
-                      env_key=settings.env_key or None,
-                      proxy=settings.proxy, browser=browser)
+    return svc
 
 
 def main(argv: Optional[List[str]] = None) -> int:

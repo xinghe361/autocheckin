@@ -12,7 +12,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from .schedule import MODE_DAILY, MODE_SUCCESS_BASED, SiteSchedule
+from .schedule import MODE_DAILY, SiteSchedule
 
 
 # --------------------------------------------------------------------------

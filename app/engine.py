@@ -41,6 +41,19 @@ class FlowOutcome:
 Fetcher = Callable[[str, str, Optional[bytes]], HttpResponse]
 
 
+def _tpl_of(site: SiteConfig) -> Dict[str, Any]:
+    """站点当前生效的模板。
+
+    template 字段为空时回退到站点 id —— 老配置里两种写法都出现过，
+    只认 site.template 会让 "kind=template 但 template 空着" 的站点
+    查不到模板，又退化成"判定不了结果"（这正是线上踩过的坑）。
+    """
+    if site.kind != KIND_TEMPLATE:
+        return {}
+    tid = str(getattr(site, 'template', '') or site.id or '')
+    return template_by_id(tid) if tid else {}
+
+
 def _render(text: str, variables: Dict[str, str]) -> str:
     """把 {var} 占位符替换成实际值。"""
     if not text:
@@ -269,7 +282,7 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
 
     cookie_header：该站点的登录 Cookie 头。没有它就只能拿到未登录页面。
     """
-    tpl = template_by_id(site.template) if site.kind == KIND_TEMPLATE else {}
+    tpl = _tpl_of(site)
     flow = list(tpl.get('flow') or [])
     if site.steps:
         # 自定义站点若填的是 http 步骤，也可走这条路
@@ -367,7 +380,7 @@ def needs_browser(site: SiteConfig) -> bool:
     if site.need_browser:
         return True
     if site.kind == KIND_TEMPLATE:
-        tpl = template_by_id(site.template)
+        tpl = _tpl_of(site)
         return bool(tpl.get('need_browser'))
     # 自定义站点：只有步骤里含浏览器动作才需要浏览器。
     # 全是 get/post/extract_regex 的站点应当走纯请求（否则纯请求分支永远到不了）。
@@ -391,7 +404,7 @@ def check_cookie_valid(site: SiteConfig, cookie_header: str,
         所以没法用页面内容判断登录态 —— 那就老实说"无法只读判断"，
         让用户从真正的签到结果里看。绝不能因为"页面被拦"就报 Cookie 失效。
     """
-    tpl = template_by_id(site.template) if site.kind == KIND_TEMPLATE else {}
+    tpl = _tpl_of(site)
     url = tpl.get('mission_url') or site.homepage
     if not url:
         return 0, '该站点没有可用的检查地址'

@@ -34,7 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .plugins import (PLUGIN_ID_RE, PluginStore, validate_template)
 

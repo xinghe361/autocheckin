@@ -48,7 +48,7 @@ from .recorder import StepRecorder, merge_steps
 from .runner import Runner
 from .store import RuntimeState, Store
 from . import templates as T
-from .plugins import PluginStore
+from .plugins import PLUGIN_ID_RE, PluginStore
 
 
 def _bundled_plugins_dir() -> str:
@@ -160,7 +160,11 @@ class Service:
             if str(getattr(site, 'kind', '')) != KIND_TEMPLATE:
                 continue
             tid = str(getattr(site, 'template', '') or site.id or '').strip()
-            if not tid or T.template_by_id(tid):
+            # 只认合法模板 id 再拼路径：template 字段来自配置（可手改），
+            # 若含 "../" 就能把文件写到数据目录之外。这里挡住。
+            if not PLUGIN_ID_RE.match(tid or ''):
+                continue
+            if T.template_by_id(tid):
                 continue
             need.append(tid)
         if not need:
@@ -545,6 +549,13 @@ class Service:
         """站点列表（含下一次运行时间与连败状态，供界面展示）。"""
         cfg = self.load_config()
         state = self.load_state()
+        # 只有"确实有站点连败 >=3"时才扫历史；正常情况一次都不用扫。
+        # 扫也只扫一遍，给所有站点共用 —— 逐个站点查会把历史文件重复解析 N 遍，
+        # 而列表页每 60 秒就刷一次。
+        fail_map: Dict[str, List[str]] = {}
+        if any(int((s.state or {}).get('consecutive_failures') or 0) >= 3
+               for s in cfg.sites):
+            fail_map = self.history().recent_failure_codes(limit=6)
         out = []
         for s in cfg.sites:
             st = s.state or {}
@@ -580,7 +591,8 @@ class Service:
                 # 疑似模板过期：连续失败且失败原因基本都是 rule 大类
                 # （判定不了/步骤失败），而不是网络或登录类。
                 # 这样用户一眼能分辨"该去查模板"还是"该去查网络/Cookie"。
-                'template_stale': self._template_stale(s),
+                'template_stale': self._template_stale(
+                    s, fail_map.get(s.id) if fail_map else None),
                 # 登录态摘要：界面要显示"未配置 / 已配置 / 已失效"
                 # 注意这里【不含任何 Cookie 内容】，只有状态与数量
                 'has_cookie': bool(s.cookie_enc),
@@ -601,7 +613,8 @@ class Service:
             })
         return out
 
-    def _template_stale(self, site: SiteConfig) -> bool:
+    def _template_stale(self, site: SiteConfig,
+                        fail_codes: Optional[List[str]] = None) -> bool:
         """判断某站点是否"疑似模板过期"。
 
         依据：连续失败达到一定次数，且最近这些失败里绝大多数是 rule 大类
@@ -611,6 +624,10 @@ class Service:
         为什么不能只看连败次数：连败 3 次可能是网络抽风（network），
         也可能是 Cookie 过期（登录类）。只报"连败"用户分不清该查什么；
         回看失败原因本身才能下对结论。
+
+        fail_codes：调用方已经批量算好的"最近 6 次失败归类"。
+        列表页会传进来复用，避免每个站点各扫一遍历史文件；
+        传 None 时退回单站点查询（单站点场景够用）。
         """
         from .reasons import category_of
         st = site.state or {}
@@ -622,13 +639,17 @@ class Service:
         if (str(getattr(site, 'kind', '')) == KIND_TEMPLATE
                 and not T.template_by_id(getattr(site, 'template', '') or site.id)):
             return False
-        recent = self.history().recent_failures(site.id, limit=6)
-        if not recent:
+        if fail_codes is None:
+            codes = [r['code'] for r in
+                     self.history().recent_failures(site.id, limit=6)]
+        else:
+            codes = list(fail_codes)
+        if not codes:
             return False
-        rule_n = sum(1 for r in recent if category_of(r['code']) == 'rule')
+        rule_n = sum(1 for c in codes if category_of(c) == 'rule')
         # 最近失败里 rule 类占大多数（>=60% 且至少 3 条）才提示，
         # 容忍个别网络抖动混在其中，避免一两次抽风就误报"模板过期"。
-        return rule_n >= 3 and rule_n * 2 >= len(recent)
+        return rule_n >= 3 and rule_n * 2 >= len(codes)
 
     def get_site(self, site_id: str) -> Optional[SiteConfig]:
         return self.load_config().site(site_id)

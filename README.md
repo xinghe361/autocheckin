@@ -27,7 +27,7 @@ WebDAV 备份，以及**录制你的操作**来新增任意站点。
 | 备份 | WebDAV，支持配置恢复；密钥可单独备份 |
 | 安全 | 默认需登录、凭据 Fernet 加密、容器带 `no-new-privileges` |
 | 依赖 | 除 `cryptography` 外**全为标准库**（**不含浏览器**，见下） |
-| 镜像 | 约 0.2GB（基础镜像 `python:3.12-slim`，不带浏览器） |
+| 镜像 | 约 0.2GB（基础镜像 `python:3.12-slim`，不带浏览器）；完全不用浏览器时可用 `--build-arg WITH_BROWSER=0` 再省几十 MB |
 
 > **关于浏览器**：V2EX / NodeSeek / Chiphell 站点模板全部走**纯 HTTP 请求**，不需要浏览器；
 > 抓 Cookie 靠你自己浏览器里的扩展，录制脚本也注入在你自己的浏览器里。
