@@ -6,10 +6,8 @@ web.py 里的路由只是薄薄一层转发。
 
 from __future__ import annotations
 
-import json
 import os
 import random
-import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,47 +47,8 @@ from .recorder import StepRecorder, merge_steps
 from .runner import Runner
 from .store import RuntimeState, Store
 from . import templates as T
-from .plugins import PLUGIN_ID_RE, RESERVED_IDS, PluginStore, validate_template
+from .plugins import PluginStore
 
-
-def _bundled_plugins_dir() -> str:
-    """随源码/镜像发布的那份 site-plugins 目录（只作为"补缺"来源）。
-
-    容器里被 COPY 到 /app/site-plugins，仓库里就是 <root>/site-plugins。
-    两者的相对位置一致：本文件在 <root>/app/service.py，上两级即 <root>。
-    不存在时返回空串（不报错：这只是兜底，不是运行必需）。
-    """
-    env = (os.environ.get('AUTOCHECKIN_BUNDLED_PLUGINS') or '').strip()
-    if env:
-        return env if os.path.isdir(env) else ''
-    guess = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'site-plugins')
-    return guess if os.path.isdir(guess) else ''
-
-
-def _bundled_template_files() -> Dict[str, str]:
-    """镜像自带的模板文件（id -> 路径）。
-
-    只用来"补缺/直装"，不参与运行时读取顺序（读还是走 PluginStore）。
-    示例文档（RESERVED_IDS）在这里就排除，免得它混进「可选站点」。
-    """
-    d = _bundled_plugins_dir()
-    if not d:
-        return {}
-    out: Dict[str, str] = {}
-    try:
-        names = os.listdir(d)
-    except OSError:
-        return {}
-    for n in names:
-        if not n.lower().endswith('.json') or n.startswith('.'):
-            continue
-        tid = n[:-5]
-        if tid in RESERVED_IDS:
-            continue
-        out[tid] = os.path.join(d, n)
-    return out
 
 # 影响"下次运行时间"的站点字段。
 # 这些字段一变，已排的 next_run_at 就必须作废重算 —— 否则旧值会被一直沿用
@@ -159,88 +118,8 @@ class Service:
         # 那些 template_by_id() 调用不需要改（也不用到处传 store）。
         self.plugins = PluginStore(data_dir)
         T.set_plugin_provider(self.plugins.load)
-        # 补齐"站点还在、模板文件却没了"的情况（升级兼容）
-        self._restore_missing_templates()
-
-    # ---------------------------------------------------------- 模板自愈
-    def _restore_missing_templates(self) -> None:
-        """把配置里引用、但数据目录里已不存在的模板，从内置目录复制回来。
-
-        为什么需要：1.4.14 起模板全部外置到 site-plugins/*.json，镜像里不再
-        内置 Python 版的模板 dict。老用户升级后，config.json 里还是
-        `kind=template, template=v2ex`，但数据目录 templates/ 是空的 ——
-        于是 template_by_id() 返回 {}，流程为空、一个请求都不发，
-        最后必然落到"判定不了结果"。这个错误看起来像站点改版，实际是
-        **模板文件缺失**，会把用户引去改关键词、跑 AI，完全治不到点上。
-
-        只补"缺的那个"，绝不覆盖已存在的文件：用户可能手改过、
-        或同步到了更新的版本，覆盖等于把他的修改冲掉。
-        """
-        try:
-            cfg = self.load_config()
-        except Exception:                                       # noqa: BLE001
-            return
-        need = []
-        for site in (cfg.sites or []):
-            if str(getattr(site, 'kind', '')) != KIND_TEMPLATE:
-                continue
-            tid = str(getattr(site, 'template', '') or site.id or '').strip()
-            # 只认合法模板 id 再拼路径：template 字段来自配置（可手改），
-            # 若含 "../" 就能把文件写到数据目录之外。这里挡住。
-            if not PLUGIN_ID_RE.match(tid or ''):
-                continue
-            if T.template_by_id(tid):
-                continue
-            need.append(tid)
-        if not need:
-            return
-
-        src_dir = _bundled_plugins_dir()
-        if not src_dir:
-            return
-        dst_dir = self.plugins.ensure_dir()
-        restored = []
-        for tid in need:
-            src = os.path.join(src_dir, '%s.json' % tid)
-            dst = os.path.join(dst_dir, '%s.json' % tid)
-            if not os.path.isfile(src) or os.path.exists(dst):
-                continue
-            try:
-                shutil.copyfile(src, dst)
-                restored.append(tid)
-            except OSError:
-                continue
-        if restored:
-            self.plugins.load(force=True)
-            self.log('已从内置模板补回 %d 个缺失的模板：%s'
-                     % (len(restored), '、'.join(restored)))
 
     # ---------------------------------------------------------- 插件模板
-    def _bundled_templates(self) -> Dict[str, Dict[str, Any]]:
-        """镜像里自带的那批模板（id -> 模板）。
-
-        用途：让「可选站点」把**项目文件夹里的模板**也列出来，点「加入」就
-        直接装好，不必先同步再到别处找。已同步/已存在的同名模板以数据目录
-        里的为准（那是更新过的版本）。
-        """
-        out: Dict[str, Dict[str, Any]] = {}
-        for tid, path in _bundled_template_files().items():
-            if T.template_by_id(tid):
-                continue                       # 本地已有，跳过
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    raw = json.load(f)
-            except (OSError, ValueError):
-                continue
-            items = raw if isinstance(raw, list) else [raw]
-            for it in items:
-                tpl, why = validate_template(it, os.path.basename(path))
-                if why or tpl.get('id') in out:
-                    continue
-                tpl['source'] = 'image'        # 镜像自带（未落盘）
-                out[tpl['id']] = tpl
-        return out
-
     def list_templates(self) -> List[Dict[str, Any]]:
         """所有可选模板（已同步 + 镜像自带），标注是否已加入站点。
 
@@ -250,13 +129,8 @@ class Service:
             have = {s.id for s in self.load_config().sites}
         except Exception:                                       # noqa: BLE001
             have = set()
-        merged: Dict[str, Dict[str, Any]] = {}
-        for t in T.available_templates():
-            merged[t['id']] = t
-        for tid, t in self._bundled_templates().items():
-            merged.setdefault(tid, t)
         out = []
-        for t in sorted(merged.values(), key=lambda x: x['id']):
+        for t in T.available_templates():
             out.append({
                 'id': t['id'],
                 'name': t.get('name', t['id']),
@@ -270,33 +144,12 @@ class Service:
             })
         return out
 
-    def _materialize_bundled(self, tid: str) -> Dict[str, Any]:
-        """把镜像自带的模板复制到数据目录，然后返回它（失败返回空 dict）。
-
-        这样「可选站点」里点「加入」不用先去同步：镜像里本来就有这份文件。
-        """
-        src = _bundled_template_files().get(tid)
-        if not src:
-            return {}
-        try:
-            dst_dir = self.plugins.ensure_dir()
-            dst = os.path.join(dst_dir, os.path.basename(src))
-            if not os.path.exists(dst):
-                shutil.copyfile(src, dst)
-            self.plugins.load(force=True)
-        except OSError:
-            return {}
-        return T.template_by_id(tid)
-
     def install_template(self, tid: str) -> Dict[str, Any]:
         """把一个模板加入站点（幂等）。
 
         参数按模板预置好（关键词/请求头/流程），加入后可在站点页改。
         """
         tpl = T.template_by_id(tid)
-        if not tpl:
-            # 「可选站点」里的条目可能只是镜像自带、还没落盘 —— 直接装。
-            tpl = self._materialize_bundled(tid)
         if not tpl:
             raise ValueError(
                 '找不到模板「%s」：可能还没同步到本地。'
@@ -347,16 +200,39 @@ class Service:
             pass
         return ''
 
-    def sync_plugins(self, source: str = '', manual: bool = True
+    def check_template_updates(self) -> Dict[str, Any]:
+        """检查远端有没有更新版本的模板（只看 sha，不下载）。"""
+        from .pluginsync import DEFAULT_TEMPLATE_SOURCE, SyncError
+        cfg = self.load_config()
+        src = ((cfg.plugin_sync_source or '').strip() or DEFAULT_TEMPLATE_SOURCE)
+        try:
+            return self._plugin_sync().check_updates(src)
+        except SyncError as e:
+            raise ValueError(str(e)) from e
+
+    def update_templates(self, ids: Optional[List[str]] = None
+                         ) -> Dict[str, Any]:
+        """更新模板：传 ids 只更新这几个，否则全部更新。
+
+        和「立即同步」走同一条路（同一来源、同样的校验），区别只是
+        可以只挑某几个文件，不去动其它模板。
+        """
+        return self.sync_plugins(only=ids)
+
+    def sync_plugins(self, source: str = '', manual: bool = True,
+                     only: Optional[List[str]] = None
                      ) -> Dict[str, Any]:
-        """拉一次远端模板。manual=True 时失败直接把原因抛给调用方。"""
+        """拉一次远端模板。manual=True 时失败直接把原因抛给调用方。
+
+        only：只更新这几个模板（「更新模板」用），None = 全量。
+        """
         from .pluginsync import DEFAULT_TEMPLATE_SOURCE, SyncError
         cfg = self.load_config()
         # 没填就用项目自带的模板目录作为默认来源：
         # 界面本来就预填了它，这里是手滑清空后点「立即同步」的兜底。
         src = ((source or getattr(cfg, 'plugin_sync_source', '') or '').strip()
                or DEFAULT_TEMPLATE_SOURCE)
-        report = self._plugin_sync().sync(src)
+        report = self._plugin_sync().sync(src, only=only)
         now = int(time.time())
         state = self.load_state()
         state.set('_plugin_sync_at', now)

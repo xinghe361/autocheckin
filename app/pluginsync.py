@@ -27,6 +27,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -34,9 +35,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from .plugins import (PLUGIN_ID_RE, PluginStore, validate_template)
+from .plugins import (PLUGIN_ID_RE, RESERVED_IDS, PluginStore,
+                      validate_template)
 
 # 一次同步最多取多少个文件（防止把数据目录塞满）
 MAX_FILES = 50
@@ -192,9 +194,13 @@ def _fetch(url: str, proxy: str = '', limit: int = MAX_BYTES
     return data
 
 
-def _list_repo_files(owner_repo: str, path: str, proxy: str
-                     ) -> List[Tuple[str, str]]:
-    """用 GitHub API 列目录，返回 [(文件名, 下载地址), ...]（只取 .json）。"""
+def _list_repo_files(owner_repo: str, path: str, proxy: str,
+                     with_sha: bool = False) -> List[Tuple]:
+    """用 GitHub API 列目录，返回 [(文件名, 下载地址[, sha]), ...]（只取 .json）。
+
+    with_sha=True 时带上 git blob sha —— 「检查更新」拿它和本地记录比对，
+    不用把每个文件都下载一遍。
+    """
     api = 'https://api.github.com/repos/%s/contents/%s' % (
         owner_repo, urllib.parse.quote(path.strip('/')))
     raw = _fetch(api, proxy, limit=1024 * 1024)
@@ -208,7 +214,7 @@ def _list_repo_files(owner_repo: str, path: str, proxy: str
         items = [items]
     if not isinstance(items, list):
         raise SyncError('GitHub 返回结构异常')
-    out: List[Tuple[str, str]] = []
+    out: List[Tuple] = []
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -222,12 +228,25 @@ def _list_repo_files(owner_repo: str, path: str, proxy: str
         url = str(it.get('download_url') or '')
         if not url:
             continue
-        out.append((name, url))
+        out.append((name, url, str(it.get('sha') or '')) if with_sha
+                   else (name, url))
     if not out:
         raise SyncError('这个目录里没有 .json 模板文件')
     if len(out) > MAX_FILES:
         raise SyncError('文件太多（%d 个，上限 %d）' % (len(out), MAX_FILES))
     return sorted(out)
+
+
+def git_blob_sha(data: bytes) -> str:
+    """算 git blob 的 sha1（和 GitHub API 返回的 sha 同一种算法）。
+
+    用途：不需要下载文件就能判断"远端这份和我本地这份是不是同一内容"。
+    """
+    h = hashlib.sha1()
+    h.update(b'blob %d\0' % len(data))
+    h.update(data)
+    return h.hexdigest()
+
 
 
 # ---------------------------------------------------------------------------
@@ -253,29 +272,50 @@ class PluginSync:
         except (OSError, ValueError):
             return {}
 
-    def _write_state(self, files: List[str], source: str) -> None:
+    def _write_state(self, files: List[str], source: str,
+                     shas: Optional[Dict[str, str]] = None) -> None:
         self.store.ensure_dir()
         tmp = self._state_path() + '.tmp'
+        payload = {'files': sorted(files), 'source': source,
+                   'at': int(time.time())}
+        if shas:
+            # 远端每个文件的 git blob sha：下次「检查更新」不用再下载一遍
+            payload['shas'] = {k: v for k, v in shas.items() if v}
         with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({'files': sorted(files), 'source': source,
-                       'at': int(time.time())}, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self._state_path())
 
     # -- 主流程 --------------------------------------------------------
-    def sync(self, source: str, prune: bool = True) -> Dict[str, Any]:
-        """拉取并写入模板。返回概要；失败抛 SyncError。"""
+    def sync(self, source: str, prune: bool = True,
+             only: Optional[List[str]] = None) -> Dict[str, Any]:
+        """拉取并写入模板。返回概要；失败抛 SyncError。
+
+        only：只更新这几个模板（id 或文件名）。「更新模板」用它做单条更新，
+        不去碰其它文件 —— 用户可能手改过别的模板。
+        """
         kind, a, b = parse_source(source)
         proxy = self.proxy_fn() or ''
 
+        shas: Dict[str, str] = {}
         items: List[Tuple[str, str]] = []
         if kind == 'api':
-            items = _list_repo_files(a, b, proxy)
+            listed = _list_repo_files(a, b, proxy, with_sha=True)
+            items = [(n, u) for (n, u, _sha) in listed]
+            shas = {n: sha for (n, _u, sha) in listed}
         elif kind == 'raw':
             items = [(os.path.basename(urllib.parse.urlparse(a).path)
                       or 'plugin.json', a)]
         else:
             items = [(os.path.basename(urllib.parse.urlparse(a).path)
                       or 'plugin.json', a)]
+
+        if only:
+            want = set()
+            for x in only:
+                x = str(x or '').strip()
+                if x:
+                    want.add(x if x.endswith('.json') else x + '.json')
+            items = [(n, u) for (n, u) in items if n in want]
 
         self.store.ensure_dir()
         written: List[str] = []
@@ -302,6 +342,10 @@ class PluginSync:
                 if why:
                     errors.append({'file': name, 'reason': why})
                     continue
+                if tpl['id'] in RESERVED_IDS:
+                    # 示例文档不落盘：它只用于抄格式，写进 templates/
+                    # 既没用又会让目录看起来多一个"模板"
+                    continue
                 fn = '%s.json' % tpl['id']
                 path = os.path.join(self.store.dir, fn)
                 existed = os.path.exists(path)
@@ -323,9 +367,12 @@ class PluginSync:
             raise SyncError('一个文件都没能下载：%s'
                             % errors[0].get('reason', '未知原因'))
 
-        # 清理：只删"上次同步写过、这次远端没有"的文件；用户手放的不动
+        # 清理：只删"上次同步写过、这次远端没有"的文件；用户手放的不动。
+        #
+        # ⚠️ only 模式必须跳过清理：这次只下载了 1~2 个文件，"远端没有"
+        # 其实只是"这次没请求"，照删会把其它模板全删光（实测踩到过）。
         removed: List[str] = []
-        if prune:
+        if prune and not only:
             prev = self._read_state().get('files') or []
             keep = set(written) | set(updated)
             for fn in prev:
@@ -341,7 +388,17 @@ class PluginSync:
                 except OSError:
                     pass
 
-        self._write_state(sorted(set(written) | set(updated)), source)
+        # 只更新部分文件时，要把旧记录合并进来 —— 否则 state 里就只剩这一两个
+        # 文件，之后 prune 会以为别的都不归它管（文件删不掉了）。
+        files_now = sorted(set(written) | set(updated))
+        if only:
+            prev = self._read_state()
+            files_now = sorted(set(prev.get('files') or []) | set(files_now))
+            old_shas = prev.get('shas') if isinstance(prev.get('shas'), dict) else {}
+            merged = dict(old_shas)
+            merged.update(shas)
+            shas = merged
+        self._write_state(files_now, source, shas)
         got = self.store.load(force=True)
         return {
             'ok': True,
@@ -353,6 +410,67 @@ class PluginSync:
             'total': len(got),
             'at': int(time.time()),
         }
+
+    # -- 检查更新 ------------------------------------------------------
+    def check_updates(self, source: str) -> Dict[str, Any]:
+        """远端有没有比本地更新的模板？只看 sha，不下载文件。
+
+        返回 {'updates': [{id,file}], 'same': n, 'unknown': n, 'at': ts}
+          * updates：远端 sha 与本地记录不一致（或本地没有记录，多为老版本
+            同步过来的）→ 建议更新
+          * same   ：一致
+          * unknown：远端有、本地根本没有这个文件（没装，不是"更新"）
+        """
+        kind, a, b = parse_source(source)
+        proxy = self.proxy_fn() or ''
+        state = self._read_state()
+        known = state.get('shas') if isinstance(state.get('shas'), dict) else {}
+
+        if kind != 'api':
+            # 单文件直链：没有 sha 可比，直接下载一次比内容
+            url = a
+            raw = _fetch(url, proxy)
+            try:
+                remote_obj = json.loads(raw.decode('utf-8'))
+            except (ValueError, UnicodeDecodeError) as e:
+                raise SyncError('远端内容不是 JSON：%s' % e) from e
+            name = os.path.basename(urllib.parse.urlparse(url).path) or 'plugin.json'
+            path = os.path.join(self.store.dir, name)
+            if not os.path.isfile(path):
+                return {'updates': [], 'same': 0, 'unknown': 1,
+                        'missing': [name], 'at': int(time.time())}
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    local_obj = json.load(f)
+            except (OSError, ValueError):
+                local_obj = None
+            same = local_obj == remote_obj
+            return {'updates': [] if same else [{'id': name[:-5], 'file': name}],
+                    'same': 1 if same else 0, 'unknown': 0, 'missing': [],
+                    'at': int(time.time())}
+
+        listed = _list_repo_files(a, b, proxy, with_sha=True)
+        updates: List[Dict[str, str]] = []
+        missing: List[str] = []
+        same = 0
+        unknown = 0
+        for name, _url, sha in listed:
+            tid = name[:-5] if name.endswith('.json') else name
+            if tid in RESERVED_IDS:
+                continue
+            path = os.path.join(self.store.dir, name)
+            if not os.path.isfile(path):
+                missing.append(name)
+                unknown += 1
+                continue
+            if sha and known.get(name) == sha:
+                same += 1
+                continue
+            # 没有记录（老版本同步的）或 sha 变了 → 都算"可更新"
+            updates.append({'id': tid, 'file': name})
+        return {'updates': updates, 'same': same, 'unknown': unknown,
+                'missing': missing, 'source': source,
+                'at': int(time.time())}
 
 
 # ---------------------------------------------------------------------------

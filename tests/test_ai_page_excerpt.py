@@ -172,8 +172,9 @@ class TestDefaultTemplateSource(unittest.TestCase):
         seen = {}
 
         class FakeSync:
-            def sync(self, src):
+            def sync(self, src, only=None):
                 seen['src'] = src
+                seen['only'] = only
                 return {'added': [], 'updated': [], 'removed': [], 'errors': []}
 
         with mock.patch.object(Service, '_plugin_sync', return_value=FakeSync()):

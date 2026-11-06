@@ -1,16 +1,14 @@
-"""模板自愈与"模板缺失"报错。
+"""模板来源（只从 GitHub）与「更新模板」。
 
-背景（线上踩到的）：1.4.14 把内置模板外置成 site-plugins/*.json 之后，
-老用户升级上来，config.json 里还引用 v2ex/nodeseek/chiphell，
-但数据目录 templates/ 是空的。于是：
-    template_by_id() 返回 {} → 流程为空 → 一个请求都不发
-    → 结果必然是 unclear（"判定不了结果"）
-    → 界面再据此提示"疑似站点改版"，把人引去改关键词、跑 AI，完全治错方向。
+1.4.14 起站点模板**唯一来源是仓库的 site-plugins/*.json，通过同步落到
+`<数据目录>/templates/`。镜像里不带模板（Dockerfile 里刻意没有 COPY）。
+这里守住四件事：
 
-这里守住三件事：
-    1) 启动时把"配置里引用、但文件已缺失"的模板补回来（绝不覆盖已有文件）；
-    2) 补不回来时报 template_missing，并且归类不算"签到规则"类；
-    3) 这种站点不该被标成"疑似站点改版"。
+  * 配置引用了、但本地没有的模板 → 明确报 template_missing，而不是
+    含糊的"判定不了结果"（线上踩过，会把用户引去改关键词）；
+  * 这种情况下不能提示"疑似站点改版"（原因已经明确了）；
+  * 「检查更新」只看 sha，不下载；
+  * 「更新」只覆盖指定模板，不碰其它文件。
 """
 
 import json
@@ -27,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _tpl_loader import load  # noqa: E402
 
+from app import pluginsync as PS  # noqa: E402
 from app import reasons as R  # noqa: E402
 from app import secrets as S  # noqa: E402
 from app import service as SV  # noqa: E402
@@ -44,9 +43,9 @@ def _tpl_site(sid='v2ex'):
                       fail_keywords=list(t.get('fail_keywords') or []))
 
 
-class SelfHealCase(unittest.TestCase):
+class Case(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='ac_selfheal_')
+        self.dir = tempfile.mkdtemp(prefix='ac_tpl_')
         self.key = S.generate_key()
 
     def _svc(self):
@@ -55,83 +54,26 @@ class SelfHealCase(unittest.TestCase):
     def _tpl_path(self, sid='v2ex'):
         return os.path.join(self.dir, 'templates', '%s.json' % sid)
 
-    def _write_site(self):
+    def _write_site(self, sid='v2ex'):
         svc = self._svc()
         cfg = svc.load_config()
-        cfg.sites.append(_tpl_site())
+        cfg.sites.append(_tpl_site(sid))
         svc.save_config(cfg)
 
-    def _wipe_templates(self):
-        import shutil
-        shutil.rmtree(os.path.join(self.dir, 'templates'), ignore_errors=True)
+    def _seed_tpl(self, sid='v2ex'):
+        """把模板文件放进数据目录（等价于用户已经同步过一次）。"""
+        d = os.path.join(self.dir, 'templates')
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, '%s.json' % sid), 'w', encoding='utf-8') as f:
+            json.dump(load(sid), f, ensure_ascii=False)
 
 
-class TestRestoreOnStartup(SelfHealCase):
-    def test_missing_template_is_restored(self):
-        """升级后 templates/ 空着：重启一次就该自动补回来。"""
-        self._write_site()
-        self._wipe_templates()
-
-        svc = self._svc()                       # 相当于容器重启
-
-        self.assertTrue(os.path.isfile(self._tpl_path()), '模板没被补回')
-        self.assertTrue(svc.load_config().site('v2ex'))
-        from app import templates as T
-        tpl = T.template_by_id('v2ex')
-        self.assertTrue(tpl.get('flow'), '补回来的模板应当有可执行流程')
-
-    def test_existing_file_is_never_overwritten(self):
-        """用户手改过/同步到新版的文件，绝不能被内置的那份冲掉。"""
-        self._write_site()
-        os.makedirs(os.path.join(self.dir, 'templates'), exist_ok=True)
-        custom = dict(load('v2ex'))
-        custom['name'] = '我自己改过的 V2EX'
-        with open(self._tpl_path(), 'w', encoding='utf-8') as f:
-            json.dump(custom, f, ensure_ascii=False)
-
-        self._svc()
-
-        with open(self._tpl_path(), encoding='utf-8') as f:
-            got = json.load(f)
-        self.assertEqual(got['name'], '我自己改过的 V2EX')
-
-    def test_only_referenced_templates_are_restored(self):
-        """只补站点真正引用的，不要把"可选站点"列表塞满。"""
-        self._write_site()
-        self._wipe_templates()
-
-        svc = self._svc()
-
-        # 落盘只补被引用的那个；但「可选站点」还要列出镜像自带的其它模板
-        # （它们还没落盘，点「加入」时才复制）。
-        files = sorted(os.listdir(os.path.join(self.dir, 'templates')))
-        self.assertEqual(files, ['v2ex.json'])
-        rows = {t['id']: t for t in svc.list_templates()}
-        self.assertIn('v2ex', rows)
-        self.assertTrue(rows['v2ex']['installed'], '配置里已有该站点')
-        others = [t for t in rows.values() if t['id'] != 'v2ex']
-        self.assertTrue(others, '镜像自带模板应出现在可选列表里')
-        self.assertTrue(all(t['source'] == 'image' for t in others))
-        self.assertNotIn('example', rows, '示例文档不该出现在可选站点')
-
-    def test_no_sites_means_no_restore(self):
-        """零站点的新装用户：保持零模板（模板靠同步获取，符合产品设计）。"""
-        self._svc()
-        self.assertFalse(os.path.isdir(os.path.join(self.dir, 'templates'))
-                         and os.listdir(os.path.join(self.dir, 'templates')))
-
-
-class TestTemplateMissing(SelfHealCase):
+class TestMissingTemplate(Case):
     def test_reports_template_missing_not_unclear(self):
-        """模板补不回来时，必须明确说"缺模板"，而不是"判定不了结果"。"""
+        """本地没有模板文件 → 说清"缺文件"，而不是"判定不了结果"。"""
         self._write_site()
-        self._wipe_templates()
-        with mock.patch.dict(os.environ,
-                             {'AUTOCHECKIN_BUNDLED_PLUGINS': '/nonexistent'}):
-            svc = self._svc()                   # 没有内置目录可补
-            site = svc.load_config().site('v2ex')
-            out = checkin_via_http(site, cookie_header='a=1')
-
+        svc = self._svc()
+        out = checkin_via_http(svc.load_config().site('v2ex'), cookie_header='a=1')
         self.assertEqual(out.error_kind, 'template_missing')
         self.assertIn('模板', out.message)
         self.assertIn('不是站点改版', out.message)
@@ -142,90 +84,47 @@ class TestTemplateMissing(SelfHealCase):
         self.assertEqual(r['code'], 'template_missing')
         self.assertNotEqual(r['category'], 'rule')
 
-    def test_not_flagged_as_stale_template(self):
-        """模板本来就缺着时，不该再说"疑似站点改版"。"""
+    def test_not_flagged_as_stale(self):
+        """模板本来就缺着，不该再说"疑似站点改版"。"""
         self._write_site()
-        self._wipe_templates()
-        with mock.patch.dict(os.environ,
-                             {'AUTOCHECKIN_BUNDLED_PLUGINS': '/nonexistent'}):
-            svc = self._svc()
-            site = svc.load_config().site('v2ex')
-            site.state = {'consecutive_failures': 5}
-            hist = svc.history()
-            with mock.patch.object(hist, 'recent_failures',
-                                   return_value=[{'code': 'unclear', 'ts': 1}] * 6):
-                self.assertFalse(svc._template_stale(site))
-
-    def test_rule_failures_still_flagged(self):
-        """反过来：模板确实在、但连续判定失败，仍要提示改版。"""
-        self._write_site()
-        svc = self._svc()                       # 模板会自动补回
+        svc = self._svc()
         site = svc.load_config().site('v2ex')
         site.state = {'consecutive_failures': 5}
         hist = svc.history()
         with mock.patch.object(hist, 'recent_failures',
                                return_value=[{'code': 'unclear', 'ts': 1}] * 6):
-            self.assertTrue(svc._template_stale(site),
-                            '模板在却一直判定失败，才是真的改版信号')
+            self.assertFalse(svc._template_stale(site))
 
-
-class TestStepFromField(unittest.TestCase):
-    def test_validator_keeps_from(self):
-        """from 不能被校验器吞掉（吞掉既不报错、结果又对不上）。"""
-        tpl, err = validate_template({
-            'id': 'x1', 'name': 'X1', 'homepage': 'https://a.b/',
-            'flow': [
-                {'action': 'get', 'url': 'https://a.b/1'},
-                {'action': 'extract_regex', 'pattern': r'(\d+)',
-                 'save_as': 'n', 'from': 'first'},
-            ],
-        })
-        self.assertEqual(err, '')
-        self.assertEqual(tpl['flow'][1]['from'], 'first')
-
-    def test_flow_reads_from_first_response(self):
-        """from="first" 要真的从第一个响应里取，而不是永远用最后一个。"""
-        calls = []
-
-        def fetcher(method, url, data):
-            calls.append(url)
-            if url.endswith('/1'):
-                return HttpResponse(status=200, text='token=111', url=url)
-            return HttpResponse(status=200, text='token=222', url=url)
-
-        out = run_http_flow(
-            fetcher=fetcher,
-            flow=[
-                {'action': 'get', 'url': 'https://a.b/1'},
-                {'action': 'get', 'url': 'https://a.b/2'},
-                {'action': 'extract_regex', 'pattern': r'token=(\d+)',
-                 'save_as': 'tk'},
-                {'action': 'extract_regex', 'pattern': r'token=(\d+)',
-                 'save_as': 'tk_first', 'from': 'first'},
-            ],
-            success_kw=['222'], fail_kw=[])
-        self.assertTrue(out.success)
-        self.assertEqual(out.vars['tk'], '222')
-        self.assertEqual(out.vars['tk_first'], '111')
-
-
-class TestRestorePathSafety(SelfHealCase):
-    def test_traversal_template_id_is_ignored(self):
-        """template 字段可手改：含 ../ 时绝不能拿来拼路径写文件。"""
+    def test_rule_failures_still_flagged(self):
+        """反过来：模板在、却一直判定失败，仍要提示改版。"""
+        self._seed_tpl()
+        self._write_site()
         svc = self._svc()
-        cfg = svc.load_config()
-        cfg.sites.append(SiteConfig(id='bad', name='bad', kind=KIND_TEMPLATE,
-                                    template='../../evil'))
-        svc.save_config(cfg)
-        self._wipe_templates()
-
-        self._svc()
-
-        self.assertFalse(os.path.exists(os.path.join(self.dir, '..', 'evil.json')),
-                         '模板 id 里的 ../ 逃出了数据目录')
+        site = svc.load_config().site('v2ex')
+        site.state = {'consecutive_failures': 5}
+        hist = svc.history()
+        with mock.patch.object(hist, 'recent_failures',
+                               return_value=[{'code': 'unclear', 'ts': 1}] * 6):
+            self.assertTrue(svc._template_stale(site))
 
 
-class TestFailureIndex(SelfHealCase):
+class TestTemplateFieldFallback(Case):
+    """kind=template 但 template 字段空着的老配置：用站点 id 找模板。"""
+
+    def test_engine_resolves_by_site_id(self):
+        from app.engine import _tpl_of
+        self._seed_tpl()
+        self._write_site()
+        svc = self._svc()
+        self.assertTrue(_tpl_of(svc.load_config().site('v2ex')).get('flow'))
+
+        bare = SiteConfig(id='v2ex', name='V2EX', kind=KIND_TEMPLATE,
+                          template='', homepage='https://www.v2ex.com/')
+        self.assertTrue(_tpl_of(bare).get('flow'),
+                        'template 空时要用站点 id 找到模板')
+
+
+class TestFailureIndex(Case):
     """list_sites 用的一次性失败索引，结果必须和"逐站点查"一致。"""
 
     def _seed(self, svc):
@@ -259,59 +158,142 @@ class TestFailureIndex(SelfHealCase):
         self.assertEqual(got['a'], ['unclear', 'timeout'])
 
 
-class TestTemplateFieldFallback(SelfHealCase):
-    """kind=template 但 template 字段空着的老配置。"""
+class TestStepFromField(unittest.TestCase):
+    def test_validator_keeps_from(self):
+        """from 不能被校验器吞掉（吞掉既不报错、结果又对不上）。"""
+        tpl, err = validate_template({
+            'id': 'x1', 'name': 'X1', 'homepage': 'https://a.b/',
+            'flow': [
+                {'action': 'get', 'url': 'https://a.b/1'},
+                {'action': 'extract_regex', 'pattern': r'(\d+)',
+                 'save_as': 'n', 'from': 'first'},
+            ],
+        })
+        self.assertEqual(err, '')
+        self.assertEqual(tpl['flow'][1]['from'], 'first')
 
-    def test_restore_uses_site_id_when_template_empty(self):
-        svc = self._svc()
-        cfg = svc.load_config()
-        cfg.sites.append(SiteConfig(id='v2ex', name='V2EX',
-                                    kind=KIND_TEMPLATE, template='',
-                                    homepage='https://www.v2ex.com/'))
-        svc.save_config(cfg)
-        self._wipe_templates()
+    def test_flow_reads_from_first_response(self):
+        """from="first" 要真的从第一个响应里取，而不是永远用最后一个。"""
+        def fetcher(method, url, data):
+            if url.endswith('/1'):
+                return HttpResponse(status=200, text='token=111', url=url)
+            return HttpResponse(status=200, text='token=222', url=url)
 
-        self._svc()
-
-        self.assertTrue(os.path.isfile(self._tpl_path()), '应按站点 id 补回模板')
-
-    def test_engine_resolves_by_site_id(self):
-        from app.engine import _tpl_of
-        self._write_site()
-        svc = self._svc()                       # 重启一次，模板被补回
-        self.assertTrue(_tpl_of(svc.load_config().site('v2ex')).get('flow'))
-
-        bare = SiteConfig(id='v2ex', name='V2EX', kind=KIND_TEMPLATE,
-                          template='', homepage='https://www.v2ex.com/')
-        self.assertTrue(_tpl_of(bare).get('flow'),
-                        'template 空时要用站点 id 找到模板')
+        out = run_http_flow(
+            fetcher=fetcher,
+            flow=[
+                {'action': 'get', 'url': 'https://a.b/1'},
+                {'action': 'get', 'url': 'https://a.b/2'},
+                {'action': 'extract_regex', 'pattern': r'token=(\d+)',
+                 'save_as': 'tk'},
+                {'action': 'extract_regex', 'pattern': r'token=(\d+)',
+                 'save_as': 'tk_first', 'from': 'first'},
+            ],
+            success_kw=['222'], fail_kw=[])
+        self.assertTrue(out.success)
+        self.assertEqual(out.vars['tk'], '222')
+        self.assertEqual(out.vars['tk_first'], '111')
 
 
-class TestBundledDirectInstall(SelfHealCase):
-    """「可选站点」直接列镜像自带模板，点加入即可（不必先同步）。"""
+class TestCheckUpdates(Case):
+    """「检查更新」只看 sha。"""
 
-    def test_listed_before_sync(self):
-        svc = self._svc()
-        rows = {t['id']: t for t in svc.list_templates()}
-        self.assertTrue(rows, '全新安装也应看到镜像自带的模板')
-        self.assertTrue(all(t['source'] == 'image' for t in rows.values()))
-        self.assertFalse(any(t['installed'] for t in rows.values()))
-        self.assertNotIn('example', rows, '示例文档不是可装模板')
+    SRC = 'xinghe361/autocheckin/site-plugins'
 
-    def test_install_without_sync(self):
-        svc = self._svc()
-        self.assertFalse(os.path.exists(self._tpl_path()))
-        out = svc.install_template('v2ex')
-        self.assertTrue(out['ok'])
-        self.assertTrue(os.path.isfile(self._tpl_path()), '加入时应落盘')
-        rows = {t['id']: t for t in svc.list_templates()}
-        self.assertTrue(rows['v2ex']['installed'])
-        self.assertEqual(rows['v2ex']['source'], 'plugin', '落盘后由插件目录读取')
+    def _run(self, listed, state=None):
+        store = mock.Mock(dir=os.path.join(self.dir, 'templates'))
+        store.ensure_dir.return_value = store.dir
+        sync = PS.PluginSync(store, proxy_fn=lambda: '')
+        with mock.patch.object(PS, '_list_repo_files', return_value=listed):
+            return sync.check_updates(self.SRC)
 
-    def test_example_cannot_be_installed(self):
-        svc = self._svc()
-        with self.assertRaises(ValueError):
-            svc.install_template('example')
+    def test_detects_changed_sha(self):
+        self._seed_tpl()
+        got = self._run([('v2ex.json', 'https://x/v2ex.json', 'newsha')])
+        self.assertEqual([u['id'] for u in got['updates']], ['v2ex'])
+
+    def test_same_sha_means_latest(self):
+        self._seed_tpl()
+        state = {'files': ['v2ex.json'], 'shas': {'v2ex.json': 's1'}}
+        with open(os.path.join(self.dir, 'templates', PS.STATE_NAME), 'w',
+                  encoding='utf-8') as f:
+            json.dump(state, f)
+        got = self._run([('v2ex.json', 'https://x/v2ex.json', 's1')])
+        self.assertEqual(got['updates'], [])
+        self.assertEqual(got['same'], 1)
+
+    def test_missing_local_counts_as_unknown_not_update(self):
+        got = self._run([('brandnew.json', 'https://x/b.json', 's9')])
+        self.assertEqual(got['updates'], [])
+        self.assertEqual(got['unknown'], 1)
+
+    def test_example_is_ignored(self):
+        got = self._run([('example.json', 'https://x/e.json', 's')])
+        self.assertEqual(got['updates'], [])
+        self.assertEqual(got['unknown'], 0)
+
+
+class TestUpdateOnly(Case):
+    """「更新」只覆盖指定的模板，不动别的文件。"""
+
+    SRC = 'xinghe361/autocheckin/site-plugins'
+
+    def test_only_updates_given_ids(self):
+        self._seed_tpl('v2ex')
+        self._seed_tpl('chiphell')
+        with open(self._tpl_path('chiphell'), encoding='utf-8') as f:
+            before_chip = f.read()
+
+        new_v2ex = dict(load('v2ex'))
+        new_v2ex['name'] = 'V2EX（新版）'
+        payload = json.dumps(new_v2ex, ensure_ascii=False).encode()
+
+        store = mock.Mock(dir=os.path.join(self.dir, 'templates'))
+        store.ensure_dir.return_value = store.dir
+        store.load.return_value = []
+        sync = PS.PluginSync(store, proxy_fn=lambda: '')
+        with mock.patch.object(PS, '_list_repo_files',
+                               return_value=[('v2ex.json', 'https://x/v2ex.json', 's2'),
+                                             ('chiphell.json', 'https://x/ch.json', 's3')]), \
+                mock.patch.object(PS, '_fetch', return_value=payload):
+            rep = sync.sync(self.SRC, only=['v2ex'])
+
+        self.assertEqual(rep['updated'], ['v2ex.json'])
+        with open(self._tpl_path('v2ex'), encoding='utf-8') as f:
+            after = json.load(f)
+        self.assertEqual(after['name'], 'V2EX（新版）')
+        with open(self._tpl_path('chiphell'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), before_chip, '没点更新的模板不能被动')
+
+
+    def test_single_update_never_prunes_others(self):
+        """只更新一条时，别的同步模板不能被当成"远端已删"删掉。
+
+        踩过：only 模式只下载了 v2ex，prune 却把 state 里记录的其它文件
+        全删了 —— 用户点一次「更新」，模板目录就剩一个。
+        """
+        self._seed_tpl('v2ex')
+        self._seed_tpl('chiphell')
+        state = {'files': ['v2ex.json', 'chiphell.json'],
+                 'shas': {'v2ex.json': 'old', 'chiphell.json': 's3'}}
+        with open(os.path.join(self.dir, 'templates', PS.STATE_NAME), 'w',
+                  encoding='utf-8') as f:
+            json.dump(state, f)
+
+        payload = json.dumps(load('v2ex'), ensure_ascii=False).encode()
+        store = mock.Mock(dir=os.path.join(self.dir, 'templates'))
+        store.ensure_dir.return_value = store.dir
+        store.load.return_value = []
+        sync = PS.PluginSync(store, proxy_fn=lambda: '')
+        with mock.patch.object(PS, '_list_repo_files',
+                               return_value=[('v2ex.json', 'https://x/v2ex.json', 's2'),
+                                             ('chiphell.json', 'https://x/ch.json', 's3')]), \
+                mock.patch.object(PS, '_fetch', return_value=payload):
+            rep = sync.sync(self.SRC, only=['v2ex'])
+
+        self.assertEqual(rep['removed'], [], '单条更新不该删任何东西')
+        self.assertTrue(os.path.isfile(self._tpl_path('chiphell')),
+                        '没点更新的模板必须还在')
 
 
 if __name__ == '__main__':

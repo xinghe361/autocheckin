@@ -402,6 +402,27 @@ class WebApp:
                 raise ApiError('同步失败：%s' % e, 400) from e
             return rep
 
+        @route('GET', '/api/templates/updates')
+        def _templates_updates(q, body):
+            """检查远端有没有更新版本的模板（只看 sha，不下载）。"""
+            try:
+                return self.service.check_template_updates()
+            except ValueError as e:
+                raise ApiError(str(e), 400) from e
+
+        @route('POST', '/api/templates/update')
+        def _templates_update(q, body):
+            """更新模板。body.ids 为空 = 全部更新。"""
+            from .pluginsync import SyncError
+            raw = body.get('ids')
+            ids = None
+            if isinstance(raw, list) and raw:
+                ids = [str(x).strip() for x in raw if str(x).strip()][:50]
+            try:
+                return self.service.update_templates(ids)
+            except SyncError as e:
+                raise ApiError('更新失败：%s' % e, 400) from e
+
         @route('GET', '/api/templates/sync/status')
         def _templates_sync_status(q, body):
             return self.service.plugin_sync_status()
@@ -427,8 +448,8 @@ class WebApp:
             from .models import (NOTIFY_MODE_LABELS, NOTIFY_MODES,
                                  PROXY_INHERIT, PROXY_DIRECT, PROXY_CUSTOM)
             from .notify import ALL_CHANNELS
-            # 用 service 的列表：它包含"镜像自带但还没落盘"的模板，
-            # 也会把示例文档（example）排除掉。
+            # 模板只来自本地 templates/（由 GitHub 同步写入），
+            # 示例文档（example）不算模板。
             return {
                 'version': self.version,
                 'templates': [{'id': t.get('id'), 'name': t.get('name'),
@@ -1297,10 +1318,13 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       并参与签到；没加入的只是"可选"。
       <span id="plugDir"></span>
     </div>
-    <div class="hint" style="margin-top:4px">
-      列表里既有<b>镜像自带</b>的模板，也有<b>同步进来</b>的；点「加入」会直接落盘并生效，不需要先同步。
+    <div class="row" style="gap:8px;align-items:center;margin-top:6px">
+      <button class="b" onclick="checkTplUpdates()">检查更新</button>
+      <button class="b" onclick="updateAllTpl()">全部更新</button>
+      <span class="hint" style="margin:0">模板来自上面的同步来源；有新版时这里会出现「更新」按钮。</span>
     </div>
     <div id="plugErrors"></div>
+    <div id="tplMsg" class="msg"></div>
     <div id="tplList" style="margin-top:10px"></div>
   </div>
 
@@ -3390,16 +3414,19 @@ function loadTemplates(){
         + '</div>'
       : '';
     if(!list.length){
-      $('tplList').innerHTML = '<div class="hint">还没有可选站点。</div>';
+      $('tplList').innerHTML = '<div class="hint">还没有模板。'
+        + '先在上面点「立即同步」把模板从仓库拉下来（来源已预填）。</div>';
       return;
     }
     var rows = list.map(function(t){
       var tags = [];
-      var srcTxt = t.source==='image' ? '镜像自带'
-                 : (t.source==='plugin' ? '已同步' : '本地');
-      tags.push('<span class="tag">'+esc(srcTxt)+'</span>');
       if(t.need_browser) tags.push('<span class="tag">需要浏览器</span>');
-      var btn = t.installed
+      var btn = '';
+      if(TPL_UPDATES[t.id]){
+        btn += '<button class="b pri" onclick="updateTpl(\''+esc(t.id)+'\')">'
+             + '更新</button> ';
+      }
+      btn += t.installed
         ? '<span class="tag">已加入</span>'
         : '<button class="b pri" onclick="installTpl(\''+esc(t.id)+'\')">加入</button>';
       return '<div class="row" style="align-items:center;gap:10px;'
@@ -3422,6 +3449,54 @@ function installTpl(id){
     loadTemplates();
     refreshAll();
   }).catch(function(e){ show('syncMsg', e.message, 'err'); });
+}
+
+/* ---------------- 模板更新 ----------------
+   站点改版时只需更新模板文件，不用重建镜像、也不用重新同步全部。
+   「检查更新」只问 GitHub 要目录的 sha（一次请求，不下载文件）；
+   「更新」按单个模板拉取并覆盖本地那一份。 */
+/* 有新版模板：id -> true */
+var TPL_UPDATES = {};
+
+function checkTplUpdates(){
+  show('tplMsg','检查中…','');
+  api('GET','/api/templates/updates').then(function(d){
+    TPL_UPDATES = {};
+    (d.updates||[]).forEach(function(u){ TPL_UPDATES[u.id] = true; });
+    var n = (d.updates||[]).length;
+    if(n){
+      show('tplMsg','有 '+n+' 个模板可更新：'
+        + (d.updates||[]).map(function(u){ return u.id; }).join('、'), 'ok');
+    }else{
+      show('tplMsg','模板都已是最新' + (d.unknown
+        ? ('（远端还有 '+d.unknown+' 个未安装的模板）') : ''), 'ok');
+    }
+    loadTemplates();
+  }).catch(function(e){ show('tplMsg','检查失败：'+e.message,'err'); });
+}
+
+function updateTpl(id){
+  show('tplMsg','更新「'+id+'」中…','');
+  api('POST','/api/templates/update',{ids:[id]}).then(function(r){
+    delete TPL_UPDATES[id];
+    show('tplMsg','已更新 '+((r.updated||[]).length||1)+' 个模板：'+id,'ok');
+    loadTemplates();
+  }).catch(function(e){ show('tplMsg','更新失败：'+e.message,'err'); });
+}
+
+function updateAllTpl(){
+  if(!Object.keys(TPL_UPDATES).length){
+    show('tplMsg','先点「检查更新」看看有没有新版','' );
+    return;
+  }
+  show('tplMsg','全部更新中…','');
+  api('POST','/api/templates/update',{}).then(function(r){
+    TPL_UPDATES = {};
+    show('tplMsg','已更新 '+(r.updated||[]).length+' 个模板'
+      + (r.added && r.added.length ? ('，新增 '+(r.added||[]).length+' 个') : '')
+      + ((r.errors||[]).length ? ('，'+r.errors.length+' 个失败') : ''),'ok');
+    loadTemplates();
+  }).catch(function(e){ show('tplMsg','更新失败：'+e.message,'err'); });
 }
 
 /* ---------------- 设置 ---------------- */
