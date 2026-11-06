@@ -125,6 +125,8 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
     # 初始响应：让"无请求"路径也有内容可判定
     last_resp: Optional[HttpResponse] = HttpResponse(
         status=initial_status, text=initial_text, url='')
+    # 第一个真实响应：步骤里写 from="first" 时从这里取
+    first_resp: Optional[HttpResponse] = None
 
     for step in (flow or []):
         action = (step.get('action') or '').lower()
@@ -143,6 +145,8 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
             if action == 'get':
                 url = _render(step.get('url', ''), variables)
                 last_resp = fetcher('GET', url, None)
+                if first_resp is None:
+                    first_resp = last_resp
                 trace.append('GET %s -> %s' % (url, last_resp.status))
             elif action == 'post':
                 url = _render(step.get('url', ''), variables)
@@ -155,19 +159,25 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
                 elif isinstance(data, str):
                     body = _render(data, variables).encode('utf-8')
                 last_resp = fetcher('POST', url, body)
+                if first_resp is None:
+                    first_resp = last_resp
                 trace.append('POST %s -> %s' % (url, last_resp.status))
             elif action == 'extract_regex':
-                if last_resp is None:
+                # from="first" 从第一个响应里取，否则用最后一个
+                # （模板里常见的写法：先取令牌，再重取页面确认状态）
+                src = first_resp if str(step.get('from') or '').lower() == 'first' \
+                    else last_resp
+                if src is None:
                     continue
                 pattern = step.get('pattern', '')
-                m = re.search(pattern, last_resp.text or '')
+                m = re.search(pattern, src.text or '')
                 if m:
                     variables[step.get('save_as', 'v')] = m.group(1)
                     trace.append('提取 %s=%s' % (step.get('save_as'), m.group(1)))
                 elif step.get('required'):
                     # 关键令牌取不到：继续往下只会拿字面量 {var} 去请求，
                     # 结果既不可信又会误导排查。直接失败并说明 HTTP 状态。
-                    st = last_resp.status if last_resp else 0
+                    st = src.status if src else 0
                     detail = ('（HTTP %d，可能是被拦截或未登录）' % st
                               if st and (st < 200 or st >= 300)
                               else '（页面内容不含该令牌，通常意味着未登录）')
@@ -264,6 +274,22 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
     if site.steps:
         # 自定义站点若填的是 http 步骤，也可走这条路
         flow = [s.to_dict() for s in site.steps] or flow
+
+    # 模板站点却找不到模板、也没有自带步骤 —— 说清楚是"缺文件"，
+    # 不要说成"判定不了结果"。
+    #
+    # 这块踩过：1.4.14 把内置模板外置成 site-plugins/*.json 之后，老用户升级
+    # 上来数据目录里没有 templates/*.json，template_by_id() 返回 {}，流程为空，
+    # 一个请求都不发，最终落到 unclear（"判定不了结果"）。界面再据此提示
+    # "疑似站点改版"，把用户引去改关键词、跑 AI —— 方向完全错了。
+    if site.kind == KIND_TEMPLATE and not tpl and not flow:
+        tid = str(getattr(site, 'template', '') or site.id or '?')
+        return FlowOutcome(
+            success=False,
+            message='站点模板文件缺失（templates/%s.json 找不到），'
+                    '这不是站点改版。到「设置 → 可选站点」点「重新扫描」，'
+                    '或填好同步来源拉一次模板即可恢复' % tid,
+            hit='unknown', error_kind='template_missing')
 
     mission = tpl.get('mission_url') or site.homepage
     # 模板可选项（NodeSeek 的"试试手气 / 鸡腿×5"）。

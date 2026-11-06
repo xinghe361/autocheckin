@@ -305,6 +305,10 @@ class TestCheckinSiteDispatch(unittest.TestCase):
 
         s = _site_config('v2ex')
         import app.engine as _e
+        import app.templates as _t
+        # 模板站点必须能查到模板，否则会先判成"模板缺失"（不再发请求）
+        _t.set_plugin_provider(lambda: [load('v2ex')])
+        self.addCleanup(_t.set_plugin_provider, None)
         orig = _e._http_fetcher
 
         def spy_fetcher(site, proxy, cookie='', headers_override=None):

@@ -100,6 +100,11 @@ def validate_template(data: Any, source: str = '') -> Tuple[Dict[str, Any], str]
             one['pattern'] = step['pattern']
         if 'save_as' in step:
             one['save_as'] = str(step['save_as'])
+        # from：指定从"哪个响应"里提取（first=第一个响应，其它=最后一个）。
+        # 之前这里被漏掉了，于是模板里写的 from 会被静默丢弃 ——
+        # 提取结果可能对不上，但又不报错，最难查的那类问题。
+        if 'from' in step:
+            one['from'] = str(step['from'])
         if 'data' in step:
             if not isinstance(step['data'], (dict, str)):
                 return bad('第 %d 步的 data 既不是对象也不是字符串' % (i + 1))

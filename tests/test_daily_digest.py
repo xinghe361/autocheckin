@@ -174,18 +174,26 @@ class TestFailureRetry(DigestCase):
 
 class TestTimeGate(DigestCase):
     def test_before_scheduled_time_is_skipped(self):
-        cfg = self.svc.load_config()
+        """时钟冻在本地 10:00、推送时刻设 11:00 —— 必须跳过。
+
+        以前写的是 (now.tm_hour + 1) % 24：23 点会回绕成 0，变成"已经到点"，
+        于是每天的 23:00~23:59 跑测试才红。典型的时间炸弹，冻住时钟最稳。
+        """
+        from unittest import mock
+
         now = time.localtime()
-        # 把推送时刻设到"现在之后"，保证还没到点
-        future = (now.tm_hour + 1) % 24
-        cfg.notify.digest_hour = future
-        cfg.notify.digest_minute = 0
-        self.svc.save_config(cfg)
-        self.seed(1)
-        got = self.svc.maybe_send_digest()      # 不带 force
+        ten = time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
+                           10, 0, 0, 0, 0, -1))
+        with mock.patch('app.service.time.time', return_value=ten):
+            cfg = self.svc.load_config()
+            cfg.notify.digest_hour = 11
+            cfg.notify.digest_minute = 0
+            self.svc.save_config(cfg)
+            self.seed(1)
+            got = self.svc.maybe_send_digest()      # 不带 force
+
         self.assertFalse(got.get('sent'))
-        if future != 0:
-            self.assertIn('还没到', got.get('reason', ''))
+        self.assertIn('还没到', got.get('reason', ''))
         self.assertEqual(self.sent, [])
 
 

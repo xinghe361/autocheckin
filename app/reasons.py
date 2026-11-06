@@ -112,6 +112,10 @@ _CODES: Dict[str, Tuple[str, str, str]] = {
     # -- 运行环境
     'browser_unavailable': ('浏览器不可用', 'env',
                             '容器里的 Chromium 起不来；看容器日志与内存占用'),
+    'template_missing': ('模板文件缺失', 'env',
+                         '这个站点引用的模板 JSON 不在数据目录里（升级后常见）。'
+                         '到「设置 → 可选站点」点「重新扫描」，或填同步来源拉一次；'
+                         '这不是站点改版，别去改关键词'),
     'exception': ('执行异常', 'env',
                   '执行过程中抛了异常；看容器日志里的堆栈'),
 
@@ -161,6 +165,16 @@ def _result(code: str, hint: str = '') -> Dict[str, str]:
         'category_label': cat_name,
         'hint': hint or default_hint,
     }
+
+
+def category_of(code: str) -> str:
+    """已知归类 code 属于哪个大类。
+
+    给"按大类判断"的地方用（例如判断是否该提示模板过期）。
+    不要再拿 code 去调 classify() —— code 本身就是 classify 的产物，
+    再喂回去属于同义反复，读代码的人也容易误以为哪里漏了参数。
+    """
+    return _CODES.get(str(code or ''), _CODES['unknown'])[1]
 
 
 def _by_http_status(kind: str) -> str:

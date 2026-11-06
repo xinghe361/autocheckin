@@ -54,6 +54,13 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
 
+# 站点模板随镜像带一份，**只作为"补缺"用**：
+# 老用户从内置模板版本升级上来，config.json 里还引用 v2ex 等模板，
+# 但数据目录 templates/ 是空的 —— 若不补齐，签到会变成"一个请求都不发",
+# 最终报"判定不了结果"，看起来像站点改版。
+# 启动时只复制"数据目录里缺失的"文件，绝不覆盖已有文件（用户可能手改过）。
+COPY site-plugins /app/site-plugins
+
 # 数据目录：配置、加密密钥、运行状态都放这里
 RUN mkdir -p /data && chmod 700 /data
 VOLUME ["/data"]

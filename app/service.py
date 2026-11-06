@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import random
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -48,6 +49,22 @@ from .runner import Runner
 from .store import RuntimeState, Store
 from . import templates as T
 from .plugins import PluginStore
+
+
+def _bundled_plugins_dir() -> str:
+    """随源码/镜像发布的那份 site-plugins 目录（只作为"补缺"来源）。
+
+    容器里被 COPY 到 /app/site-plugins，仓库里就是 <root>/site-plugins。
+    两者的相对位置一致：本文件在 <root>/app/service.py，上两级即 <root>。
+    不存在时返回空串（不报错：这只是兜底，不是运行必需）。
+    """
+    env = (os.environ.get('AUTOCHECKIN_BUNDLED_PLUGINS') or '').strip()
+    if env:
+        return env if os.path.isdir(env) else ''
+    guess = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'site-plugins')
+    return guess if os.path.isdir(guess) else ''
 
 # 影响"下次运行时间"的站点字段。
 # 这些字段一变，已排的 next_run_at 就必须作废重算 —— 否则旧值会被一直沿用
@@ -117,6 +134,57 @@ class Service:
         # 那些 template_by_id() 调用不需要改（也不用到处传 store）。
         self.plugins = PluginStore(data_dir)
         T.set_plugin_provider(self.plugins.load)
+        # 补齐"站点还在、模板文件却没了"的情况（升级兼容）
+        self._restore_missing_templates()
+
+    # ---------------------------------------------------------- 模板自愈
+    def _restore_missing_templates(self) -> None:
+        """把配置里引用、但数据目录里已不存在的模板，从内置目录复制回来。
+
+        为什么需要：1.4.14 起模板全部外置到 site-plugins/*.json，镜像里不再
+        内置 Python 版的模板 dict。老用户升级后，config.json 里还是
+        `kind=template, template=v2ex`，但数据目录 templates/ 是空的 ——
+        于是 template_by_id() 返回 {}，流程为空、一个请求都不发，
+        最后必然落到"判定不了结果"。这个错误看起来像站点改版，实际是
+        **模板文件缺失**，会把用户引去改关键词、跑 AI，完全治不到点上。
+
+        只补"缺的那个"，绝不覆盖已存在的文件：用户可能手改过、
+        或同步到了更新的版本，覆盖等于把他的修改冲掉。
+        """
+        try:
+            cfg = self.load_config()
+        except Exception:                                       # noqa: BLE001
+            return
+        need = []
+        for site in (cfg.sites or []):
+            if str(getattr(site, 'kind', '')) != KIND_TEMPLATE:
+                continue
+            tid = str(getattr(site, 'template', '') or site.id or '').strip()
+            if not tid or T.template_by_id(tid):
+                continue
+            need.append(tid)
+        if not need:
+            return
+
+        src_dir = _bundled_plugins_dir()
+        if not src_dir:
+            return
+        dst_dir = self.plugins.ensure_dir()
+        restored = []
+        for tid in need:
+            src = os.path.join(src_dir, '%s.json' % tid)
+            dst = os.path.join(dst_dir, '%s.json' % tid)
+            if not os.path.isfile(src) or os.path.exists(dst):
+                continue
+            try:
+                shutil.copyfile(src, dst)
+                restored.append(tid)
+            except OSError:
+                continue
+        if restored:
+            self.plugins.load(force=True)
+            self.log('已从内置模板补回 %d 个缺失的模板：%s'
+                     % (len(restored), '、'.join(restored)))
 
     # ---------------------------------------------------------- 插件模板
     def list_templates(self) -> List[Dict[str, Any]]:
@@ -544,16 +612,20 @@ class Service:
         也可能是 Cookie 过期（登录类）。只报"连败"用户分不清该查什么；
         回看失败原因本身才能下对结论。
         """
-        from .reasons import classify
+        from .reasons import category_of
         st = site.state or {}
         fails = int(st.get('consecutive_failures') or 0)
         if fails < 3:
             return False
+        # 模板文件本来就缺着，原因已经明确，不该再提示"站点改版"——
+        # 否则用户会去改关键词/跑 AI，越修越远。
+        if (str(getattr(site, 'kind', '')) == KIND_TEMPLATE
+                and not T.template_by_id(getattr(site, 'template', '') or site.id)):
+            return False
         recent = self.history().recent_failures(site.id, limit=6)
         if not recent:
             return False
-        rule_n = sum(1 for r in recent
-                     if classify(r['code'])['category'] == 'rule')
+        rule_n = sum(1 for r in recent if category_of(r['code']) == 'rule')
         # 最近失败里 rule 类占大多数（>=60% 且至少 3 条）才提示，
         # 容忍个别网络抖动混在其中，避免一两次抽风就误报"模板过期"。
         return rule_n >= 3 and rule_n * 2 >= len(recent)
