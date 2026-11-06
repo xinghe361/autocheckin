@@ -237,7 +237,11 @@ class TestRouting(WebCase):
     def test_meta_lists_templates_and_channels(self):
         d = self.json('GET', '/api/meta')
         ids = [t['id'] for t in d['templates']]
-        self.assertEqual(sorted(ids), ['chiphell', 'nodeseek', 'v2ex'])
+        # 已同步的三个 + 镜像自带的其它模板（如 right_erling）都会列出来
+        for tid in ('chiphell', 'nodeseek', 'v2ex'):
+            self.assertIn(tid, ids)
+        self.assertNotIn('example', ids, '示例文档不是可装模板')
+        self.assertIn('notify_mode_labels', d)
         self.assertIn('pushplus', d['channels'])
         self.assertIn('telegram', d['channels'])
         self.assertIn(PROXY_DIRECT, d['proxy_modes'])

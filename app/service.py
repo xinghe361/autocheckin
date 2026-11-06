@@ -6,6 +6,7 @@ web.py 里的路由只是薄薄一层转发。
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import shutil
@@ -48,7 +49,7 @@ from .recorder import StepRecorder, merge_steps
 from .runner import Runner
 from .store import RuntimeState, Store
 from . import templates as T
-from .plugins import PLUGIN_ID_RE, PluginStore
+from .plugins import PLUGIN_ID_RE, RESERVED_IDS, PluginStore, validate_template
 
 
 def _bundled_plugins_dir() -> str:
@@ -65,6 +66,30 @@ def _bundled_plugins_dir() -> str:
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         'site-plugins')
     return guess if os.path.isdir(guess) else ''
+
+
+def _bundled_template_files() -> Dict[str, str]:
+    """镜像自带的模板文件（id -> 路径）。
+
+    只用来"补缺/直装"，不参与运行时读取顺序（读还是走 PluginStore）。
+    示例文档（RESERVED_IDS）在这里就排除，免得它混进「可选站点」。
+    """
+    d = _bundled_plugins_dir()
+    if not d:
+        return {}
+    out: Dict[str, str] = {}
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return {}
+    for n in names:
+        if not n.lower().endswith('.json') or n.startswith('.'):
+            continue
+        tid = n[:-5]
+        if tid in RESERVED_IDS:
+            continue
+        out[tid] = os.path.join(d, n)
+    return out
 
 # 影响"下次运行时间"的站点字段。
 # 这些字段一变，已排的 next_run_at 就必须作废重算 —— 否则旧值会被一直沿用
@@ -191,17 +216,47 @@ class Service:
                      % (len(restored), '、'.join(restored)))
 
     # ---------------------------------------------------------- 插件模板
-    def list_templates(self) -> List[Dict[str, Any]]:
-        """所有可选模板（现在只有插件），并标注该模板是否已加入站点。
+    def _bundled_templates(self) -> Dict[str, Dict[str, Any]]:
+        """镜像里自带的那批模板（id -> 模板）。
 
-        界面用它渲染"可选站点"列表：只有**选中（已加入）**的才在站点里展示。
+        用途：让「可选站点」把**项目文件夹里的模板**也列出来，点「加入」就
+        直接装好，不必先同步再到别处找。已同步/已存在的同名模板以数据目录
+        里的为准（那是更新过的版本）。
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for tid, path in _bundled_template_files().items():
+            if T.template_by_id(tid):
+                continue                       # 本地已有，跳过
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+            except (OSError, ValueError):
+                continue
+            items = raw if isinstance(raw, list) else [raw]
+            for it in items:
+                tpl, why = validate_template(it, os.path.basename(path))
+                if why or tpl.get('id') in out:
+                    continue
+                tpl['source'] = 'image'        # 镜像自带（未落盘）
+                out[tpl['id']] = tpl
+        return out
+
+    def list_templates(self) -> List[Dict[str, Any]]:
+        """所有可选模板（已同步 + 镜像自带），标注是否已加入站点。
+
+        界面用它渲染「可选站点」：只有**点过「加入」**的才变成站点。
         """
         try:
             have = {s.id for s in self.load_config().sites}
         except Exception:                                       # noqa: BLE001
             have = set()
-        out = []
+        merged: Dict[str, Dict[str, Any]] = {}
         for t in T.available_templates():
+            merged[t['id']] = t
+        for tid, t in self._bundled_templates().items():
+            merged.setdefault(tid, t)
+        out = []
+        for t in sorted(merged.values(), key=lambda x: x['id']):
             out.append({
                 'id': t['id'],
                 'name': t.get('name', t['id']),
@@ -209,11 +264,29 @@ class Service:
                 'need_browser': bool(t.get('need_browser')),
                 'verify_ssl': bool(t.get('verify_ssl', True)),
                 'note': t.get('note', ''),
-                'source': t.get('source', 'builtin'),
+                'source': t.get('source', 'plugin'),
                 'installed': t['id'] in have,
                 'step_count': len(t.get('flow') or []),
             })
         return out
+
+    def _materialize_bundled(self, tid: str) -> Dict[str, Any]:
+        """把镜像自带的模板复制到数据目录，然后返回它（失败返回空 dict）。
+
+        这样「可选站点」里点「加入」不用先去同步：镜像里本来就有这份文件。
+        """
+        src = _bundled_template_files().get(tid)
+        if not src:
+            return {}
+        try:
+            dst_dir = self.plugins.ensure_dir()
+            dst = os.path.join(dst_dir, os.path.basename(src))
+            if not os.path.exists(dst):
+                shutil.copyfile(src, dst)
+            self.plugins.load(force=True)
+        except OSError:
+            return {}
+        return T.template_by_id(tid)
 
     def install_template(self, tid: str) -> Dict[str, Any]:
         """把一个模板加入站点（幂等）。
@@ -222,7 +295,9 @@ class Service:
         """
         tpl = T.template_by_id(tid)
         if not tpl:
-            # 说清"为什么没有"：多半是还没同步/文件缺失，而不是这个模板不存在
+            # 「可选站点」里的条目可能只是镜像自带、还没落盘 —— 直接装。
+            tpl = self._materialize_bundled(tid)
+        if not tpl:
             raise ValueError(
                 '找不到模板「%s」：可能还没同步到本地。'
                 '到「设置 → 可选站点同步」点「立即同步」后再试' % tid)

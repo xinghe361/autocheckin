@@ -218,15 +218,17 @@ class TestChannelProxy(unittest.TestCase):
 
     GLOBAL = 'http://10.0.0.1:7890'
 
-    def test_default_follows_global_proxy(self):
+    def test_default_is_direct(self):
+        """未单独设置 → 直连（通知渠道多在公网，跟主代理更容易失败）。"""
         c = NotifyConfig()
-        self.assertEqual(N.channel_proxy(c, 'telegram', self.GLOBAL), self.GLOBAL)
+        self.assertEqual(N.channel_proxy(c, 'telegram', self.GLOBAL), '')
 
-    def test_channel_can_force_direct(self):
-        """Telegram 走代理、企业微信必须直连 —— 这种组合要能配出来。"""
-        c = NotifyConfig(channel_proxy={'wecom': {'mode': 'direct'}})
-        self.assertEqual(N.channel_proxy(c, 'wecom', self.GLOBAL), '')
-        self.assertEqual(N.channel_proxy(c, 'telegram', self.GLOBAL), self.GLOBAL)
+    def test_channel_can_follow_main_proxy(self):
+        """想跟主代理要显式选 inherit。"""
+        c = NotifyConfig(channel_proxy={'wecom': {'mode': 'inherit'}})
+        self.assertEqual(N.channel_proxy(c, 'wecom', self.GLOBAL), self.GLOBAL)
+        self.assertEqual(N.channel_proxy(c, 'telegram', self.GLOBAL), '',
+                         '其它渠道仍是默认直连')
 
     def test_channel_can_use_its_own_proxy(self):
         c = NotifyConfig(channel_proxy={
@@ -248,12 +250,11 @@ class TestChannelProxy(unittest.TestCase):
         所以即使旧配置里还留着 proxy_mode / proxy_url，也不再参与判定。
         """
         c = NotifyConfig(proxy_mode='custom', proxy_url='http://notify:8080')
-        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL),
-                         self.GLOBAL,
-                         '通知级代理不该再生效，应跟随主代理')
+        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL), '',
+                         '通知级代理不该再生效；默认直连')
 
     def test_main_proxy_direct_means_direct(self):
-        """主代理为空（选了直连）时，未单独设置的渠道就是直连。"""
+        """主代理为空（选了直连）时，未单独设置的渠道也是直连。"""
         c = NotifyConfig(proxy_mode='direct')
         self.assertEqual(N.channel_proxy(c, 'pushplus', ''), '')
 
@@ -261,10 +262,12 @@ class TestChannelProxy(unittest.TestCase):
         """渠道单独设置优先于主代理（这是保留的能力）。"""
         c = NotifyConfig(channel_proxy={'telegram': {'mode': 'custom',
                                                      'url': 'http://t:1'},
-                                        'wecom': {'mode': 'direct'}})
+                                        'wecom': {'mode': 'inherit'}})
         self.assertEqual(N.channel_proxy(c, 'telegram', self.GLOBAL), 'http://t:1')
-        self.assertEqual(N.channel_proxy(c, 'wecom', self.GLOBAL), '')
-        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL), self.GLOBAL)
+        self.assertEqual(N.channel_proxy(c, 'wecom', self.GLOBAL), self.GLOBAL,
+                         '显式 inherit 才跟主代理')
+        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL), '',
+                         '没设置过的渠道默认直连')
 
     def test_empty_main_proxy_stays_direct(self):
         c = NotifyConfig()
@@ -275,9 +278,9 @@ class TestChannelProxy(unittest.TestCase):
         self.assertEqual(N.channel_proxy(c, 'telegram', self.GLOBAL), '')
 
     def test_no_override_key_is_safe(self):
+        """没配置过的渠道（含拼错的键）一律直连，不会静默走代理。"""
         c = NotifyConfig(channel_proxy={})
-        self.assertEqual(N.channel_proxy(c, 'unknown-channel', self.GLOBAL),
-                         self.GLOBAL)
+        self.assertEqual(N.channel_proxy(c, 'unknown-channel', self.GLOBAL), '')
 
 
 class TestNotifyConfigRoundTrip(unittest.TestCase):

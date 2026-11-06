@@ -424,18 +424,21 @@ class WebApp:
 
         @route('GET', '/api/meta')
         def _meta(q, body):
-            from .models import (NOTIFY_MODES, PROXY_INHERIT, PROXY_DIRECT,
-                                 PROXY_CUSTOM)
+            from .models import (NOTIFY_MODE_LABELS, NOTIFY_MODES,
+                                 PROXY_INHERIT, PROXY_DIRECT, PROXY_CUSTOM)
             from .notify import ALL_CHANNELS
-            from .templates import available_templates
+            # 用 service 的列表：它包含"镜像自带但还没落盘"的模板，
+            # 也会把示例文档（example）排除掉。
             return {
                 'version': self.version,
                 'templates': [{'id': t.get('id'), 'name': t.get('name'),
                                'need_browser': t.get('need_browser'),
                                'verify_ssl': t.get('verify_ssl', True),
-                               'note': t.get('note', '')}
-                              for t in available_templates()],
+                               'note': t.get('note', ''),
+                               'installed': bool(t.get('installed'))}
+                              for t in self.service.list_templates()],
                 'notify_modes': list(NOTIFY_MODES),
+                'notify_mode_labels': dict(NOTIFY_MODE_LABELS),
                 'channels': list(ALL_CHANNELS),
                 'proxy_modes': [PROXY_INHERIT, PROXY_DIRECT, PROXY_CUSTOM],
                 # 首次安装时「模板来源」输入框默认填这个，省得用户去翻文档
@@ -934,6 +937,15 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .site .meta{font-size:12px;color:var(--mut);margin-top:4px}
 .site .acts{display:flex;gap:6px;flex-wrap:wrap}
 .site form{border-top:1px dashed var(--bd);margin-top:12px;padding-top:4px}
+/* 编辑时只有配置项滚动：卡片头的名称/标签/下次运行/按钮保持不动。
+   用内层滚动而不是让整页滚，滚轮停在表单上时页面不会跟着跑；
+   overscroll-behavior 防止滑到底后"传染"给页面。 */
+.site.open > div[id^="form-"]{
+  max-height:calc(100vh - 230px);overflow-y:auto;overscroll-behavior:contain;
+  padding-right:6px}
+.site.open > div[id^="form-"]::-webkit-scrollbar{width:8px}
+.site.open > div[id^="form-"]::-webkit-scrollbar-thumb{
+  background:#d6dbe4;border-radius:4px}
 .fsec{margin-top:12px;padding-top:10px;border-top:1px solid #f0f2f5}
 .fsec:first-of-type{border-top:none;padding-top:0}
 .fsec>h4{font-size:12px;color:var(--mut);margin:0 0 6px;font-weight:600}
@@ -1168,8 +1180,8 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     </div>
     <label>主页地址（录制从这里开始）</label>
     <input id="ns_url" placeholder="https://example.com/">
-    <div class="hint">也可以照着现成模板改（先在「设置 → 可选站点同步」拉一次）。当前可用模板：
-      <span id="tplList" class="mono"></span></div>
+    <div class="hint">也可以照着现成模板改（到「设置 → 可选站点」点「加入」即可）。
+      当前可选：<span id="newSiteTplList" class="mono"></span></div>
   </div>
 
   <div class="card">
@@ -1285,10 +1297,8 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       并参与签到；没加入的只是"可选"。
       <span id="plugDir"></span>
     </div>
-    <div class="row" style="gap:8px;align-items:flex-end">
-      <div style="flex:1">
-        <button class="b" onclick="loadTemplates()">重新扫描</button>
-      </div>
+    <div class="hint" style="margin-top:4px">
+      列表里既有<b>镜像自带</b>的模板，也有<b>同步进来</b>的；点「加入」会直接落盘并生效，不需要先同步。
     </div>
     <div id="plugErrors"></div>
     <div id="tplList" style="margin-top:10px"></div>
@@ -2047,9 +2057,13 @@ function todayStr(){
   return d.getFullYear() + '-' + m + '-' + day;
 }
 
-function cookieTag(s){  if(!s.has_cookie) return '<span class="tag err">未配置登录</span>';
+function cookieTag(s){
+  if(!s.has_cookie) return '<span class="tag err">未配置登录</span>';
   if(s.cookie_status===2) return '<span class="tag err">登录已失效</span>';
   if(s.cookie_status===1) return '<span class="tag ok">登录有效</span>';
+  /* 检查过却判不出来（status=0 且有 checked_at）：别一直显示"已配置"，
+     否则用户以为检查没生效。 */
+  if(s.cookie_checked_at) return '<span class="tag">无法判断</span>';
   return '<span class="tag ok">已配置登录</span>';
 }
 
@@ -2279,12 +2293,22 @@ document.addEventListener('click', function(e){
 
 /* 展开 / 收起某个站点的编辑表单（其他站点自动下推） */
 function toggleEdit(id){
-  OPEN_SITE = (OPEN_SITE === id) ? '' : id;
+  var willOpen = (OPEN_SITE !== id);
+  OPEN_SITE = willOpen ? id : '';
   /* 用户主动操作：强制重建一次，让展开状态立刻生效 */
   _forceSitesRefresh = true;
   _formDirty = false;
   _pendingSitesRefresh = false;
   loadSites();
+  if(willOpen){
+    /* 展开后把这张卡片顶到视口上方，长表单不至于跑到屏幕外 */
+    setTimeout(function(){
+      var el = $('site-'+id);
+      if(el && el.scrollIntoView){
+        el.scrollIntoView({block:'start', behavior:'smooth'});
+      }
+    }, 90);
+  }
 }
 
 /* 单选组的小工具：按名字取/设值。
@@ -2485,7 +2509,8 @@ function siteFormHtml(s, c){
     var when = c.updated_at? fmtTime(c.updated_at) : '未知时间';
     var st = c.status===1? '<span class="tag ok">有效</span>'
            : c.status===2? '<span class="tag err">已失效</span>'
-           : '<span class="tag">未检查</span>';
+           : (c.checked_at? '<span class="tag">检查过，无法判断</span>'
+                          : '<span class="tag">未检查</span>');
     ckStatus = st + '<span class="tag ok">已配置 '+c.count+' 项</span>'
       + '<span class="hint" style="margin:0">更新于 '+esc(when)
       + '（来源：'+esc(c.source||'未知')+'）</span>';
@@ -2923,8 +2948,16 @@ function listenQdExtension(){
       showCookieMsg(sid, '扩展返回的 Cookie 是空的，请确认目标网站已登录', 'err');
       return;
     }
-    showCookieMsg(sid, '从浏览器读取到 ' + pairs.length + ' 项，正在保存…', '');
-    saveCookieText(sid, pairs.join('; '));
+    /* 只填进输入框，不自动保存 —— 用户要能先看一眼再决定。
+       这样它和"手动粘贴"走的是同一条路径（保存 → 检查），行为一致。 */
+    var text = pairs.join('; ');
+    var ta = $('f_' + sid + '_cookie');
+    if(ta){
+      ta.value = text;
+      try{ ta.dispatchEvent(new Event('input', {bubbles:true})); }catch(e){}
+    }
+    showCookieMsg(sid, '已填入下面的输入框（' + pairs.length
+      + ' 项）。确认无误后点「保存 Cookie」，再点「检查登录状态」即可。', 'ok');
     COOKIE_IMPORT_PENDING = '';      /* 用完清掉，避免下次误关联到别的站点 */
   }, false);
 }
@@ -2966,20 +2999,6 @@ function markCookieImportStart(id){ COOKIE_IMPORT_PENDING = id; }
 function showCookieMsg(id, text, kind){
   var el = $('f_'+id+'_ckmsg');
   if(el) show('f_'+id+'_ckmsg', text, kind);
-}
-
-/* 与手动粘贴走同一条保存路径：后端会自己识别格式 */
-function saveCookieText(id, text){
-  api('POST','/api/site/cookie',{id:id, cookie:text}).then(function(d){
-    /* 先把提示写下来再刷新列表 —— 刷新会重渲染整个表单，
-       直接写在旧 DOM 上会被冲掉，用户就看不到"已保存"了。 */
-    var msg = '已保存 ' + d.count + ' 项（识别为：' + d.format + '）。'
-            + '可点「检查登录状态」。';
-    CK_PENDING_MSG[id] = { text: msg, kind: 'ok' };
-    loadSites();
-  }).catch(function(e){
-    showCookieMsg(id, '保存失败：' + e.message, 'err');
-  });
 }
 
 /* ============ 自动导入：承接 QD 的 get-cookies 扩展 ============ */
@@ -3254,7 +3273,7 @@ function delSite(id){
 function loadMeta(){
   api('GET','/api/meta').then(function(d){
     META = d;
-    $('tplList').textContent = (d.templates||[]).map(function(t){
+    $('newSiteTplList').textContent = (d.templates||[]).map(function(t){
       return t.id + (t.need_browser?'(浏览器)':'');
     }).join('、');
   });
@@ -3376,7 +3395,9 @@ function loadTemplates(){
     }
     var rows = list.map(function(t){
       var tags = [];
-      tags.push('<span class="tag">'+esc(t.source==='plugin'?'插件':'内置')+'</span>');
+      var srcTxt = t.source==='image' ? '镜像自带'
+                 : (t.source==='plugin' ? '已同步' : '本地');
+      tags.push('<span class="tag">'+esc(srcTxt)+'</span>');
       if(t.need_browser) tags.push('<span class="tag">需要浏览器</span>');
       var btn = t.installed
         ? '<span class="tag">已加入</span>'
@@ -3424,8 +3445,10 @@ function loadSettings(){
     /* 可选站点列表：设置页打开时也要刷新（同步进来的模板要立刻可见） */
     loadTemplates();
     var n = d.notify || {};
+    var mlabels = META.notify_mode_labels || {};
     $('set_nmode').innerHTML = (META.notify_modes||[]).map(function(m){
-      return '<option value="'+esc(m)+'"'+(m===n.mode?' selected':'')+'>'+esc(m)+'</option>';
+      var txt = mlabels[m] ? (m + '（' + mlabels[m] + '）') : m;
+      return '<option value="'+esc(m)+'"'+(m===n.mode?' selected':'')+'>'+esc(txt)+'</option>';
     }).join('');
     $('set_aikey').value = '';
     /* 模型用下拉框。若已保存的值不在候选里（例如旧配置里的 deepseek-chat），
@@ -3557,8 +3580,9 @@ function renderChannels(n, d){
           + 'placeholder="chat id" value="">') : '')
       + '<label>该渠道走代理</label>'
       + '<select class="chProxy" data-ch="'+esc(ch)+'">'
-      + '<option value=""'+(cp.mode?'':' selected')+'>跟随主代理</option>'
-      + '<option value="direct"'+(cp.mode==='direct'?' selected':'')+'>直连</option>'
+      /* 默认直连：通知渠道多在公网，跟着签到的主代理反而容易失败 */
+      + '<option value="direct"'+(cp.mode!=='custom'&&cp.mode!=='inherit'?' selected':'')+'>直连（默认）</option>'
+      + '<option value="inherit"'+(cp.mode==='inherit'?' selected':'')+'>跟随主代理</option>'
       + '<option value="custom"'+(cp.mode==='custom'?' selected':'')+'>自定义</option>'
       + '</select>'
       + '<input class="chProxyUrl" data-ch="'+esc(ch)+'" placeholder="自定义代理地址" '

@@ -29,6 +29,11 @@ from typing import Any, Dict, List, Optional, Tuple
 PLUGIN_DIRNAME = 'templates'
 
 # 单个插件文件大小上限：模板是纯文本配置，256KB 足够宽裕
+# 这些 id 是"给用户抄格式"的文档，不是能装的站点模板。
+# 以前 example.json 会被当成普通模板列进「可选站点」，还能点「加入」变成
+# 一个永远失败的站点（用户反馈）。这里直接跳过，且不报错（它不是坏文件）。
+RESERVED_IDS = ('example',)
+
 MAX_PLUGIN_BYTES = 256 * 1024
 
 # 一个插件最多多少步/多少关键词，避免异常文件拖垮界面
@@ -240,6 +245,9 @@ class PluginStore:
                     tpl, why = validate_template(it, name)
                     if why:
                         errors.append({'file': name, 'reason': why})
+                        continue
+                    if tpl['id'] in RESERVED_IDS:
+                        # 示例文档：静默跳过，既不进列表也不报错
                         continue
                     if tpl['id'] in seen:
                         errors.append({'file': name,

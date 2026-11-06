@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 from .httpclient import HttpConfig, HttpError, enc_json, normalize_proxy, request
 from .models import (NOTIFY_ALL, NOTIFY_CUSTOM, NOTIFY_FAIL_ONLY, NOTIFY_NONE,
                      NOTIFY_SUCCESS_ONLY, PROXY_CUSTOM, PROXY_DIRECT,
-                     NotifyConfig)
+                     PROXY_INHERIT, NotifyConfig)
 
 CHANNEL_PUSHPLUS = 'pushplus'
 # Server 酱已按要求从界面移除。这里保留常量，只为兼容旧配置里的
@@ -33,24 +33,24 @@ ALL_CHANNELS = (CHANNEL_PUSHPLUS, CHANNEL_WECOM, CHANNEL_TELEGRAM)
 def channel_proxy(cfg: NotifyConfig, channel: str, global_proxy: str = '') -> str:
     """决定某个通知渠道该走的代理地址（空字符串 = 直连）。
 
-    按用户要求：每个渠道可以单独选择走不走代理，没单独设置就跟随主代理。
-    （原来中间还有一层"通知级代理"，用户指出那是多余的：
-      已经有主代理，每个渠道又能独立设置，中间那层没有存在意义，已移除。）
+    每个渠道可以单独选择走不走代理。**默认直连** —— 通知渠道（pushplus /
+    企业微信 / Telegram）大多在公网，跟着签到用的主代理反而容易失败
+    （用户反馈过）。想跟随主代理就显式选「跟随主代理」。
 
-      1) 该渠道有单独设置 → 用它（direct 则强制直连）
-      2) 否则跟随主代理
+      1) direct / 未设置 → 直连
+      2) inherit → 跟随主代理
+      3) custom → 用该渠道单独填的地址
     """
     override = (cfg.channel_proxy or {}).get(channel) or {}
     mode = (override.get('mode') or '').strip().lower()
     url = (override.get('url') or '').strip()
 
-    if mode == PROXY_DIRECT:
-        return ''
     if mode == PROXY_CUSTOM:
         return normalize_proxy(url)
-
-    # 渠道未单独设置 → 跟随主代理
-    return normalize_proxy(global_proxy)
+    if mode == PROXY_INHERIT:
+        return normalize_proxy(global_proxy)
+    # 默认（含显式 direct）→ 直连
+    return ''
 
 
 @dataclass

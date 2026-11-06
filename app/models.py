@@ -120,6 +120,16 @@ NOTIFY_NONE = 'none'        # 不通知
 NOTIFY_MODES = (NOTIFY_ALL, NOTIFY_FAIL_ONLY, NOTIFY_SUCCESS_ONLY,
                 NOTIFY_CUSTOM, NOTIFY_NONE)
 
+# 界面文案：值本身是英文常量，直接摊给用户看不懂，这里给一份中文对照。
+# 界面上显示成「all（全部）」这种形式，两边都保留，方便对照文档与配置文件。
+NOTIFY_MODE_LABELS = {
+    NOTIFY_ALL: '全部通知',
+    NOTIFY_FAIL_ONLY: '仅失败',
+    NOTIFY_SUCCESS_ONLY: '仅成功',
+    NOTIFY_CUSTOM: '按站点自定义',
+    NOTIFY_NONE: '不通知',
+}
+
 # 站点类型
 KIND_TEMPLATE = 'template'   # 站点模板（数据来自 site-plugins/*.json）
 KIND_CUSTOM = 'custom'       # 用户新增（录制/手填选择器）
@@ -621,7 +631,8 @@ class NotifyConfig:
         cp = {}
         for ch, v in _as_dict(d.get('channel_proxy')).items():
             v = _as_dict(v)
-            cp[str(ch)] = {'mode': _as_str(v.get('mode'), 'inherit'),
+            # 没写就是直连（按用户要求：通知默认不走主代理）
+            cp[str(ch)] = {'mode': _as_str(v.get('mode'), PROXY_DIRECT),
                            'url': _as_str(v.get('url'), '')}
         base.channel_proxy = cp
         return base

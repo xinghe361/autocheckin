@@ -221,8 +221,14 @@ try:
 
     st, body = get('/api/meta')
     meta = json.loads(body)
-    check('元数据含三个内置站点',
-          sorted(t['id'] for t in meta['templates']) == ['chiphell', 'nodeseek', 'v2ex'])
+    tpl_ids = [t['id'] for t in meta['templates']]
+    # 「可选站点」现在也会列出镜像自带的模板（可能多于三个），
+    # 所以只要求包含已同步的三个，且示例文档不在里面。
+    check('元数据含已同步的三个站点模板',
+          {'chiphell', 'nodeseek', 'v2ex'} <= set(tpl_ids), str(tpl_ids))
+    check('示例文档不算可选站点', 'example' not in tpl_ids)
+    check('通知策略带中文标签',
+          bool(meta.get('notify_mode_labels', {}).get('all')))
     check('元数据含三个通知渠道（Server 酱已移除）',
           set(meta['channels']) == {'pushplus', 'wecom', 'telegram'},
           str(meta.get('channels')))

@@ -102,10 +102,17 @@ class TestRestoreOnStartup(SelfHealCase):
 
         svc = self._svc()
 
+        # 落盘只补被引用的那个；但「可选站点」还要列出镜像自带的其它模板
+        # （它们还没落盘，点「加入」时才复制）。
         files = sorted(os.listdir(os.path.join(self.dir, 'templates')))
         self.assertEqual(files, ['v2ex.json'])
-        ids = [t['id'] for t in svc.list_templates()]
-        self.assertEqual(ids, ['v2ex'])
+        rows = {t['id']: t for t in svc.list_templates()}
+        self.assertIn('v2ex', rows)
+        self.assertTrue(rows['v2ex']['installed'], '配置里已有该站点')
+        others = [t for t in rows.values() if t['id'] != 'v2ex']
+        self.assertTrue(others, '镜像自带模板应出现在可选列表里')
+        self.assertTrue(all(t['source'] == 'image' for t in others))
+        self.assertNotIn('example', rows, '示例文档不该出现在可选站点')
 
     def test_no_sites_means_no_restore(self):
         """零站点的新装用户：保持零模板（模板靠同步获取，符合产品设计）。"""
@@ -278,6 +285,33 @@ class TestTemplateFieldFallback(SelfHealCase):
                           template='', homepage='https://www.v2ex.com/')
         self.assertTrue(_tpl_of(bare).get('flow'),
                         'template 空时要用站点 id 找到模板')
+
+
+class TestBundledDirectInstall(SelfHealCase):
+    """「可选站点」直接列镜像自带模板，点加入即可（不必先同步）。"""
+
+    def test_listed_before_sync(self):
+        svc = self._svc()
+        rows = {t['id']: t for t in svc.list_templates()}
+        self.assertTrue(rows, '全新安装也应看到镜像自带的模板')
+        self.assertTrue(all(t['source'] == 'image' for t in rows.values()))
+        self.assertFalse(any(t['installed'] for t in rows.values()))
+        self.assertNotIn('example', rows, '示例文档不是可装模板')
+
+    def test_install_without_sync(self):
+        svc = self._svc()
+        self.assertFalse(os.path.exists(self._tpl_path()))
+        out = svc.install_template('v2ex')
+        self.assertTrue(out['ok'])
+        self.assertTrue(os.path.isfile(self._tpl_path()), '加入时应落盘')
+        rows = {t['id']: t for t in svc.list_templates()}
+        self.assertTrue(rows['v2ex']['installed'])
+        self.assertEqual(rows['v2ex']['source'], 'plugin', '落盘后由插件目录读取')
+
+    def test_example_cannot_be_installed(self):
+        svc = self._svc()
+        with self.assertRaises(ValueError):
+            svc.install_template('example')
 
 
 if __name__ == '__main__':
