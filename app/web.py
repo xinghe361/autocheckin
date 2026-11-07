@@ -988,7 +988,10 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .sw input:checked+.track{background:var(--pri)}
 .sw input:checked+.track::after{left:20px}
 .sw .lb{font-size:13px;color:#2b323d;font-weight:600}
-.sw.off .lb{color:var(--mut)}
+/* 关掉时文案变灰：静态写死的开关没有 .off 类，用选择器统一，避免
+   "有的关掉变灰、有的不变" */
+.sw.off .lb,
+.sw input:not(:checked)~.lb{color:var(--mut)}
 /* 选项行：左边标题+说明，右边开关。比裸 checkbox 显眼得多 */
 .opt{display:flex;align-items:center;gap:14px;padding:11px 0}
 .opt+.opt{border-top:1px dashed var(--bd)}
@@ -1012,10 +1015,20 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .ch .two{display:grid;grid-template-columns:140px 1fr;gap:8px}
 @media(max-width:560px){.ch .two{grid-template-columns:1fr}}
 /* 单选行 */
-.radios{display:flex;gap:16px;flex-wrap:wrap;margin-top:6px}
-.radios label{display:inline-flex;align-items:center;gap:5px;margin:0;
-              font-size:12.5px;color:#3a424d;cursor:pointer}
-.radios input{width:auto;margin:0}
+/* 单选＝"多选一"，用分段按钮（不是开关）：和滑动开关区分开，
+   但同一套圆角与主色，避免页面上同时出现"原生圆点"和"滑块"两种观感 */
+.radios{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.radios label{display:inline-flex;align-items:center;margin:0;padding:6px 13px;
+              border:1px solid var(--bd);border-radius:999px;background:#fff;
+              font-size:12.5px;color:#3a424d;cursor:pointer;line-height:1.4;
+              transition:border-color .12s,background .12s,color .12s}
+.radios label:hover{border-color:#c3d3f2;background:#f7f9fe}
+.radios input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.radios input:checked+span{color:var(--pri);font-weight:600}
+.radios label:has(input:checked){border-color:#b9cdf7;background:#eef3fe}
+/* 键盘操作仍可见：隐藏的 input 聚焦时给后面的文字描边 */
+.radios input:focus-visible+span{outline:2px solid #b9cdf7;outline-offset:3px;
+                                 border-radius:4px}
 /* 内联小输入 */
 .inline{display:inline-flex;align-items:center;gap:5px;font-size:12.5px}
 .inline input{width:66px;padding:3px 6px}
@@ -1271,9 +1284,9 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <label>联网方式</label>
     <div class="radios">
       <label><input type="radio" name="set_pmode" value="direct"
-        onchange="swGlobalProxy()">直连（不走代理）</label>
+        onchange="swGlobalProxy()"><span>直连（不走代理）</span></label>
       <label><input type="radio" name="set_pmode" value="custom"
-        onchange="swGlobalProxy()">走代理</label>
+        onchange="swGlobalProxy()"><span>走代理</span></label>
     </div>
     <div id="set_proxyBox" style="margin-top:10px">
       <label>代理地址</label>
@@ -2478,15 +2491,24 @@ function refreshAutoRefHint(){
     : '（当前：不自动刷新）';
 }
 
-function _sw(id, label, on, sid){
-  /* 第 4 个参数 sid：站点 id（全局开关传空字符串）。
+function _sw(id, label, on, sid, desc){
+  /* 站点表单里的开关。结构和「设置」页的 .opt 行保持一致：
+     左标题（+可选说明）、右开关 —— 否则会变成"设置页开关在右、
+     站点表单开关在左"，同一套 UI 两种摆法。
+
+     第 4 个参数 sid：站点 id（全局开关传空字符串）。
      不再把 id 拼进内联 onchange —— 内联事件属性里的 JS 字符串上下文
      用 HTML 实体转义挡不住引号逃逸（浏览器会先解码再交给 JS 解析）。
      改为打 data-* 标记，由下面的委托监听统一处理。 */
-  return '<label class="sw'+(on?'':' off')+'" for="'+id+'">'
-    + '<input type="checkbox" id="'+id+'"'+(on?' checked':'')
-    + ' data-needs-sync="1" data-sid="'+esc(sid == null ? '' : sid)+'">'
-    + '<span class="track"></span><span class="lb">'+esc(label)+'</span></label>';
+  return '<div class="opt">'
+    + '<div class="grow"><div class="t">'+esc(label)+'</div>'
+    +   (desc ? '<div class="d">'+desc+'</div>' : '')
+    + '</div>'
+    + '<label class="sw'+(on?'':' off')+'" for="'+id+'">'
+    +   '<input type="checkbox" id="'+id+'"'+(on?' checked':'')
+    +   ' data-needs-sync="1" data-sid="'+esc(sid == null ? '' : sid)+'">'
+    +   '<span class="track"></span></label>'
+    + '</div>';
 }
 
 /* 需要"值一变就重算显隐"的控件统一由这里处理（事件委托，捕获阶段）。
@@ -2647,10 +2669,10 @@ function siteFormHtml(s, c){
   + '<div class="fsec"><h4>签到时间</h4>'
   +   '<div class="radios">'
   +     '<label><input type="radio" name="'+p+'mode" value="daily"'
-  +       (isDaily?' checked':'')+' data-needs-sync="1" data-sid="'+esc(id)+'">每天固定时刻</label>'
+  +       (isDaily?' checked':'')+' data-needs-sync="1" data-sid="'+esc(id)+'"><span>每天固定时刻</span></label>'
   +     '<label><input type="radio" name="'+p+'mode" value="success_based"'
   +       (isDaily?'':' checked')+' data-needs-sync="1" data-sid="'+esc(id)+'">'
-  +       '以【上次签到成功时间】为基准</label>'
+  +       '<span>以【上次签到成功时间】为基准</span></label>'
   +   '</div>'
   +   '<div class="hint" style="margin:6px 0 0">' + modeHintHtml(isDaily, s) + '</div>'
   +   '<div class="fgrid" style="margin-top:6px">'
@@ -2760,13 +2782,13 @@ function siteFormHtml(s, c){
   +   '<div class="radios">'
   +     '<label><input type="radio" name="'+p+'pmode" value="inherit"'
   +       (sitePmode==='inherit'?' checked':'')
-  +       ' data-needs-sync="1" data-sid="'+esc(id)+'">跟随全局设置</label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>跟随全局设置</span></label>'
   +     '<label><input type="radio" name="'+p+'pmode" value="direct"'
   +       (sitePmode==='direct'?' checked':'')
-  +       ' data-needs-sync="1" data-sid="'+esc(id)+'">强制直连</label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>强制直连</span></label>'
   +     '<label><input type="radio" name="'+p+'pmode" value="custom"'
   +       (sitePmode==='custom'?' checked':'')
-  +       ' data-needs-sync="1" data-sid="'+esc(id)+'">用这个代理</label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>用这个代理</span></label>'
   +   '</div>'
   +   '<div id="'+p+'proxyBox" style="margin-top:8px;'
   +     (sitePmode==='custom'?'':'display:none')+'">'
