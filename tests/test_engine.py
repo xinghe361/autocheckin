@@ -331,5 +331,46 @@ class TestCheckinSiteDispatch(unittest.TestCase):
         self.assertIn('User-Agent', captured.get('headers') or {})
 
 
+
+class TestProxyHintOnCookieCheck(unittest.TestCase):
+    """检查登录状态失败时，要能看出"是不是代理的锅"。
+
+    用户反馈过："点获取 Cookie 没反应，是不是代理的问题"。取 Cookie 是
+    浏览器扩展在本机做的，跟代理无关；但随后的"检查登录状态"是容器发请求，
+    代理不通就会失败 —— 不写这句话，用户会去改 Cookie，方向全错。
+    """
+
+    def setUp(self):
+        from app.models import SiteConfig
+        self.site = SiteConfig(id='t1', name='T1', kind='custom',
+                               homepage='https://a.b/', success_keywords=['ok'])
+
+    def _run(self, proxy):
+        import app.engine as _e
+        def boom(site, p, cookie='', headers_override=None):
+            def fetch(method, url, data=None):
+                raise _e.HttpError('连接被拒绝')
+            return fetch
+        orig = _e._http_fetcher
+        try:
+            _e._http_fetcher = boom
+            return _e.check_cookie_valid(self.site, 'a=1; b=2', proxy=proxy)
+        finally:
+            _e._http_fetcher = orig
+
+    def test_no_proxy_no_hint(self):
+        code, msg = self._run('')
+        self.assertEqual(code, 0)
+        self.assertIn('请求', msg)
+        self.assertNotIn('代理', msg)
+
+    def test_proxy_failure_mentions_proxy_and_masks_credentials(self):
+        code, msg = self._run('http://user:secret@10.0.0.1:7890')
+        self.assertEqual(code, 0)
+        self.assertIn('代理', msg)
+        self.assertNotIn('secret', msg, '代理密码不能出现在界面/日志里')
+        self.assertIn('10.0.0.1', msg)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

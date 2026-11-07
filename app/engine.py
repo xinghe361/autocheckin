@@ -407,6 +407,25 @@ def needs_browser(site: SiteConfig) -> bool:
     return steps_need_browser(site.steps)
 
 
+def _proxy_hint(proxy: str) -> str:
+    """网络层失败时补一句代理提示。
+
+    用户很容易把"连不上站点"和"点了没反应"混在一起 —— 但只要这次请求真的
+    走了代理，出错原因就有很大概率是代理本身（地址不通/认证失败/被墙）。
+    不说这一句，用户会去改 Cookie、改关键词，方向全错。
+    """
+    url = (proxy or '').strip()
+    if not url:
+        return ''
+    try:
+        from .netutil import mask_proxy_url
+        return ('（这次请求走了代理 %s；代理不通也会长这样，'
+                '可到「设置 → 联网方式」切「直连」再试一次）'
+                % mask_proxy_url(url))
+    except Exception:                                           # noqa: BLE001
+        return '（这次请求走了代理；代理不通也会长这样）'
+
+
 def check_cookie_valid(site: SiteConfig, cookie_header: str,
                        proxy: str = '') -> Tuple[int, str]:
     """检查站点的登录 Cookie 是否还有效。
@@ -459,9 +478,9 @@ def check_cookie_valid(site: SiteConfig, cookie_header: str,
     try:
         resp = fetch(method, url, None)
     except HttpError as e:
-        return 0, '请求失败：%s' % e
+        return 0, '请求失败：%s%s' % (e, _proxy_hint(proxy))
     except Exception as e:                                      # noqa: BLE001
-        return 0, '请求异常：%s' % e
+        return 0, '请求异常：%s%s' % (e, _proxy_hint(proxy))
 
     text = (resp.text or '')[:20000]
     status = getattr(resp, 'status', 0)
