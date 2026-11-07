@@ -212,13 +212,18 @@ class Service:
         return PluginSync(self.plugins, proxy_fn=lambda: self._sync_proxy())
 
     def _sync_proxy(self) -> str:
+        """模板同步用哪个代理：跟全局「联网方式」一致。
+
+        ⚠️ 以前这里是 `if proxy_mode == 'custom'`：只要模式不是 custom 就直连，
+        但用户把「直连」和「地址」同时留着时，别的地方（备份/AI）又会用地址 ——
+        同一份配置在不同功能上表现不一致，很难排查。统一走 effective_global_proxy。
+        """
         try:
+            from .models import effective_global_proxy
             cfg = self.load_config()
-            if getattr(cfg, 'proxy_mode', '') == 'custom':
-                return (cfg.proxy or '').strip()
+            return effective_global_proxy(cfg.proxy, cfg.proxy_mode)
         except Exception:                                       # noqa: BLE001
-            pass
-        return ''
+            return ''
 
     def check_template_updates(self) -> Dict[str, Any]:
         """检查远端有没有更新版本的模板（只看 sha，不下载）。"""
@@ -993,9 +998,10 @@ class Service:
     # ------------------------------------------------------------ 备份
     def webdav_client(self, cfg: AppConfig) -> W.WebdavClient:
         wd = cfg.webdav
+        from .models import effective_global_proxy
         password = self.box.try_decrypt(wd.password_enc, '') if wd.password_enc else ''
         return W.WebdavClient(wd.url, wd.username, password,
-                              proxy=cfg.proxy)
+                              proxy=effective_global_proxy(cfg.proxy, cfg.proxy_mode))
 
     def backup_now(self) -> Dict[str, Any]:
         cfg = self.load_config()
@@ -1113,8 +1119,9 @@ class Service:
             password = self.box.try_decrypt(cfg.webdav.password_enc, '')
         if not username:
             username = cfg.webdav.username
+        from .models import effective_global_proxy
         client = W.WebdavClient(url, username, password,
-                                proxy=cfg.proxy)
+                                proxy=effective_global_proxy(cfg.proxy, cfg.proxy_mode))
         return W.test_connection(client)
 
     # ------------------------------------------------------------ 通知
@@ -1135,7 +1142,9 @@ class Service:
         if not key:
             return {'ok': False, 'models': [], 'status': 0,
                     'error': '还没有配置 DeepSeek API Key', 'model': cfg.ai.model}
-        out = DS.list_models(cfg.ai, key, cfg.proxy)
+        from .models import effective_global_proxy
+        out = DS.list_models(cfg.ai, key,
+                             effective_global_proxy(cfg.proxy, cfg.proxy_mode))
         out['model'] = cfg.ai.model or DS.DEEPSEEK_DEFAULT_MODEL
         out['default'] = DS.DEEPSEEK_DEFAULT_MODEL
         return out

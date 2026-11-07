@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -426,6 +427,54 @@ class TestActionableErrors(ServiceCase):
             self.svc.install_template('not-synced-yet')
         msg = str(ctx.exception)
         self.assertIn('同步', msg, '要告诉用户去哪儿把模板拉下来')
+
+
+
+class TestGlobalProxyMode(ServiceCase):
+    """「联网方式」选直连时，地址栏里残留的地址不该被任何功能偷偷用上。"""
+
+    PROXY = 'http://10.0.0.1:7890'
+
+    def _save(self, mode):
+        cfg = self.svc.load_config()
+        cfg.proxy = self.PROXY
+        cfg.proxy_mode = mode
+        self.svc.save_config(cfg)
+
+    def test_direct_mode_ignores_leftover_address(self):
+        self._save('direct')
+        self.assertEqual(self.svc._sync_proxy(), '',
+                         '直连时模板同步不该走代理')
+
+        cfg = self.svc.load_config()
+        cfg.webdav.url = 'https://dav.example.com/dav/'
+        self.svc.save_config(cfg)
+        client = self.svc.webdav_client(self.svc.load_config())
+        self.assertEqual(client.proxy, '', '直连时 WebDAV 也不该走代理')
+
+    def test_ai_models_respects_direct_mode(self):
+        self._save('direct')
+        cfg = self.svc.load_config()
+        cfg.ai.api_key_enc = self.svc.box.encrypt('sk-test')
+        self.svc.save_config(cfg)
+        seen = {}
+
+        def fake(ai, key, proxy):
+            seen['proxy'] = proxy
+            return {'ok': True, 'models': [{'id': 'deepseek-chat'}], 'status': 200}
+
+        with mock.patch('app.deepseek.list_models', side_effect=fake):
+            self.svc.list_ai_models()
+        self.assertEqual(seen.get('proxy'), '', '直连时拉模型列表也不该走代理')
+
+    def test_custom_mode_uses_address(self):
+        self._save('custom')
+        self.assertEqual(self.svc._sync_proxy(), self.PROXY)
+        cfg = self.svc.load_config()
+        cfg.webdav.url = 'https://dav.example.com/dav/'
+        self.svc.save_config(cfg)
+        client = self.svc.webdav_client(self.svc.load_config())
+        self.assertEqual(client.proxy, self.PROXY)
 
 
 if __name__ == '__main__':
