@@ -287,11 +287,11 @@ class SiteConfig:
     # 因为这些东西最终会拼进请求 URL。
     options: Dict[str, str] = field(default_factory=dict)
 
-    # --- 站点级代理策略 ---
-    # inherit = 跟随全局设置（默认）
-    # direct  = 这个站点强制直连（比如国内站点不需要代理）
-    # custom  = 这个站点用 proxy_url 里的地址
-    proxy_mode: str = PROXY_INHERIT
+    # --- 站点级代理策略（三选一，默认直连）---
+    # direct  = 直连（默认；国内站点基本都不用代理）
+    # inherit = 用「设置」里填的主代理
+    # custom  = 用这个站点自己的 proxy_url
+    proxy_mode: str = PROXY_DIRECT
     proxy_url: str = ''
 
     # --- 凭据（加密后存） ---
@@ -430,7 +430,7 @@ class SiteConfig:
             options={str(k): _as_str(v)
                      for k, v in _as_dict(d.get('options')).items()
                      if _as_str(v)},
-            proxy_mode=_as_str(d.get('proxy_mode'), PROXY_INHERIT),
+            proxy_mode=_as_str(d.get('proxy_mode'), PROXY_DIRECT),
             proxy_url=_as_str(d.get('proxy_url'), ''),
             username=_as_str(d.get('username'), ''),
             password_enc=_as_str(d.get('password_enc'), ''),
@@ -444,28 +444,44 @@ class SiteConfig:
         )
 
 
-def resolve_site_proxy(site: 'SiteConfig', global_proxy: str,
-                       global_mode: str = PROXY_DIRECT) -> str:
+def resolve_proxy(mode: str, own_url: str, main_proxy: str) -> str:
+    """统一的代理三选一：直连（默认）/ 主代理 / 自定义。
+
+    所有"需要联网的地方"（站点、通知渠道、模板同步、WebDAV、AI）都走这里，
+    保证同一份配置在各个功能上的含义完全一致。
+
+        direct            -> 空串（直连）
+        custom            -> own_url
+        其它（含 inherit） -> main_proxy（主代理地址）
+
+    inherit 是历史值，语义就是"用主代理"，因此兼容到同一个分支里。
+    """
+    m = (mode or '').strip().lower() or PROXY_DIRECT
+    if m == PROXY_CUSTOM:
+        return (own_url or '').strip()
+    if m == PROXY_INHERIT or m == 'main':
+        return (main_proxy or '').strip()
+    # direct / 空值 / 写错的值：一律直连。宁可连不上，也不要偷偷走代理
+    # （"为什么这个站点走了代理"比"为什么连不上"更难查）。
+    return ''
+
+
+def resolve_site_proxy(site: 'SiteConfig', main_proxy: str,
+                       _global_mode: str = '') -> str:
     """算出某个站点最终该用哪个代理地址。
 
-    返回空串表示直连。规则：
-        inherit -> 跟随全局（全局是 direct 就用空；是 custom 就用全局地址）
+    返回空串表示直连。规则同 resolve_proxy：
         direct  -> 强制直连（返回空串）
+        inherit -> 用主代理（设置里填的那个地址）
         custom  -> 用站点自己的 proxy_url
 
     单独抽成函数是因为它决定"这个站点走不走代理"，
     是排查"为什么这个站点连不上"时第一个要看的东西，
     必须只有一处实现、可单测。
     """
-    mode = (site.proxy_mode or PROXY_INHERIT).strip().lower()
-    if mode == PROXY_DIRECT:
-        return ''
-    if mode == PROXY_CUSTOM:
-        return (site.proxy_url or '').strip()
-    # inherit
-    if (global_mode or '').strip().lower() == PROXY_DIRECT:
-        return ''
-    return (global_proxy or '').strip()
+    # _global_mode 保留只为兼容旧调用方：现在"主代理"由各处的三选一决定，
+    # 全局已经没有开关了（设置里那栏只是主代理的地址）。
+    return resolve_proxy(site.proxy_mode, site.proxy_url, main_proxy)
 
 
 def effective_global_proxy(proxy: str, mode: str) -> str:
@@ -649,6 +665,9 @@ class WebdavConfig:
     # 是否把"加密密钥"也一并备份到云端。
     # 默认关闭：密钥 + 备份文件 = 全部明文密码，属于安全取舍，必须由用户主动开启。
     backup_key: bool = False
+    # 备份走哪个代理：direct（默认）/ inherit（主代理）/ custom
+    proxy_mode: str = PROXY_DIRECT
+    proxy_url: str = ''
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -664,6 +683,8 @@ class WebdavConfig:
         base.auto_interval_minutes = _as_int(
             d.get('auto_interval_minutes'), 0, 0)
         base.backup_key = _as_bool(d.get('backup_key'), False)
+        base.proxy_mode = _as_str(d.get('proxy_mode'), PROXY_DIRECT)
+        base.proxy_url = _as_str(d.get('proxy_url'), '')
         return base
 
 
@@ -717,6 +738,10 @@ class AiConfig:
     # 打开后仍会先做脱敏（去标签/抹 Cookie·token·邮箱·长数字/截断 4000 字符）。
     include_page_excerpt: bool = False
 
+    # 调用 DeepSeek 走哪个代理：direct（默认）/ inherit（主代理）/ custom
+    proxy_mode: str = PROXY_DIRECT
+    proxy_url: str = ''
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -752,6 +777,8 @@ class AiConfig:
             src.get('fail_threshold'), base.fail_threshold, 0, 1000)
         base.include_page_excerpt = _as_bool(
             src.get('include_page_excerpt'), base.include_page_excerpt)
+        base.proxy_mode = _as_str(src.get('proxy_mode'), PROXY_DIRECT)
+        base.proxy_url = _as_str(src.get('proxy_url'), '')
 
         if legacy_per_day is not None:
             n = _as_int(legacy_per_day, -1, 0)
@@ -799,6 +826,9 @@ class AppConfig:
     # 每天几点拉（'HH:MM'），配合下面的间隔天数
     plugin_sync_time: str = '03:00'
     plugin_sync_interval_days: int = 1
+    # 同步走哪个代理：direct（默认）/ inherit（主代理）/ custom
+    plugin_sync_proxy_mode: str = PROXY_DIRECT
+    plugin_sync_proxy_url: str = ''
 
     # --- 访问控制 ---
     # 网页界面是否需要登录。
@@ -835,6 +865,8 @@ class AppConfig:
             'plugin_sync_source': self.plugin_sync_source,
             'plugin_sync_time': self.plugin_sync_time,
             'plugin_sync_interval_days': int(self.plugin_sync_interval_days),
+            'plugin_sync_proxy_mode': self.plugin_sync_proxy_mode,
+            'plugin_sync_proxy_url': self.plugin_sync_proxy_url,
             'auth_required': self.auth_required,
             'auth_password_enc': self.auth_password_enc,
             'session_hashes': list(self.session_hashes or []),
@@ -885,6 +917,10 @@ class AppConfig:
             plugin_sync_time=_as_str(d.get('plugin_sync_time'), '03:00'),
             plugin_sync_interval_days=_as_int(
                 d.get('plugin_sync_interval_days'), 1, 1, 365),
+            plugin_sync_proxy_mode=_as_str(
+                d.get('plugin_sync_proxy_mode'), PROXY_DIRECT),
+            plugin_sync_proxy_url=_as_str(
+                d.get('plugin_sync_proxy_url'), ''),
             auth_required=_as_bool(d.get('auth_required'), True),
             auth_password_enc=_as_str(d.get('auth_password_enc'), ''),
             session_hashes=_as_str_list(d.get('session_hashes')),

@@ -430,52 +430,75 @@ class TestActionableErrors(ServiceCase):
 
 
 
-class TestGlobalProxyMode(ServiceCase):
-    """「联网方式」选直连时，地址栏里残留的地址不该被任何功能偷偷用上。"""
+class TestPerFeatureProxy(ServiceCase):
+    """每个要联网的地方各自选：直连（默认）/ 主代理 / 自定义。
 
-    PROXY = 'http://10.0.0.1:7890'
+    全局只有一个「主代理地址」，本身不生效 —— 谁选了「主代理」谁才用它。
+    """
 
-    def _save(self, mode):
+    MAIN = 'http://10.0.0.1:7890'
+    OWN = 'http://own:1080'
+
+    def _cfg(self, **kw):
         cfg = self.svc.load_config()
-        cfg.proxy = self.PROXY
-        cfg.proxy_mode = mode
+        cfg.proxy = self.MAIN
+        for k, v in kw.items():
+            setattr(cfg, k, v)
         self.svc.save_config(cfg)
+        return cfg
 
-    def test_direct_mode_ignores_leftover_address(self):
-        self._save('direct')
+    # --- 默认全直连 ---
+    def test_defaults_are_direct(self):
+        self._cfg()
         self.assertEqual(self.svc._sync_proxy(), '',
-                         '直连时模板同步不该走代理')
+                         '默认直连：模板同步不用主代理')
 
         cfg = self.svc.load_config()
         cfg.webdav.url = 'https://dav.example.com/dav/'
         self.svc.save_config(cfg)
         client = self.svc.webdav_client(self.svc.load_config())
-        self.assertEqual(client.proxy, '', '直连时 WebDAV 也不该走代理')
+        self.assertEqual(client.proxy, '', '默认直连：WebDAV 不用主代理')
 
-    def test_ai_models_respects_direct_mode(self):
-        self._save('direct')
-        cfg = self.svc.load_config()
+    def test_ai_default_direct(self):
+        cfg = self._cfg()
         cfg.ai.api_key_enc = self.svc.box.encrypt('sk-test')
         self.svc.save_config(cfg)
         seen = {}
 
         def fake(ai, key, proxy):
             seen['proxy'] = proxy
-            return {'ok': True, 'models': [{'id': 'deepseek-chat'}], 'status': 200}
+            return {'ok': True, 'models': [], 'status': 200}
 
         with mock.patch('app.deepseek.list_models', side_effect=fake):
             self.svc.list_ai_models()
-        self.assertEqual(seen.get('proxy'), '', '直连时拉模型列表也不该走代理')
+        self.assertEqual(seen.get('proxy'), '', '默认直连：AI 不用主代理')
 
-    def test_custom_mode_uses_address(self):
-        self._save('custom')
-        self.assertEqual(self.svc._sync_proxy(), self.PROXY)
-        cfg = self.svc.load_config()
+    # --- 选「主代理」才用全局地址 ---
+    def test_sync_can_pick_main_proxy(self):
+        self._cfg(plugin_sync_proxy_mode='inherit')
+        self.assertEqual(self.svc._sync_proxy(), self.MAIN)
+
+    def test_webdav_can_pick_main_proxy(self):
+        cfg = self._cfg()
         cfg.webdav.url = 'https://dav.example.com/dav/'
+        cfg.webdav.proxy_mode = 'inherit'
         self.svc.save_config(cfg)
         client = self.svc.webdav_client(self.svc.load_config())
-        self.assertEqual(client.proxy, self.PROXY)
+        self.assertEqual(client.proxy, self.MAIN)
+
+    # --- 选「自定义」用自己的地址 ---
+    def test_sync_custom_url(self):
+        self._cfg(plugin_sync_proxy_mode='custom',
+                  plugin_sync_proxy_url=self.OWN)
+        self.assertEqual(self.svc._sync_proxy(), self.OWN)
+
+    def test_webdav_custom_url(self):
+        cfg = self._cfg()
+        cfg.webdav.url = 'https://dav.example.com/dav/'
+        cfg.webdav.proxy_mode = 'custom'
+        cfg.webdav.proxy_url = self.OWN
+        self.svc.save_config(cfg)
+        client = self.svc.webdav_client(self.svc.load_config())
+        self.assertEqual(client.proxy, self.OWN)
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)

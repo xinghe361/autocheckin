@@ -212,16 +212,12 @@ class Service:
         return PluginSync(self.plugins, proxy_fn=lambda: self._sync_proxy())
 
     def _sync_proxy(self) -> str:
-        """模板同步用哪个代理：跟全局「联网方式」一致。
-
-        ⚠️ 以前这里是 `if proxy_mode == 'custom'`：只要模式不是 custom 就直连，
-        但用户把「直连」和「地址」同时留着时，别的地方（备份/AI）又会用地址 ——
-        同一份配置在不同功能上表现不一致，很难排查。统一走 effective_global_proxy。
-        """
+        """模板同步走哪个代理：模板同步自己选直连 / 主代理 / 自定义。"""
         try:
-            from .models import effective_global_proxy
+            from .models import resolve_proxy
             cfg = self.load_config()
-            return effective_global_proxy(cfg.proxy, cfg.proxy_mode)
+            return resolve_proxy(cfg.plugin_sync_proxy_mode,
+                                 cfg.plugin_sync_proxy_url, cfg.proxy)
         except Exception:                                       # noqa: BLE001
             return ''
 
@@ -513,11 +509,10 @@ class Service:
     def make_runner(self, cfg: AppConfig) -> Runner:
         if self._runner_factory:
             return self._runner_factory(self)
-        # 全局代理：模式为"直连"时一律传空串。
-        # 这样"选了直连但地址栏还留着旧地址"也不会意外走代理。
-        from .models import effective_global_proxy
+        # 这里传的是**主代理地址**本身（设置里填的那个），不再做"全局开关"
+        # 判断：每个站点自己选直连 / 主代理 / 自定义，由 resolve_site_proxy 决定。
         return Runner(self.store, box=self.box, browser=self.browser,
-                      proxy=effective_global_proxy(cfg.proxy, cfg.proxy_mode),
+                      proxy=cfg.proxy,
                       version=self.version,
                       global_proxy_mode=cfg.proxy_mode)
 
@@ -998,10 +993,11 @@ class Service:
     # ------------------------------------------------------------ 备份
     def webdav_client(self, cfg: AppConfig) -> W.WebdavClient:
         wd = cfg.webdav
-        from .models import effective_global_proxy
+        from .models import resolve_proxy
         password = self.box.try_decrypt(wd.password_enc, '') if wd.password_enc else ''
         return W.WebdavClient(wd.url, wd.username, password,
-                              proxy=effective_global_proxy(cfg.proxy, cfg.proxy_mode))
+                              proxy=resolve_proxy(wd.proxy_mode, wd.proxy_url,
+                                                  cfg.proxy))
 
     def backup_now(self) -> Dict[str, Any]:
         cfg = self.load_config()
@@ -1119,9 +1115,10 @@ class Service:
             password = self.box.try_decrypt(cfg.webdav.password_enc, '')
         if not username:
             username = cfg.webdav.username
-        from .models import effective_global_proxy
+        from .models import resolve_proxy
         client = W.WebdavClient(url, username, password,
-                                proxy=effective_global_proxy(cfg.proxy, cfg.proxy_mode))
+                                proxy=resolve_proxy(cfg.webdav.proxy_mode,
+                                                    cfg.webdav.proxy_url, cfg.proxy))
         return W.test_connection(client)
 
     # ------------------------------------------------------------ 通知
@@ -1142,9 +1139,10 @@ class Service:
         if not key:
             return {'ok': False, 'models': [], 'status': 0,
                     'error': '还没有配置 DeepSeek API Key', 'model': cfg.ai.model}
-        from .models import effective_global_proxy
+        from .models import resolve_proxy
         out = DS.list_models(cfg.ai, key,
-                             effective_global_proxy(cfg.proxy, cfg.proxy_mode))
+                             resolve_proxy(cfg.ai.proxy_mode, cfg.ai.proxy_url,
+                                           cfg.proxy))
         out['model'] = cfg.ai.model or DS.DEEPSEEK_DEFAULT_MODEL
         out['default'] = DS.DEEPSEEK_DEFAULT_MODEL
         return out

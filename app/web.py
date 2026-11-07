@@ -44,6 +44,16 @@ class ApiError(Exception):
         self.status = status
 
 
+def _proxy_mode(v) -> str:
+    """收敛三选一的取值：只认 direct / inherit / custom，其它一律直连。
+
+    页面上可能出现拼错、也可能是老配置里的空串 —— 都不能让"走不走代理"
+    这种影响连通性的东西落在一个未知值上。
+    """
+    m = str(v or '').strip().lower()
+    return m if m in ('direct', 'inherit', 'custom') else 'direct'
+
+
 class WebApp:
     """把 service 暴露成 JSON 接口。维护路由表，可脱离 socket 单测。"""
 
@@ -471,6 +481,9 @@ class WebApp:
     # ------------------------------------------------------------------
     def _apply_settings(self, cfg, body: Dict[str, Any]) -> None:
         """把界面提交的设置写进配置；空字符串表示"不修改"凭据。"""
+        # 全局「联网方式」开关已取消：设置里那栏只是主代理地址。
+        # 仍接受旧客户端传来的 proxy_mode，但不再影响任何功能
+        # （各处都用自己的三选一，见 models.resolve_proxy）。
         if 'proxy_mode' in body:
             mode = str(body.get('proxy_mode') or '').lower()
             cfg.proxy_mode = mode if mode in ('direct', 'custom') else 'direct'
@@ -503,6 +516,11 @@ class WebApp:
             except (TypeError, ValueError):
                 v = 1
             cfg.plugin_sync_interval_days = max(1, min(365, v))
+        # 同步走哪个代理：直连（默认）/ 主代理 / 自定义
+        if 'plugin_sync_proxy_mode' in body:
+            cfg.plugin_sync_proxy_mode = _proxy_mode(body.get('plugin_sync_proxy_mode'))
+        if 'plugin_sync_proxy_url' in body:
+            cfg.plugin_sync_proxy_url = str(body.get('plugin_sync_proxy_url') or '')[:300]
 
         n = body.get('notify') or {}
         if n:
@@ -546,6 +564,10 @@ class WebApp:
                 wc.enabled = bool(w['enabled'])
             if 'backup_key' in w:
                 wc.backup_key = bool(w['backup_key'])
+            if 'proxy_mode' in w:
+                wc.proxy_mode = _proxy_mode(w.get('proxy_mode'))
+            if 'proxy_url' in w:
+                wc.proxy_url = str(w.get('proxy_url') or '')[:300]
             if w.get('password'):
                 wc.password_enc = self.service.box.encrypt(str(w['password']))
 
@@ -573,6 +595,10 @@ class WebApp:
             # AI 分析时是否附带失败页面片段（默认关；见 AiConfig 的说明）
             if 'include_page_excerpt' in a:
                 ac.include_page_excerpt = bool(a['include_page_excerpt'])
+            if 'proxy_mode' in a:
+                ac.proxy_mode = _proxy_mode(a.get('proxy_mode'))
+            if 'proxy_url' in a:
+                ac.proxy_url = str(a.get('proxy_url') or '')[:300]
             if a.get('api_key'):
                 ac.api_key_enc = self.service.box.encrypt(str(a['api_key']))
 
@@ -1282,6 +1308,17 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
           <span class="track"></span>
         </label>
       </div>
+      <div class="row" style="margin-top:10px;gap:8px;align-items:flex-end">
+        <div style="max-width:190px"><label>同步走代理</label>
+          <select id="set_sync_pmode" class="pmode">
+          <option value="direct">直连（默认）</option>
+          <option value="inherit">主代理</option>
+          <option value="custom">自定义</option>
+          </select></div>
+        <div id="set_sync_purlBox" style="flex:1;display:none">
+          <label>自定义代理地址</label>
+          <input id="set_sync_purl" placeholder="http://10.0.0.1:7890"></div>
+      </div>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="b pri" onclick="syncNow()">立即同步</button>
         <button class="b" onclick="saveSyncSettings()">保存来源设置</button>
@@ -1352,28 +1389,21 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
        每次改一项都要滚到底，很费事。这里放在顶部并吸顶，
        滚动时始终可见；底部也保留一个入口，方便"改完最后一项"顺手保存。 -->
   <div class="formfoot settings-save">
-    <button class="b pri" onclick="saveSettings()">保存全部设置</button>
-    <span class="grow"></span>
     <span class="hint" style="margin:0">改完随时点这里</span>
+    <span class="grow"></span>
+    <button class="b pri" onclick="saveSettings()">保存全部设置</button>
   </div>
   <div id="setMsg" class="msg"></div>
 
   <div class="card">
-    <h2>代理设置</h2>
-    <label>联网方式</label>
-    <div class="radios">
-      <label><input type="radio" name="set_pmode" value="direct"
-        onchange="swGlobalProxy()"><span>直连（不走代理）</span></label>
-      <label><input type="radio" name="set_pmode" value="custom"
-        onchange="swGlobalProxy()"><span>走代理</span></label>
+    <h2>主代理地址</h2>
+    <label>地址</label>
+    <input id="set_proxy" placeholder="http://10.0.0.1:7890">
+    <div class="hint">
+      这里只是<b>地址仓库</b>，填了不会自动生效。每个要联网的地方
+      （站点 / 模板同步 / WebDAV / AI / 通知渠道）各自选
+      <b>直连（默认）/ 主代理 / 自定义</b>，只有选了「主代理」的才用这里的地址。
     </div>
-    <div id="set_proxyBox" style="margin-top:10px">
-      <label>代理地址</label>
-      <input id="set_proxy" placeholder="http://10.0.0.1:7890">
-      <div class="hint">填了才生效。留空或选「直连」都表示不走代理。</div>
-    </div>
-    <div class="hint">个别站点可以单独设置走不走代理 —— 到「站点」页点该站点的
-      「编辑」，在「联网方式」里改。</div>
     <div class="fsec">
       <h4>页面自动刷新</h4>
       <div class="opt">
@@ -1448,6 +1478,17 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       <div><label>&nbsp;</label>
         <button class="b" onclick="listAiModels()">测试连接 / 查看可用模型</button></div>
     </div>
+    <div class="row" style="margin-top:8px;gap:8px;align-items:flex-end">
+      <div style="max-width:190px"><label>AI 走代理</label>
+        <select id="set_ai_pmode" class="pmode">
+        <option value="direct">直连（默认）</option>
+          <option value="inherit">主代理</option>
+          <option value="custom">自定义</option>
+        </select></div>
+      <div id="set_ai_purlBox" style="flex:1;display:none">
+        <label>自定义代理地址</label>
+        <input id="set_ai_purl" placeholder="http://10.0.0.1:7890"></div>
+    </div>
     <div class="hint" id="set_modelHint" style="margin-top:6px">
       点右边按钮会真去打一次 DeepSeek 的 <code>/models</code>：既能验证 Key，
       也会列出<b>你账号真实可用</b>的模型名。<br>
@@ -1516,6 +1557,17 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       <div><label>用户名</label><input id="set_wduser"></div>
       <div><label>密码（留空＝不修改）</label><input id="set_wdpw" type="password"></div>
     </div>
+    <div class="row" style="margin-top:8px;gap:8px;align-items:flex-end">
+      <div style="max-width:190px"><label>备份走代理</label>
+        <select id="set_wd_pmode" class="pmode">
+        <option value="direct">直连（默认）</option>
+          <option value="inherit">主代理</option>
+          <option value="custom">自定义</option>
+        </select></div>
+      <div id="set_wd_purlBox" style="flex:1;display:none">
+        <label>自定义代理地址</label>
+        <input id="set_wd_purl" placeholder="http://10.0.0.1:7890"></div>
+    </div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="b" onclick="testWd()">测试连接</button>
       <button class="b pri" onclick="backupNow()">立即备份</button>
@@ -1571,10 +1623,6 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     <div id="keyMsg" class="msg"></div>
   </div>
 
-  <div style="display:flex;gap:8px">
-    <button class="b pri" onclick="saveSettings()">保存全部设置</button>
-    <span class="hint" style="margin:0">（顶部也有一个，不用往上翻）</span>
-  </div>
 </section>
 
 </main>
@@ -1615,6 +1663,7 @@ function switchTab(name){
 document.querySelectorAll('#mainNav button[data-tab]').forEach(function(b){
   b.onclick = function(){ switchTab(b.dataset.tab); };
 });
+syncProxyPicks();
 /* 「新增站点」上次选的模式记下来（模板 / 录制），别每次都手动切 */
 (function(){
   try{
@@ -2448,14 +2497,32 @@ function setRadio(name, value){
   /* 程序改 checked 不会触发 change，选中态得手动重画 */
   paintRadios();
 }
-/* 代理地址框只在选「走代理」时可用，避免"选了直连却还留着旧地址"的困惑 */
-function swGlobalProxy(){
-  var mode = radioValue('set_pmode');
-  var box = $('set_proxyBox');
-  var inp = $('set_proxy');
-  var on = (mode === 'custom');
-  if(box) box.style.display = on ? '' : 'none';
-  if(inp) inp.disabled = !on;
+/* 「直连 / 主代理 / 自定义」三选一：只有选「自定义」时才显示地址框。
+   站点表单用的是分段按钮，这里几处用下拉（省地方、也更容易一眼看全三个选项）。 */
+function bindProxyPick(selId, boxId){
+  var sel = $(selId);
+  if(!sel) return;
+  function sync(){
+    var box = $(boxId);
+    if(box) box.style.display = (sel.value === 'custom') ? '' : 'none';
+  }
+  sel.addEventListener('change', sync);
+  sync();
+}
+function syncProxyPicks(){
+  bindProxyPick('set_sync_pmode', 'set_sync_purlBox');
+  bindProxyPick('set_wd_pmode', 'set_wd_purlBox');
+  bindProxyPick('set_ai_pmode', 'set_ai_purlBox');
+}
+function setProxyPick(selId, mode, url){
+  var sel = $(selId);
+  if(!sel) return;
+  var m = (mode || 'direct').toLowerCase();
+  if(['direct', 'inherit', 'custom'].indexOf(m) < 0) m = 'direct';
+  sel.value = m;
+  var box = $(selId.replace('_pmode', '_purl'));
+  if(box) box.value = url || '';
+  sel.dispatchEvent(new Event('change'));
 }
 /* 估算"这个站点每天会被调用几次 AI"，让用户不用自己算。
 
@@ -2559,11 +2626,8 @@ document.addEventListener('change', function(e){
     swSiteProxy(sid);
     swSyncRadios(sid);
   } else {
-    /* 全局控件：代理方式单选 / AI 上限输入框。
-       ⚠️ 原来的 swAiLimits() 已随"每日尝试上限"一起删除，这里忘了改，
-       导致每次勾选站点开关都抛 ReferenceError（控制台报错、用户以为坏了）。
-       全局这些控件对应的是 calcAiCalls() 与 swGlobalProxy()。 */
-    swGlobalProxy();
+    /* 全局控件：AI 上限等输入框。代理方式已改成各功能自己的三选一，
+       这里不再有 swGlobalProxy()。 */
     calcAiCalls();
   }
 }, true);
@@ -2632,7 +2696,7 @@ function siteFormHtml(s, c){
   var id = s.id, p = 'f_'+id+'_';
   var isDaily = (s.mode !== 'success_based');
   /* 站点级代理模式。老数据可能是空串，当作"跟随全局"处理 */
-  var sitePmode = s.proxy_mode || 'inherit';
+  var sitePmode = s.proxy_mode || 'direct';
   if(['inherit','direct','custom'].indexOf(sitePmode) < 0) sitePmode = 'inherit';
 
   /* ---- 登录状态区 ---- */
@@ -2815,17 +2879,17 @@ function siteFormHtml(s, c){
 
   + '<div class="fsec"><h4>联网方式</h4>'
   +   '<div class="hint" style="margin:0 0 4px">这个站点单独走不走代理。'
-  +     '国内站点一般直连即可；被墙或被污染的域名需要走代理。</div>'
+  +     '国内站点一般直连；被墙或被污染的域名才需要代理。</div>'
   +   '<div class="radios">'
-  +     '<label><input type="radio" name="'+p+'pmode" value="inherit"'
-  +       (sitePmode==='inherit'?' checked':'')
-  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>跟随全局设置</span></label>'
   +     '<label><input type="radio" name="'+p+'pmode" value="direct"'
   +       (sitePmode==='direct'?' checked':'')
-  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>强制直连</span></label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>直连（默认）</span></label>'
+  +     '<label><input type="radio" name="'+p+'pmode" value="inherit"'
+  +       (sitePmode==='inherit'?' checked':'')
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>主代理</span></label>'
   +     '<label><input type="radio" name="'+p+'pmode" value="custom"'
   +       (sitePmode==='custom'?' checked':'')
-  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>用这个代理</span></label>'
+  +       ' data-needs-sync="1" data-sid="'+esc(id)+'"><span>自定义</span></label>'
   +   '</div>'
   +   '<div id="'+p+'proxyBox" style="margin-top:8px;'
   +     (sitePmode==='custom'?'':'display:none')+'">'
@@ -2982,7 +3046,7 @@ function saveSite(id){
     })(),
     ai_enabled: $(p+'aiOn').checked,
     notify: $(p+'notify').value,
-    proxy_mode: radioValue(p+'pmode') || 'inherit',
+    proxy_mode: radioValue(p+'pmode') || 'direct',
     proxy_url: ($(p+'proxy') ? $(p+'proxy').value.trim() : ''),
     headers: collectHeaders(id)
   };
@@ -3740,6 +3804,8 @@ function loadSyncForm(){
       || ((META && META.default_template_source) || '');
     $('set_sync_time').value = d.plugin_sync_time || '03:00';
     $('set_sync_days').value = d.plugin_sync_interval_days || 1;
+    setProxyPick('set_sync_pmode', d.plugin_sync_proxy_mode,
+                 d.plugin_sync_proxy_url);
     loadSyncStatus();
   }).catch(function(e){ show('syncMsg', e.message, 'err'); });
 }
@@ -3752,7 +3818,9 @@ function saveSyncSettings(){
     plugin_sync_enabled: $('set_sync_on').checked,
     plugin_sync_source: $('set_sync_src').value.trim(),
     plugin_sync_time: $('set_sync_time').value.trim(),
-    plugin_sync_interval_days: parseInt($('set_sync_days').value||'1', 10)
+    plugin_sync_interval_days: parseInt($('set_sync_days').value||'1', 10),
+    plugin_sync_proxy_mode: $('set_sync_pmode').value,
+    plugin_sync_proxy_url: $('set_sync_purl').value.trim()
   };
   api('POST','/api/settings', body).then(function(){
     show('syncMsg','已保存。自动同步' + (body.plugin_sync_enabled ? '已开启' : '仍关闭')
@@ -3774,8 +3842,10 @@ function loadSettings(){
     SETTINGS = d;
     $('set_proxy').value = d.proxy || '';
     /* 代理模式：没填地址时默认显示「直连」 */
-    setRadio('set_pmode', d.proxy_mode || (d.proxy ? 'custom' : 'direct'));
-    swGlobalProxy();
+    setProxyPick('set_sync_pmode', d.plugin_sync_proxy_mode, d.plugin_sync_proxy_url);
+    setProxyPick('set_wd_pmode', (d.webdav || {}).proxy_mode,
+                 (d.webdav || {}).proxy_url);
+    setProxyPick('set_ai_pmode', (d.ai || {}).proxy_mode, (d.ai || {}).proxy_url);
     $('set_headless').value = d.headless ? '1' : '0';
     $('set_cdp').value = d.remote_cdp_url || '';
     var n = d.notify || {};
@@ -3925,7 +3995,7 @@ function renderChannels(n, d){
       +     '<select class="chProxy" data-ch="'+esc(ch)+'">'
       /* 默认直连：通知渠道多在公网，跟着签到的主代理反而容易失败 */
       +       '<option value="direct"'+(cp.mode!=='custom'&&cp.mode!=='inherit'?' selected':'')+'>直连（默认）</option>'
-      +       '<option value="inherit"'+(cp.mode==='inherit'?' selected':'')+'>跟随主代理</option>'
+      +       '<option value="inherit"'+(cp.mode==='inherit'?' selected':'')+'>主代理</option>'
       +       '<option value="custom"'+(cp.mode==='custom'?' selected':'')+'>自定义</option>'
       +     '</select>'
       +     '<input class="chProxyUrl" data-ch="'+esc(ch)+'" placeholder="自定义代理地址" '
@@ -3988,7 +4058,6 @@ function collectNotify(){
 
 function saveSettings(){
   var body = {
-    proxy_mode: radioValue('set_pmode') || 'direct',
     proxy: $('set_proxy').value.trim(),
     headless: $('set_headless').value === '1',
     remote_cdp_url: $('set_cdp').value.trim(),
@@ -3996,14 +4065,20 @@ function saveSettings(){
     plugin_sync_source: $('set_sync_src').value.trim(),
     plugin_sync_time: $('set_sync_time').value.trim(),
     plugin_sync_interval_days: parseInt($('set_sync_days').value||'1', 10),
+    plugin_sync_proxy_mode: $('set_sync_pmode').value,
+    plugin_sync_proxy_url: $('set_sync_purl').value.trim(),
     notify: collectNotify(),
     webdav: {url: $('set_wdurl').value.trim(), username: $('set_wduser').value.trim(),
-             password: $('set_wdpw').value, backup_key: $('set_wdkey').checked},
+             password: $('set_wdpw').value, backup_key: $('set_wdkey').checked,
+             proxy_mode: $('set_wd_pmode').value,
+             proxy_url: $('set_wd_purl').value.trim()},
     ai: {api_key: $('set_aikey').value, model: $('set_model').value.trim(),
          ai_after_failures: parseInt($('set_aiafter').value||'0', 10),
          max_calls_per_day: parseInt($('set_maxai').value||'0', 10),
          fail_threshold: parseInt($('set_aifail').value||'0', 10),
-         include_page_excerpt: $('set_aiexcerpt').checked}
+         include_page_excerpt: $('set_aiexcerpt').checked,
+         proxy_mode: $('set_ai_pmode').value,
+         proxy_url: $('set_ai_purl').value.trim()}
   };
   api('POST','/api/settings', body).then(function(){
     show('setMsg','已保存。','ok'); refreshAll(); loadSettings();

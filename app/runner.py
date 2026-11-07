@@ -71,7 +71,7 @@ def _default_checkin(site: SiteConfig, proxy: str, password: str, browser,
 
 
 def _default_analyze(site: SiteConfig, result: CheckinResult, ai_cfg, api_key: str,
-                     proxy: str) -> Any:
+                     main_proxy: str) -> Any:
     """默认的 AI 分析入口。
 
     页面片段从 result 上取，**不扩展 analyze_fn 的签名** —— 那是可注入的
@@ -79,10 +79,15 @@ def _default_analyze(site: SiteConfig, result: CheckinResult, ai_cfg, api_key: s
     是否附带由开关决定（默认关），脱敏在 deepseek 内部再做一次。
     """
     from .deepseek import analyze
+    from .models import resolve_proxy
 
     excerpt = ''
     if getattr(ai_cfg, 'include_page_excerpt', False):
         excerpt = str(getattr(result, 'page_excerpt', '') or '')
+    # AI 也走自己的三选一（直连 / 主代理 / 自定义），不再跟着站点的代理走：
+    # 站点可能因为被墙要挂代理，而 DeepSeek 往往反过来（国内直连更快）。
+    proxy = resolve_proxy(getattr(ai_cfg, 'proxy_mode', ''),
+                          getattr(ai_cfg, 'proxy_url', ''), main_proxy)
     return analyze(site, result, ai_cfg, api_key, proxy=proxy,
                    page_excerpt=excerpt)
 

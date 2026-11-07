@@ -243,16 +243,26 @@ class TestSettingsSaveButtonOnTop(unittest.TestCase):
         i = html.find('id="tab-settings"')
         self.assertGreater(i, 0)
         i_btn = html.find('保存全部设置', i)
-        i_proxy = html.find('代理设置', i)
+        i_proxy = html.find('主代理地址', i)
         self.assertGreater(i_btn, 0, '设置页里应有保存按钮')
         self.assertLess(i_btn, i_proxy, '保存按钮应在设置内容之前（顶部）')
 
-    def test_bottom_entry_still_exists(self):
-        """底部也留一个，方便"改完最后一项顺手保存"。"""
+    def test_only_one_save_button(self):
+        """只保留顶部那一个（底部那个已按用户要求删掉）。"""
         html = self._html()
         i = html.find('id="tab-settings"')
         end = html.find('</section>', i)
-        self.assertGreaterEqual(html.count('保存全部设置', i, end), 2)
+        self.assertEqual(html.count('保存全部设置', i, end), 1)
+
+    def test_button_sits_on_the_right(self):
+        """保存条里按钮排在最后：左边提示、中间撑开、右边按钮。"""
+        html = self._html()
+        i = html.find('class="formfoot settings-save"')
+        self.assertGreater(i, 0, '找不到保存条')
+        seg = html[i:i + 400]
+        self.assertGreater(seg.find('grow'), seg.find('改完随时点这里'),
+                           'grow 要在提示之后，才能把按钮顶到右边')
+        self.assertGreater(seg.find('保存全部设置'), seg.find('grow'))
 
     def test_sticky_style_present_and_below_header(self):
         html = self._html()

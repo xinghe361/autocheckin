@@ -145,10 +145,13 @@ try:
           'setInterval(function(){\n  if($(\'mainBody\').className === \'\') refreshAll();\n}, 60000);'
           not in html)
 
-    # ---- 代理：全局"直连/走代理" + 站点级三选一 ----
-    check('设置页有全局联网方式单选', 'name="set_pmode"' in html
-          and 'value="direct"' in html and 'value="custom"' in html)
-    check('设置页按模式显隐代理地址框', 'set_proxyBox' in html and 'swGlobalProxy' in html)
+    # ---- 代理：全局只有"主代理地址"，各功能自己三选一 ----
+    check('设置页有主代理地址输入框', 'id="set_proxy"' in html
+          and '主代理地址' in html)
+    check('设置页不再有全局联网方式开关', 'name="set_pmode"' not in html)
+    check('同步/WebDAV/AI 各有三选一',
+          all(('id="%s"' % i) in html
+              for i in ('set_sync_pmode', 'set_wd_pmode', 'set_ai_pmode')))
     check('站点表单有站点级代理三选一',
           "value=\\\"inherit\\\"" in html or 'value="inherit"' in html)
     check('站点表单按模式显隐独立代理地址', 'swSiteProxy' in html)
