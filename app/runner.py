@@ -184,7 +184,8 @@ class Runner:
             return ''
         if not raw:
             return ''
-        # 兼容：历史数据里可能存的是 "name: value" 多行形式
+        # Cookie 可能是 "a=1; b=2" 的头形式，也可能是逐行 "name: value"，
+        # 交给解析器统一判断（两种都算合法输入）。
         from .cookies import CookieParseError, parse_cookie_input, \
             to_cookie_header
         try:
@@ -560,7 +561,7 @@ class Runner:
         self.store.merge_site_runtime(targets)
         self._persist_state_delta(state, targets, now)
         # AI 补丁改了站点配置（如 need_browser / success_keywords），
-        # 必须落盘，否则重启后又按旧配置签到。这里只回写**补丁允许的字段**，
+        # 必须落盘，否则重启后又按改动前的配置签到。这里只回写**补丁允许的字段**，
         # 不动用户改过的其它设置（整包写回会把用户改动一起覆盖掉）。
         self.store.merge_site_patch(targets)
         return report

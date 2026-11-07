@@ -185,14 +185,13 @@ class TestSiteCrud(ServiceCase):
             'id': 'x', 'name': 'X', 'mode': 'success_based',
             'jitter_enabled': True, 'jitter_seconds': 600,
             'retry_count': 5, 'retry_interval_minutes': 10,
-            'ai_after_failures': 4, 'ai_enabled': False,
+            'ai_enabled': False,
         })
         got = self.svc.get_site('x')
         self.assertEqual(got.mode, 'success_based')
         self.assertTrue(got.jitter_enabled)
         self.assertEqual(got.jitter_seconds, 600)
         self.assertEqual(got.retry_count, 5)
-        self.assertEqual(got.ai_after_failures, 4)
         self.assertFalse(got.ai_enabled)
 
     def test_steps_saved_from_dicts(self):

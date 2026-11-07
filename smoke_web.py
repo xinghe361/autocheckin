@@ -347,7 +347,7 @@ try:
     s = json.loads(body)['site']
     for k in ('mode', 'daily_hour', 'daily_minute', 'jitter_enabled',
               'jitter_seconds', 'retry_enabled', 'retry_count',
-              'retry_interval_minutes', 'ai_enabled', 'ai_after_failures',
+              'retry_interval_minutes', 'ai_enabled',
               'notify', 'need_browser', 'verify_ssl'):
         if k not in s:
             check('站点字段 %s 存在' % k, False)

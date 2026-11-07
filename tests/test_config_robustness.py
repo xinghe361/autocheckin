@@ -135,13 +135,13 @@ class TestMalformedConfigNeverCrashes(unittest.TestCase):
         self.assertEqual(len(cfg.sites), 1)
         self.assertTrue(cfg.auth_required)
 
-    def test_legacy_removed_ai_fields_migrated(self):
+    def test_legacy_ai_fields_are_ignored(self):
+        """已删除的 AI 字段读到就丢（不做迁移），且不能让配置读不出来。"""
         cfg, _, _ = self._boot({
-            'version': 1, 'sites': [],
+            'sites': [],
             'ai': {'ai_calls_per_day': 5, 'daily_limit_enabled': True,
                    'max_attempts_per_day': 3, 'global_max_calls_per_day': 9}})
-        # ai_calls_per_day 会迁移成每日上限（旧意图不丢）
-        self.assertEqual(cfg.ai.max_calls_per_day, 5)
+        self.assertEqual(cfg.ai.max_calls_per_day, 20, '旧字段不参与，保持默认')
 
     def test_bool_string_false_is_false(self):
         """bool("false") 是 True —— 这坑必须堵住。"""

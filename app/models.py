@@ -19,8 +19,7 @@ from .schedule import MODE_DAILY, SiteSchedule
 # --------------------------------------------------------------------------
 # 读配置时的类型收敛
 #
-# 为什么必须有这些：config.json 是用户可以手改、也可能来自旧版本或备份的
-# 文件。以前 from_dict 直接 `int(d.get(...))` / `dict(d.get(...))`，一旦
+# 为什么必须有这些：config.json 是用户可以手改、也可能被备份覆盖的文件。以前 from_dict 直接 `int(d.get(...))` / `dict(d.get(...))`，一旦
 # 类型不对就抛异常 —— 而这发生在**启动阶段**，后果是整个容器起不来：
 #     sites 是字符串      -> AttributeError: 'str' object has no attribute 'get'
 #     ai 是 list          -> TypeError
@@ -241,15 +240,16 @@ class SiteConfig:
     #
     # 语义：基准 = max(这个初始锚点, 上次成功时间)。
     # 也就是首次成功之前按锚点算，首次成功之后锚点自然被成功时间取代。
-    # -1 = 还没设置过（老配置/新建站点），此时按"现在 + 间隔"排第一次。
+    # -1 = 还没设置过（新建站点），此时按"现在 + 间隔"排第一次。
     success_anchor_minutes: int = -1
     jitter_enabled: bool = False
     jitter_seconds: int = 3600
     retry_enabled: bool = True
     retry_count: int = 3
     retry_interval_minutes: int = 30
+    # 是否允许对这个站点用 AI 分析（"什么时候分析"由全局设置决定，
+    # 站点上不再有"每几次失败分析一次"这个字段 —— 曾经有过，已删）
     ai_enabled: bool = True
-    ai_after_failures: int = 3
 
     # 单次执行的时长上限（秒），0 = 不限。
     #
@@ -342,7 +342,6 @@ class SiteConfig:
             retry_count=self.retry_count,
             retry_interval_minutes=self.retry_interval_minutes,
             ai_enabled=self.ai_enabled,
-            ai_after_failures=self.ai_after_failures,
             last_success_at=st.get('last_success_at'),
             last_attempt_at=st.get('last_attempt_at'),
             consecutive_failures=int(st.get('consecutive_failures') or 0),
@@ -417,7 +416,6 @@ class SiteConfig:
             retry_interval_minutes=_as_int(
                 d.get('retry_interval_minutes'), 30, 1, 1440),
             ai_enabled=_as_bool(d.get('ai_enabled'), True),
-            ai_after_failures=_as_int(d.get('ai_after_failures'), 3, 0, 100),
             timeout_seconds=_as_int(d.get('timeout_seconds'), 300, 0, 3600),
             notify=_as_str(d.get('notify'), ''),
             notify_override=(None if d.get('notify_override') is None
@@ -502,7 +500,7 @@ class NotifyConfig:
     # pushplus（实测 200）
     pushplus_token: str = ''
     # Server 酱（实测 200）
-    serverchan_key: str = ''
+    # Server 酱已从产品里移除，字段一并删除（不再保留空的占位字段）
     # 企业微信机器人（需把出口 IP 加白名单，实测 403）
     wecom_webhook: str = ''
     # Telegram（需走代理，实测 200）
@@ -513,9 +511,8 @@ class NotifyConfig:
     # 为什么单独列一组而不是直接改明文属性名：这样
     #   * 内存里仍用明文属性（notify.py 一行都不用改）
     #   * 磁盘上只存密文（明文在 to_dict 时被剥掉）
-    #   * 老配置（只有明文）能平滑迁移：读出来照常用，下次保存自动加密
     pushplus_token_enc: str = ''
-    serverchan_key_enc: str = ''
+    # （Server 酱的密文字段同上，已删除）
     wecom_webhook_enc: str = ''
     tg_bot_token_enc: str = ''
     tg_chat_id_enc: str = ''
@@ -535,7 +532,6 @@ class NotifyConfig:
     # 落盘时需要加密的字段（明文属性名 -> 密文属性名）
     SECRET_FIELDS = {
         'pushplus_token': 'pushplus_token_enc',
-        'serverchan_key': 'serverchan_key_enc',
         'wecom_webhook': 'wecom_webhook_enc',
         'tg_bot_token': 'tg_bot_token_enc',
         'tg_chat_id': 'tg_chat_id_enc',
@@ -619,7 +615,6 @@ class NotifyConfig:
         for enc_name in NotifyConfig.SECRET_FIELDS.values():
             setattr(base, enc_name, _as_str(d.get(enc_name), ''))
         base.pushplus_token = _as_str(d.get('pushplus_token'), '')
-        base.serverchan_key = _as_str(d.get('serverchan_key'), '')
         base.wecom_webhook = _as_str(d.get('wecom_webhook'), '')
         base.tg_bot_token = _as_str(d.get('tg_bot_token'), '')
         base.tg_chat_id = _as_str(d.get('tg_chat_id'), '')
@@ -730,17 +725,6 @@ class AiConfig:
         base = AiConfig()
         src = _as_dict(d)          # 非 dict（list/str/None）当空配置
 
-        # --- 旧字段迁移（逻辑统一前存在过的那些）---
-        # ai_calls_per_day（每站点每天调用 AI 几次）现在由
-        # ai_after_failures 的倍数 + max_calls_per_day 共同决定。
-        # 旧配置里如果显式设过，就把它当作"每天最多分析几次"的上限，
-        # 这样用户原来的意图（少调用）不会丢。
-        legacy_per_day = src.pop('ai_calls_per_day', None)
-        src.pop('daily_limit_enabled', None)      # 已移除：不再限制每天尝试次数
-        src.pop('max_attempts_per_day', None)     # 已移除：重试次数由站点决定
-        legacy_global = src.pop('global_max_calls_per_day', None)
-        # 更早的版本里 max_calls_per_day 存在过又被删过，语义相同，直接用
-
         # 逐字段按类型收敛，不再 setattr 原始值（否则 ai 写成 list/字符串
         # 会把配置搞坏，而且崩在启动阶段 -> 容器起不来）
         base.enabled = _as_bool(src.get('enabled'), base.enabled)
@@ -759,16 +743,6 @@ class AiConfig:
             src.get('include_page_excerpt'), base.include_page_excerpt)
         base.proxy_mode = _as_str(src.get('proxy_mode'), PROXY_DIRECT)
         base.proxy_url = _as_str(src.get('proxy_url'), '')
-
-        if legacy_per_day is not None:
-            n = _as_int(legacy_per_day, -1, 0)
-            # 只在用户没自己设过上限（仍是默认 20）时迁移，避免覆盖新选择
-            if n >= 0 and int(base.max_calls_per_day) == 20:
-                base.max_calls_per_day = n
-        elif legacy_global is not None:
-            n = _as_int(legacy_global, -1, 0)
-            if n >= 0 and int(base.max_calls_per_day) == 20:
-                base.max_calls_per_day = n
         return base
 
 
@@ -776,7 +750,6 @@ class AiConfig:
 class AppConfig:
     """全局配置。"""
 
-    version: int = 1
     # 主代理地址。**它本身不生效**：站点 / 模板同步 / WebDAV / AI / 通知渠道
     # 各自选「直连 / 主代理 / 自定义」，选了主代理的才用它（见 resolve_proxy）。
     proxy: str = ''
@@ -787,11 +760,6 @@ class AppConfig:
     headless: bool = True
     # 是否允许通过 CDP 连接外部已有的 Chrome（如 NAS 上的 Kasm Chrome）
     remote_cdp_url: str = ''
-    # 站点列表是否已被"显式管理"过（新增/删除站点、或加载过带站点的配置）。
-    # 现在内置站点已经没有了，这个标记只用于区分"真的管过"和"从没管过"，
-    # 便于以后做迁移/播种时不去覆盖用户的选择。
-    sites_initialized: bool = False
-
     # --- 站点模板插件同步（从 GitHub / https 地址拉模板）---
     # 需求原文：「自动可以设定几点拉一次，默认间隔为天，自动加上开关」
     # 关掉就只剩手动「立即同步」。
@@ -828,13 +796,11 @@ class AppConfig:
 
     def to_dict(self, include_secrets: bool = True) -> Dict[str, Any]:
         d = {
-            'version': self.version,
             'proxy': self.proxy,
             'timezone': self.timezone,
             'browser_path': self.browser_path,
             'headless': self.headless,
             'remote_cdp_url': self.remote_cdp_url,
-            'sites_initialized': bool(self.sites_initialized),
             'plugin_sync_enabled': bool(self.plugin_sync_enabled),
             'plugin_sync_source': self.plugin_sync_source,
             'plugin_sync_time': self.plugin_sync_time,
@@ -862,8 +828,7 @@ class AppConfig:
         # 顶层也全部走类型收敛：这是启动路径，任何一处抛异常都会让
         # 容器起不来（用户看到的现象就是"换了镜像但版本没变"）。
         d = _as_dict(d)
-        # 这里曾经按旧的全局 proxy_mode 做迁移（老配置"走代理"→三处默认主代理）。
-        # 已按用户要求去掉：不兼容老配置，旧键读到就丢，各功能一律从直连开始。
+        # 不做任何旧字段迁移：认不出来的键读到就丢，各功能一律从直连开始。
         # 全局「proxy」保留，它只是主代理地址的存放处，本身不产生任何出站行为。
         raw_proxy = _as_str(d.get('proxy'), '')
         sites_raw = []
@@ -874,15 +839,11 @@ class AppConfig:
                 sites_raw.append(s)
             # 其它类型（None / str / 数字）直接跳过，不让它拖垮整份配置
         return AppConfig(
-            version=_as_int(d.get('version'), 1),
             proxy=raw_proxy,
             timezone=_as_str(d.get('timezone'), 'Asia/Shanghai'),
             browser_path=_as_str(d.get('browser_path'), ''),
             headless=_as_bool(d.get('headless'), True),
             remote_cdp_url=_as_str(d.get('remote_cdp_url'), ''),
-            # 老配置没有这个键 → 看它有没有站点：有站点就说明管过站点列表了。
-            sites_initialized=_as_bool(d.get('sites_initialized'), False)
-            or bool(sites_raw),
             plugin_sync_enabled=_as_bool(d.get('plugin_sync_enabled'), False),
             plugin_sync_source=_as_str(d.get('plugin_sync_source'), ''),
             plugin_sync_time=_as_str(d.get('plugin_sync_time'), '03:00'),

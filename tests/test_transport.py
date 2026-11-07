@@ -40,7 +40,7 @@ class TransportCase(unittest.TestCase):
         self.app = WB.WebApp(self.svc, version='9.9.9')
         self.app.dispatch('POST', '/api/auth/setup', {},
                           {'password': self.PASSWORD}, token='', source='test')
-        self.token = self.app._new_token
+        self.token = self.app.new_token
         self.httpd = WB.serve(self.app, host='127.0.0.1', port=0, block=False)
         self.port = self.httpd.server_address[1]
 

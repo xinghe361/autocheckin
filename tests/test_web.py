@@ -45,7 +45,7 @@ class WebCase(unittest.TestCase):
         st, _, out = self._raw_dispatch('POST', '/api/auth/setup', {},
                                         {'password': self.PASSWORD})
         self.assertEqual(st, 200, '口令初始化失败：%s' % out)
-        return self.app._new_token
+        return self.app.new_token
 
     def _raw_dispatch(self, method, path, query=None, body=None, token=''):
         result = self.app.dispatch(method, path, query or {}, body or {},
@@ -113,7 +113,7 @@ class TestAuthRequired(WebCase):
     def test_setup_then_access(self):
         st, out = self._call('POST', '/api/auth/setup', {'password': 'abcdef'})
         self.assertEqual(st, 200)
-        token = self.app._new_token
+        token = self.app.new_token
         self.assertTrue(token)
         st, out = self._call('GET', '/api/sites', None, None, token=token)
         self.assertEqual(st, 200)
@@ -140,12 +140,12 @@ class TestAuthRequired(WebCase):
         st, out = self._call('POST', '/api/auth/setup', {'password': 'topsecret1'})
         blob = json.dumps(out, ensure_ascii=False)
         self.assertNotIn('topsecret1', blob)
-        self.assertNotIn(self.app._new_token, blob,
+        self.assertNotIn(self.app.new_token, blob,
                          '令牌只应通过 Cookie 下发，不能出现在响应体里')
 
     def test_session_can_be_revoked(self):
         self._call('POST', '/api/auth/setup', {'password': 'abcdef'})
-        token = self.app._new_token
+        token = self.app.new_token
         self.assertEqual(self._call('GET', '/api/sites', None, None, token=token)[0], 200)
         self._call('POST', '/api/auth/logout', {}, None, token=token)
         with self.assertRaises(WB.ApiError):
@@ -153,7 +153,7 @@ class TestAuthRequired(WebCase):
 
     def test_changing_password_invalidates_old_sessions(self):
         self._call('POST', '/api/auth/setup', {'password': 'abcdef'})
-        old = self.app._new_token
+        old = self.app.new_token
         self._call('POST', '/api/auth/password',
                    {'old': 'abcdef', 'new': 'newpassword'}, None, token=old)
         with self.assertRaises(WB.ApiError):
@@ -161,7 +161,7 @@ class TestAuthRequired(WebCase):
 
     def test_password_change_requires_old_password(self):
         self._call('POST', '/api/auth/setup', {'password': 'abcdef'})
-        t = self.app._new_token
+        t = self.app.new_token
         with self.assertRaises(WB.ApiError) as ctx:
             self._call('POST', '/api/auth/password',
                        {'old': 'wrong', 'new': 'newpassword'}, None, token=t)
@@ -180,7 +180,7 @@ class TestAuthRequired(WebCase):
 
     def test_auth_can_be_disabled_with_password(self):
         self._call('POST', '/api/auth/setup', {'password': 'abcdef'})
-        t = self.app._new_token
+        t = self.app.new_token
         st, out = self._call('POST', '/api/auth/disable',
                              {'password': 'abcdef'}, None, token=t)
         self.assertEqual(st, 200)
@@ -190,14 +190,14 @@ class TestAuthRequired(WebCase):
 
     def test_disable_requires_correct_password(self):
         self._call('POST', '/api/auth/setup', {'password': 'abcdef'})
-        t = self.app._new_token
+        t = self.app.new_token
         with self.assertRaises(WB.ApiError) as ctx:
             self._call('POST', '/api/auth/disable', {'password': 'nope'}, None, token=t)
         self.assertEqual(ctx.exception.status, 401)
 
     def test_token_stored_hashed_not_plaintext(self):
         self._call('POST', '/api/auth/setup', {'password': 'abcdef'})
-        token = self.app._new_token
+        token = self.app.new_token
         raw = open(self.svc.store.config_path, encoding='utf-8').read()
         self.assertNotIn(token, raw, '配置里不应出现令牌明文')
         self.assertIn(AUTH.hash_token(token), raw, '应存令牌的哈希')
@@ -411,21 +411,16 @@ class TestSettingsWrite(WebCase):
         self.json('POST', '/api/settings', {'ai': {'max_calls_per_day': 0}})
         self.assertEqual(self.svc.load_config().ai.max_calls_per_day, 0)
 
-    def test_legacy_per_site_daily_fields_are_dropped(self):
-        """已删除的"每日尝试/调用上限"字段不该让配置读不出来。"""
+    def test_legacy_ai_daily_fields_are_ignored(self):
+        """删掉的 AI 字段一律忽略：不迁移、不崩、不回填。"""
         from app.models import AiConfig
         back = AiConfig.from_dict({
             'daily_limit_enabled': True, 'max_attempts_per_day': 3,
             'ai_calls_per_day': 2, 'global_max_calls_per_day': 10})
-        # ai_calls_per_day 的意图迁移到"每天最多分析几次"
-        self.assertEqual(back.max_calls_per_day, 2)
-        self.assertFalse(hasattr(back, 'max_attempts_per_day'))
-        self.assertFalse(hasattr(back, 'daily_limit_enabled'))
-
-    def test_legacy_global_cap_migrated_if_no_per_site_value(self):
-        from app.models import AiConfig
-        back = AiConfig.from_dict({'global_max_calls_per_day': 7})
-        self.assertEqual(back.max_calls_per_day, 7)
+        self.assertEqual(back.max_calls_per_day, 20)
+        for gone in ('max_attempts_per_day', 'daily_limit_enabled',
+                     'ai_calls_per_day', 'global_max_calls_per_day'):
+            self.assertFalse(hasattr(back, gone))
 
     def test_ai_failure_handling_settings_saved(self):
         """AI 失败处理只由 fail_threshold 一个数字控制（0 = 不限制）。"""
@@ -493,7 +488,7 @@ class TestRunAndNotifyEndpoints(WebCase):
 
         app = WB.WebApp(svc)
         app.dispatch('POST', '/api/auth/login', {}, {'password': 'abc12345'})
-        token = app._new_token
+        token = app.new_token
         self.assertTrue(token, '登录未拿到令牌')
 
         result = app.dispatch('POST', '/api/run', {}, {'id': 'v2ex'},

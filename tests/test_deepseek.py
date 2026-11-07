@@ -297,7 +297,7 @@ class TestApplyPatch(unittest.TestCase):
 
 class TestShouldAnalyze(unittest.TestCase):
     def test_threshold_and_toggle(self):
-        site = SiteConfig(id='x', name='X', ai_enabled=True, ai_after_failures=3,
+        site = SiteConfig(id='x', name='X', ai_enabled=True,
                           state={'consecutive_failures': 3})
         ai = AiConfig(enabled=True)
         self.assertTrue(D.should_analyze(site, ai))
@@ -305,7 +305,7 @@ class TestShouldAnalyze(unittest.TestCase):
         self.assertFalse(D.should_analyze(site, ai))
 
     def test_disabled_globally_or_per_site(self):
-        site = SiteConfig(id='x', name='X', ai_enabled=True, ai_after_failures=1,
+        site = SiteConfig(id='x', name='X', ai_enabled=True,
                           state={'consecutive_failures': 5})
         self.assertFalse(D.should_analyze(site, AiConfig(enabled=False)))
         site.ai_enabled = False

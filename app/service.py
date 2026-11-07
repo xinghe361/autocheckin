@@ -111,8 +111,6 @@ class Service:
         self._recordings: Dict[str, RecordSession] = {}
         # 可注入的日志函数：后台巡检等场景需要留痕，但单测里不该刷屏
         self.log = log_fn or (lambda *a: None)
-        # 发现过"明文存盘的凭据"就置位，下次保存时自动加密（迁移用）
-        self._needs_secret_migration = False
         # 插件模板：从 DATA_DIR/templates/*.json 读，**不用重建镜像**就能加站点。
         # 挂到 templates 模块的回调上，这样 engine/browser/models 里
         # 那些 template_by_id() 调用不需要改（也不用到处传 store）。
@@ -191,7 +189,6 @@ class Service:
             headers=dict(tpl.get('headers') or {}),
         )
         cfg.sites.append(site)
-        cfg.sites_initialized = True
         self.save_config(cfg)
         return {'ok': True, 'already': False, 'id': tid,
                 'name': site.name, 'need_browser': site.need_browser}
@@ -415,8 +412,7 @@ class Service:
         为什么在这里做（而不是 models 里）：models 不该依赖 secrets
         （会形成循环导入），而且解密需要 SecretBox，只有 Service 有。
 
-        兼容老配置：如果只有明文、没有密文，就保持明文不动 ——
-        这样升级后功能照常，下次保存时会自动加密（平滑迁移）。
+        磁盘上只有密文；解出来的明文挂在 dataclass 的内存属性上给 notify 用。
         """
         n = cfg.notify
         plain: Dict[str, str] = {}
@@ -435,15 +431,6 @@ class Service:
                 plain['_channel_proxy_urls'] = val
         if plain:
             n.apply_secrets(plain)
-        # 只要发现过"明文存盘"的凭据，就标记一下，下次保存自动加密
-        for plain_name in n.SECRET_FIELDS:
-            if getattr(n, plain_name, '') and not getattr(n, plain_name + '_enc', ''):
-                self._needs_secret_migration = True
-                break
-        if (n.channel_proxy or {}).get('telegram', {}).get('url') \
-                and not cp_token:
-            self._needs_secret_migration = True
-
     def _seal_notify(self, cfg: AppConfig) -> None:
         """保存前把 notify 的明文凭据加密进 *_enc 字段。
 
@@ -552,7 +539,6 @@ class Service:
                 'success_interval_minutes': s.success_interval_minutes,
                 'success_anchor_minutes': s.success_anchor_minutes,
                 'ai_enabled': s.ai_enabled,
-                'ai_after_failures': s.ai_after_failures,
                 'timeout_seconds': s.timeout_seconds,
                 'notify': s.notify or '',
                 'notify_override': s.notify_override,
@@ -670,7 +656,7 @@ class Service:
             if k in data and data[k] is not None:
                 setattr(site, k, bool(data[k]))
         for k in ('daily_hour', 'daily_minute', 'jitter_seconds', 'retry_count',
-                  'retry_interval_minutes', 'ai_after_failures',
+                  'retry_interval_minutes',
                   'success_interval_minutes', 'timeout_seconds'):
             if k in data and data[k] is not None and str(data[k]) != '':
                 setattr(site, k, int(data[k]))
@@ -711,7 +697,6 @@ class Service:
 
         if existing is None:
             cfg.sites.append(site)
-        cfg.sites_initialized = True         # 站点列表已被显式管理
         self.save_config(cfg)
 
         # 调度相关字段变了 → 作废已排的下次时间，让调度器按新配置重算。
@@ -849,7 +834,6 @@ class Service:
         cfg = self.load_config()
         before = len(cfg.sites)
         cfg.sites = [s for s in cfg.sites if s.id != site_id]
-        cfg.sites_initialized = True
         if len(cfg.sites) == before:
             return False
         self.save_config(cfg)

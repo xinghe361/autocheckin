@@ -33,7 +33,7 @@ class TestSiteConfigRoundTrip(unittest.TestCase):
             mode=MODE_SUCCESS_BASED, daily_hour=7, daily_minute=25,
             jitter_enabled=True, jitter_seconds=1200,
             retry_enabled=True, retry_count=5, retry_interval_minutes=12,
-            ai_enabled=False, ai_after_failures=7,
+            ai_enabled=False,
             notify=NOTIFY_FAIL_ONLY,
             steps=[Step(action='goto', target='https://x.test/checkin'),
                    Step(action='click', target='#btn', timeout_ms=9000)],
@@ -53,7 +53,6 @@ class TestSiteConfigRoundTrip(unittest.TestCase):
         self.assertEqual(back.retry_count, 5)
         self.assertEqual(back.retry_interval_minutes, 12)
         self.assertFalse(back.ai_enabled)
-        self.assertEqual(back.ai_after_failures, 7)
         self.assertEqual(back.notify, NOTIFY_FAIL_ONLY)
         self.assertEqual(len(back.steps), 2)
         self.assertEqual(back.steps[1].action, 'click')
@@ -356,15 +355,18 @@ class TestChannelDetection(unittest.TestCase):
         c = NotifyConfig(tg_bot_token='t', tg_chat_id='1')
         self.assertEqual(N.configured_channels(c), [N.CHANNEL_TELEGRAM])
 
-    def test_serverchan_removed_from_channels(self):
-        """Server 酱已从界面移除，不再算作可用渠道。
+    def test_serverchan_is_gone(self):
+        """Server 酱连字段都删了 —— 不是"留着但不发"。
 
-        旧配置里如果还留着 serverchan_key，也不该让它被发送 ——
-        否则用户以为已经关掉了，实际还在推送。
+        留着空字段只会让人以为还能配（界面上却没地方填），
+        所以字段、密文字段、常量、发送函数一起删。
         """
-        self.assertNotIn(N.CHANNEL_SERVERCHAN, N.ALL_CHANNELS)
-        self.assertEqual(N.configured_channels(NotifyConfig(serverchan_key='b')),
-                         [], 'Server 酱不该再被识别为已配置渠道')
+        self.assertFalse(hasattr(N, 'CHANNEL_SERVERCHAN'))
+        self.assertNotIn('serverchan', N.ALL_CHANNELS)
+        self.assertFalse(hasattr(NotifyConfig(), 'serverchan_key'))
+        # 老配置里残留的键读进来直接忽略（不产生渠道、也不报错）
+        self.assertEqual(N.configured_channels(NotifyConfig.from_dict(
+            {'serverchan_key': 'b'})), [])
 
     def test_telegram_needs_both_fields(self):
         self.assertEqual(N.configured_channels(NotifyConfig(tg_bot_token='t')), [])

@@ -267,7 +267,7 @@ class TestSiteApiExposesSpecs(unittest.TestCase):
         self.app.dispatch('POST', '/api/auth/setup', {},
                           {'password': 'test-password-1'}, token='',
                           source='test')
-        self.token = self.app._new_token
+        self.token = self.app.new_token
         # seed 模板并加入站点，这样 /api/site 才有 nodeseek/v2ex 可查
         from _tpl_loader import seed_plugins
         seed_plugins(self.svc, 'v2ex', 'nodeseek', 'chiphell')

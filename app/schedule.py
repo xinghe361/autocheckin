@@ -48,7 +48,7 @@ class SiteSchedule:
     success_interval_minutes: int = 1440
     # 【上次签到成功时间】模式的**初始基准时刻**（当天 00:00 起的分钟数）。
     # 用户在界面上选这个模式时，把那一刻填的时刻锁定成基准。
-    # -1 = 没设置过（老配置/新站点）。
+    # -1 = 没设置过（新建站点）。
     # 基准取 max(初始锚点, 上次成功时间)：首次成功前用锚点，
     # 成功之后自然被真实成功时间取代。
     success_anchor_minutes: int = -1
@@ -63,8 +63,8 @@ class SiteSchedule:
     retry_count: int = 3            # 最多重试几次
     retry_interval_minutes: int = 30  # 每次重试间隔
 
-    # 连续失败多少次后交给 DeepSeek 分析
-    ai_after_failures: int = 3
+    # 是否允许交给 DeepSeek 分析（"每连续失败几次分析一次"由全局设置提供，
+    # 见 should_ask_ai 的 threshold 参数）
     ai_enabled: bool = True
 
     # --- 状态（持久化） ---
@@ -141,7 +141,7 @@ def next_success_based_time(now: int, site: SiteSchedule,
     基准的取法（优先级从高到低）：
       1. 上次真实签到成功时间（一旦成功过，就用它）
       2. 界面里锁定的"初始基准时刻"（success_anchor_minutes）
-      3. 都没有（老配置/从没设置过）-> 现在 + 间隔（保持旧行为不变）
+      3. 都没有（从没设置过）-> 现在 + 间隔
 
     基准确定后：候选 = 基准 + 间隔 N 次，直到落在未来；再叠加随机偏移。
 
@@ -214,27 +214,22 @@ def next_retry_at(now: int, site: SiteSchedule) -> Optional[int]:
     return int(now) + interval
 
 
-def should_ask_ai(site: SiteSchedule, after_failures: Optional[int] = None) -> bool:
+def should_ask_ai(site: SiteSchedule, threshold: int) -> bool:
     """连续失败是否达到了需要 AI 分析的程度。
 
-    语义：在 after_failures 的**整数倍**处各分析一次。
+    语义：在 threshold 的**整数倍**处各分析一次。
     例如阈值 3 → 在连败 3、6、9… 次时分析。
 
     为什么不"每多失败一次就分析"：
     站点若持续坏掉（连败 4、5、6…），逐次分析会天天烧 token 却给不出新结论。
     按倍数走既能有限次尝试，又能随连败加重再要一次新建议。
 
-    after_failures 现在由**全局设置**提供（用户要求：统一逻辑，
-    站点只负责重试次数）。传 None 时回退到站点上的同名字段，
-    兼容旧调用方；0 表示不启用 AI 分析。
+    阈值由**全局设置**提供（站点只负责重试次数）；0 表示不启用 AI 分析。
     """
     if not site.ai_enabled:
         return False
-    raw = after_failures
-    if raw is None:
-        raw = getattr(site, 'ai_after_failures', 3)
     try:
-        threshold = int(raw)
+        threshold = int(threshold)
     except (TypeError, ValueError):
         threshold = 3
     if threshold <= 0:

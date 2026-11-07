@@ -408,7 +408,7 @@ class Store:
             data.pop(k, None)
         notify = data.get('notify')
         if isinstance(notify, dict):
-            for k in ('pushplus_token', 'serverchan_key', 'wecom_webhook',
+            for k in ('pushplus_token', 'wecom_webhook',
                       'tg_bot_token', 'tg_chat_id'):
                 notify.pop(k, None)
             # 渠道级代理地址同样可能带账密
@@ -483,8 +483,6 @@ class Store:
             cfg.ai.proxy_url = keep_auth_from.ai.proxy_url
             cfg.remote_cdp_url = keep_auth_from.remote_cdp_url
             cfg.browser_path = keep_auth_from.browser_path
-            cfg.sites_initialized = bool(cfg.sites) or \
-                keep_auth_from.sites_initialized
         return cfg
 
     def merge_site_patch(self, sites: List[Any],
@@ -493,7 +491,7 @@ class Store:
 
         为什么单独一个方法：AI 分析跑在长任务里，手里是几分钟前的快照。
         整包写回会覆盖用户期间的修改；完全不写回又会让补丁丢失
-        （重启后还按旧配置签到）。所以只回写补丁允许改的那些字段。
+        （重启后还按改动前的配置签到）。所以只回写补丁允许改的那些字段。
 
         字段来源默认取 deepseek 的白名单，保证"能自动改什么"只有一处定义。
         """

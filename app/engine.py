@@ -61,7 +61,7 @@ Fetcher = Callable[[str, str, Optional[bytes]], HttpResponse]
 def _tpl_of(site: SiteConfig) -> Dict[str, Any]:
     """站点当前生效的模板。
 
-    template 字段为空时回退到站点 id —— 老配置里两种写法都出现过，
+    template 字段为空时回退到站点 id —— 模板站点的两者本来就是同一个值，
     只认 site.template 会让 "kind=template 但 template 空着" 的站点
     查不到模板，又退化成"判定不了结果"（这正是线上踩过的坑）。
     """

@@ -240,57 +240,57 @@ class TestRetry(unittest.TestCase):
 
 class TestAiTrigger(unittest.TestCase):
     def test_threshold(self):
-        site = SiteSchedule(site_id='s', ai_enabled=True, ai_after_failures=3)
+        site = SiteSchedule(site_id='s', ai_enabled=True)
         site.consecutive_failures = 2
-        self.assertFalse(should_ask_ai(site))
+        self.assertFalse(should_ask_ai(site, 3))
         site.consecutive_failures = 3
-        self.assertTrue(should_ask_ai(site))
+        self.assertTrue(should_ask_ai(site, 3))
 
     def test_only_at_threshold_multiples(self):
         """连败 3、6、9… 才分析；4、5 不再重复分析（避免持续故障时天天烧 token）。"""
-        site = SiteSchedule(site_id='s', ai_enabled=True, ai_after_failures=3)
+        site = SiteSchedule(site_id='s', ai_enabled=True)
         expect = {3: True, 4: False, 5: False, 6: True, 7: False, 8: False,
                   9: True, 10: False}
         for fails, want in expect.items():
             site.consecutive_failures = fails
             site.ai_analyzed_for_streak = 0
-            self.assertEqual(should_ask_ai(site), want,
+            self.assertEqual(should_ask_ai(site, 3), want,
                              '连败 %d 次时 should_ask_ai 应为 %s' % (fails, want))
 
     def test_only_once_per_streak_level(self):
-        site = SiteSchedule(site_id='s', ai_enabled=True, ai_after_failures=3)
+        site = SiteSchedule(site_id='s', ai_enabled=True)
         site.consecutive_failures = 3
-        self.assertTrue(should_ask_ai(site))
+        self.assertTrue(should_ask_ai(site, 3))
         mark_ai_analyzed(site)
-        self.assertFalse(should_ask_ai(site), '同一档不应该重复分析')
+        self.assertFalse(should_ask_ai(site, 3), '同一档不应该重复分析')
 
     def test_next_multiple_triggers_again(self):
-        site = SiteSchedule(site_id='s', ai_enabled=True, ai_after_failures=3)
+        site = SiteSchedule(site_id='s', ai_enabled=True)
         site.consecutive_failures = 3
         mark_ai_analyzed(site)
         site.consecutive_failures = 6
-        self.assertTrue(should_ask_ai(site), '到下一档应再分析一次')
+        self.assertTrue(should_ask_ai(site, 3), '到下一档应再分析一次')
 
     def test_threshold_one_means_every_failure(self):
         """阈值设成 1 时，每次失败都分析（用户明确选择了这个代价）。"""
-        site = SiteSchedule(site_id='s', ai_enabled=True, ai_after_failures=1)
+        site = SiteSchedule(site_id='s', ai_enabled=True)
         for fails in (1, 2, 3):
             site.consecutive_failures = fails
             site.ai_analyzed_for_streak = 0
-            self.assertTrue(should_ask_ai(site), '连败 %d 次应触发' % fails)
+            self.assertTrue(should_ask_ai(site, 1), '连败 %d 次应触发' % fails)
 
     def test_disabled(self):
-        site = SiteSchedule(site_id='s', ai_enabled=False, ai_after_failures=1)
+        site = SiteSchedule(site_id='s', ai_enabled=False)
         site.consecutive_failures = 99
-        self.assertFalse(should_ask_ai(site))
+        self.assertFalse(should_ask_ai(site, 1))
 
     def test_reset_after_success(self):
-        site = SiteSchedule(site_id='s', ai_enabled=True, ai_after_failures=2)
+        site = SiteSchedule(site_id='s', ai_enabled=True)
         site.consecutive_failures = 2
         mark_ai_analyzed(site)
         plan_next(site, ts(2026, 3, 10, 3, 0), succeeded=True, rng=random.Random(1))
         self.assertEqual(site.ai_analyzed_for_streak, 0)
-        self.assertFalse(should_ask_ai(site))
+        self.assertFalse(should_ask_ai(site, 2))
 
 
 class TestNextRunDispatch(unittest.TestCase):

@@ -47,7 +47,7 @@ class ApiError(Exception):
 def _proxy_mode(v) -> str:
     """收敛三选一的取值：只认 direct / inherit / custom，其它一律直连。
 
-    页面上可能出现拼错、也可能是老配置里的空串 —— 都不能让"走不走代理"
+    页面上可能出现拼错、也可能是手改留下的空串 —— 都不能让"走不走代理"
     这种影响连通性的东西落在一个未知值上。
     """
     m = str(v or '').strip().lower()
@@ -321,17 +321,15 @@ class WebApp:
             # 所以必须在这里显式剥掉，只回"是否已配置"和打码形式。
             # 踩过的坑：只依赖 include_secrets=False 会让 pushplus token 明文外泄。
             notify_out = data['notify']
-            for k in ('pushplus_token', 'serverchan_key', 'wecom_webhook',
+            for k in ('pushplus_token', 'wecom_webhook',
                       'tg_bot_token', 'tg_chat_id'):
                 notify_out.pop(k, None)
             notify_out['has_credentials'] = {
                 'pushplus': bool(cfg.notify.pushplus_token),
-                'serverchan': bool(cfg.notify.serverchan_key),
                 'wecom': bool(cfg.notify.wecom_webhook),
                 'telegram': bool(cfg.notify.tg_bot_token and cfg.notify.tg_chat_id),
             }
             notify_out['pushplus_token_masked'] = box.mask(cfg.notify.pushplus_token)
-            notify_out['serverchan_key_masked'] = box.mask(cfg.notify.serverchan_key)
             notify_out['tg_bot_token_masked'] = box.mask(cfg.notify.tg_bot_token)
 
             data['webdav']['has_password'] = bool(cfg.webdav.password_enc)
@@ -455,8 +453,7 @@ class WebApp:
 
         @route('GET', '/api/meta')
         def _meta(q, body):
-            from .models import (NOTIFY_MODE_LABELS, NOTIFY_MODES,
-                                 PROXY_INHERIT, PROXY_DIRECT, PROXY_CUSTOM)
+            from .models import NOTIFY_MODE_LABELS, NOTIFY_MODES
             from .notify import ALL_CHANNELS
             # 模板只来自本地 templates/（由 GitHub 同步写入），
             # 示例文档（example）不算模板。
@@ -543,7 +540,6 @@ class WebApp:
                 nc.digest_hour, nc.digest_minute = h, mi
             # 凭据：非空才覆盖
             for field, key in (('pushplus_token', 'pushplus_token'),
-                               ('serverchan_key', 'serverchan_key'),
                                ('wecom_webhook', 'wecom_webhook'),
                                ('tg_bot_token', 'tg_bot_token'),
                                ('tg_chat_id', 'tg_chat_id')):
@@ -676,10 +672,9 @@ class WebApp:
         return getattr(self._local, 'req', None) or {}
 
     @property
-    def _new_token(self) -> str:
+    def new_token(self) -> str:
         """本次请求要下发的会话令牌（只读，取自线程局部）。
 
-        保留这个名字只是为了兼容既有调用方/测试。
         ⚠️ 它**绝不参与认证判定** —— 认证只认 dispatch() 传入的令牌参数；
         任何"用 self 存令牌再拿来做鉴权"的写法都会在多线程下被绕过。
         """
@@ -1252,8 +1247,8 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     </div>
     <div id="hisDay" class="daylist"></div>
     <div id="hisReasons"></div>
-    <div class="hint">记录从升级到本版本后开始积累（旧版本没存历史，补不回来）。
-      只保留最近 <span id="hisKeep">180</span> 天。</div>
+    <div class="hint">记录从第一次运行开始积累，只保留最近
+      <span id="hisKeep">180</span> 天。</div>
   </div>
 </section>
 
@@ -2367,7 +2362,7 @@ function safeLink(url){
 
 /* 把已保存的模型名填进下拉框。
 
-   如果它不在候选里（比如旧配置里的 deepseek-chat），就临时插一个选项并选中 ——
+   如果它不在候选里（比如手填过的模型名），就临时插一个选项并选中 ——
    既不让用户看不出自己配的是什么，也不擅自把设置改成别的模型。 */
 function setModelSelect(current){
   var sel = $('set_model');
@@ -3821,7 +3816,7 @@ function loadSettings(){
       return '<option value="'+esc(m)+'"'+(m===n.mode?' selected':'')+'>'+esc(txt)+'</option>';
     }).join('');
     $('set_aikey').value = '';
-    /* 模型用下拉框。若已保存的值不在候选里（例如旧配置里的 deepseek-chat），
+    /* 模型用下拉框。若已保存的值不在候选里（例如之前手填的模型名），
        临时插一个选项并选中，避免把用户的设置悄悄改掉。 */
     setModelSelect(d.ai && d.ai.model);
     $('set_aifail').value = (d.ai && d.ai.fail_threshold !== undefined

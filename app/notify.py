@@ -17,13 +17,10 @@ from typing import Any, Dict, List
 
 from .httpclient import HttpConfig, HttpError, enc_json, normalize_proxy, request
 from .models import (NOTIFY_ALL, NOTIFY_CUSTOM, NOTIFY_FAIL_ONLY, NOTIFY_NONE,
-                     NOTIFY_SUCCESS_ONLY, PROXY_CUSTOM, PROXY_DIRECT,
-                     PROXY_INHERIT, NotifyConfig)
+                     NOTIFY_SUCCESS_ONLY, PROXY_CUSTOM, PROXY_INHERIT,
+                     NotifyConfig)
 
 CHANNEL_PUSHPLUS = 'pushplus'
-# Server 酱已按要求从界面移除。这里保留常量，只为兼容旧配置里的
-# serverchan_key 字段（不删数据，但不再作为可选渠道发送）。
-CHANNEL_SERVERCHAN = 'serverchan'
 CHANNEL_WECOM = 'wecom'
 CHANNEL_TELEGRAM = 'telegram'
 
@@ -151,27 +148,6 @@ def send_pushplus(token: str, title: str, content: str, proxy: str = '',
     return 'pushplus 已推送'
 
 
-def send_serverchan(key: str, title: str, content: str, proxy: str = '',
-                    timeout: int = 20) -> str:
-    # 兼容 sctapi.ftqq.com（实测可达）
-    url = 'https://sctapi.ftqq.com/%s.send' % key
-    body = enc_json({'title': title, 'desp': content})
-    resp = request('POST', url, global_proxy=proxy, data=body,
-                   cfg=HttpConfig(timeout=timeout,
-                                  headers={'Content-Type': 'application/json'}))
-    if not resp.ok:
-        raise HttpError('http_error', 'Server酱 推送失败（HTTP %d）' % resp.status,
-                        resp.text[:200])
-    try:
-        data = resp.json()
-    except Exception:  # noqa: BLE001
-        return 'Server酱 已推送'
-    if data.get('code') not in (0, '0'):
-        raise HttpError('serverchan_error',
-                        'Server酱 返回错误：%s' % (data.get('message') or data.get('code')))
-    return 'Server酱 已推送'
-
-
 def send_wecom(webhook: str, title: str, content: str, proxy: str = '',
                timeout: int = 20) -> str:
     body = enc_json({
@@ -226,8 +202,7 @@ def send_telegram(bot_token: str, chat_id: str, title: str, content: str,
 def configured_channels(cfg: NotifyConfig) -> List[str]:
     """根据已填写的凭据，推断哪些渠道可用。
 
-    注意：Server 酱已从界面移除，所以这里不再把它算作可用渠道
-    （旧配置里若还留着 serverchan_key，也不会被发送）。
+    只看凭据是否齐全 —— 有三个渠道就是三个，不多不少。
     """
     out = []
     if cfg.pushplus_token:
