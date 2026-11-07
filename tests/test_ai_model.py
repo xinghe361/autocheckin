@@ -109,7 +109,7 @@ class TestServedModelReported(unittest.TestCase):
                                   requested_model='deepseek-chat',
                                   served_model='DeepSeek-V4.1-Flash')
 
-        r = Runner(store, box=box, global_proxy_mode='direct')
+        r = Runner(store, box=box)
         r.analyze_fn = fake_analyze
         r.now_fn = lambda: 1000000
         st = RuntimeState()

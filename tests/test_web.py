@@ -244,7 +244,7 @@ class TestRouting(WebCase):
         self.assertIn('notify_mode_labels', d)
         self.assertIn('pushplus', d['channels'])
         self.assertIn('telegram', d['channels'])
-        self.assertIn(PROXY_DIRECT, d['proxy_modes'])
+        self.assertNotIn('proxy_modes', d, '前端没用到的字段不该再下发')
         self.assertIn('goto', d['actions'])
 
     def test_sites_list(self):
@@ -345,15 +345,31 @@ class TestSettingsWrite(WebCase):
         self.json('POST', '/api/settings', {'notify': {
             'mode': 'fail',
             'channels': ['telegram', 'wecom'],
-            'proxy_mode': 'custom',
-            'proxy_url': 'http://n:1',
             'channel_proxy': {'wecom': {'mode': 'direct', 'url': ''}},
         }})
         cfg = self.svc.load_config()
         self.assertEqual(cfg.notify.mode, 'fail')
         self.assertEqual(cfg.notify.channels, ['telegram', 'wecom'])
-        self.assertEqual(cfg.notify.proxy_mode, 'custom')
         self.assertEqual(cfg.notify.channel_proxy['wecom']['mode'], 'direct')
+
+    def test_dirty_channel_proxy_does_not_500(self):
+        """渠道代理结构脏了也不能把保存接口打挂。
+
+        手动改配置、或前端拼错都会出现非字典的值；直接存进去会让
+        channel_proxy() 里的 .get() 抛异常 —— 保存接口 500，用户完全
+        不知道哪里错了。这里要求：保存成功，脏项被丢掉。
+        """
+        body = self.json('POST', '/api/settings', {'notify': {
+            'channels': ['telegram'],
+            'channel_proxy': {'telegram': 'not-a-dict',
+                              'wecom': {'mode': 'inherit'},
+                              'pushplus': None},
+        }})
+        self.assertTrue(body.get('ok'))
+        cp = self.svc.load_config().notify.channel_proxy
+        self.assertEqual(cp['wecom']['mode'], 'inherit')
+        self.assertNotIn('telegram', cp, '非字典的条目要丢掉')
+        self.assertNotIn('pushplus', cp)
 
     def test_empty_credentials_not_overwritten(self):
         """界面上凭据留空时不能把已保存的清掉。"""

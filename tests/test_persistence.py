@@ -127,8 +127,7 @@ class TestStateDeltaDoesNotClobber(Case):
 
     def test_next_run_at_not_rolled_back(self):
         """排程回滚会导致同一天签到两次。"""
-        r = Runner(self.svc.store, box=self.svc.box,
-                   global_proxy_mode='direct')
+        r = Runner(self.svc.store, box=self.svc.box)
         r.now_fn = lambda: 1000
         st = self.svc.load_state()
         st.sites.setdefault('s1', {})['next_run_at'] = 5000
@@ -145,8 +144,7 @@ class TestStateDeltaDoesNotClobber(Case):
 
     def test_ai_call_count_never_decreases(self):
         """AI 计数回滚会让每日上限失效、多烧 token。"""
-        r = Runner(self.svc.store, box=self.svc.box,
-                   global_proxy_mode='direct')
+        r = Runner(self.svc.store, box=self.svc.box)
         # 别的执行体已经写到 4
         self.svc.store.update_state(
             lambda s: s.ai_calls.update({'s1': {'date': '2026-01-01',
@@ -179,8 +177,7 @@ class TestAiPatchPersists(Case):
     """AI 补丁必须落盘（与"不覆盖用户"是相反方向，别过度修正）。"""
 
     def _runner(self):
-        r = Runner(self.svc.store, box=self.svc.box,
-                   global_proxy_mode='direct')
+        r = Runner(self.svc.store, box=self.svc.box)
         r.now_fn = lambda: 1000
         return r
 
@@ -251,8 +248,7 @@ class TestDisabledSiteDoesNotBurnAi(Case):
                           api_key_enc=self.svc.box.encrypt('k'))
         self.svc.save_config(cfg)
 
-        r = Runner(self.svc.store, box=self.svc.box,
-                   global_proxy_mode='direct')
+        r = Runner(self.svc.store, box=self.svc.box)
         r.now_fn = lambda: 1000
         called = []
         r.analyze_fn = lambda *a, **k: (called.append(1),

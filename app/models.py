@@ -430,6 +430,9 @@ class SiteConfig:
             options={str(k): _as_str(v)
                      for k, v in _as_dict(d.get('options')).items()
                      if _as_str(v)},
+            # 站点自己的三选一：直连（默认）/ 主代理 / 自定义
+            # ⚠️ 这一行曾经被误删（批量替换命中了这里而不是全局那行），
+            # 结果站点选的「主代理」存一次就变回「直连」。有测试盯着。
             proxy_mode=_as_str(d.get('proxy_mode'), PROXY_DIRECT),
             proxy_url=_as_str(d.get('proxy_url'), ''),
             username=_as_str(d.get('username'), ''),
@@ -466,8 +469,7 @@ def resolve_proxy(mode: str, own_url: str, main_proxy: str) -> str:
     return ''
 
 
-def resolve_site_proxy(site: 'SiteConfig', main_proxy: str,
-                       _global_mode: str = '') -> str:
+def resolve_site_proxy(site: 'SiteConfig', main_proxy: str) -> str:
     """算出某个站点最终该用哪个代理地址。
 
     返回空串表示直连。规则同 resolve_proxy：
@@ -479,17 +481,7 @@ def resolve_site_proxy(site: 'SiteConfig', main_proxy: str,
     是排查"为什么这个站点连不上"时第一个要看的东西，
     必须只有一处实现、可单测。
     """
-    # _global_mode 保留只为兼容旧调用方：现在"主代理"由各处的三选一决定，
-    # 全局已经没有开关了（设置里那栏只是主代理的地址）。
     return resolve_proxy(site.proxy_mode, site.proxy_url, main_proxy)
-
-
-def effective_global_proxy(proxy: str, mode: str) -> str:
-    """全局代理的实际生效值：模式为直连时一律返回空串。"""
-    if (mode or '').strip().lower() == PROXY_DIRECT:
-        return ''
-    return (proxy or '').strip()
-
 
 
 @dataclass
@@ -501,15 +493,11 @@ class NotifyConfig:
     # 推送哪些渠道
     channels: List[str] = field(default_factory=list)
 
-    # --- 代理策略（按用户要求：每个渠道可选走不走代理）---
-    # 全局默认：'inherit' 跟随主代理设置 / 'direct' 直连 / 'custom' 用下面的地址
-    proxy_mode: str = PROXY_INHERIT
-    proxy_url: str = ''
-    # 单渠道覆盖：{'telegram': {'mode': 'custom', 'url': 'http://...'}}
+    # --- 代理策略 ---
+    # 「通知级代理」这一层早就删了（用户指出多余：已经有主代理，每个渠道
+    # 又能单独设置，中间那层没有意义）。现在只有按渠道的 channel_proxy。
+    # 单渠道覆盖：{'telegram': {'mode': 'inherit|direct|custom', 'url': ''}}
     channel_proxy: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    # 代理地址的密文版（代理常带 user:pass，明文落盘等于凭据泄露）。
-    # 加载时由 Service 解密回上面的明文属性；保存时加密、明文不落盘。
-    proxy_url_enc: str = ''
 
     # pushplus（实测 200）
     pushplus_token: str = ''
@@ -551,7 +539,6 @@ class NotifyConfig:
         'wecom_webhook': 'wecom_webhook_enc',
         'tg_bot_token': 'tg_bot_token_enc',
         'tg_chat_id': 'tg_chat_id_enc',
-        'proxy_url': 'proxy_url_enc',
         # 渠道代理地址打包后的那一份（见 plain_secrets）
         '_channel_proxy_urls': 'channel_proxy_urls_enc',
     }
@@ -626,12 +613,6 @@ class NotifyConfig:
         base.digest_enabled = _as_bool(d.get('digest_enabled'), False)
         base.digest_hour = _as_int(d.get('digest_hour'), 9, 0, 23)
         base.digest_minute = _as_int(d.get('digest_minute'), 0, 0, 59)
-        # proxy_mode / proxy_url 已不再参与"走不走代理"的判定
-        # （现在只看 channel_proxy），但字段仍在数据类里，
-        # 旧配置里可能留着值 —— 必须原样往返，不能读一次就丢掉，
-        # 否则用户保存一次设置就把历史值抹掉了（属于数据丢失）。
-        base.proxy_mode = _as_str(d.get('proxy_mode'), base.proxy_mode)
-        base.proxy_url = _as_str(d.get('proxy_url'), '')
         # 密文版字段：原样读入，解密由 Service 负责（models 不该依赖 secrets）。
         # ⚠️ 名单从 SECRET_FIELDS 派生，不手写 —— 手写过一次，
         # 漏了 channel_proxy_urls_enc，结果渠道代理地址读了就丢。
@@ -642,7 +623,6 @@ class NotifyConfig:
         base.wecom_webhook = _as_str(d.get('wecom_webhook'), '')
         base.tg_bot_token = _as_str(d.get('tg_bot_token'), '')
         base.tg_chat_id = _as_str(d.get('tg_chat_id'), '')
-        base.proxy_url = _as_str(d.get('proxy_url'), '')
         # channel_proxy: {渠道: {mode, url}} —— 逐层校验
         cp = {}
         for ch, v in _as_dict(d.get('channel_proxy')).items():
@@ -673,7 +653,8 @@ class WebdavConfig:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: Dict[str, Any]) -> 'WebdavConfig':
+    def from_dict(d: Dict[str, Any],
+                  default_proxy_mode: str = PROXY_DIRECT) -> 'WebdavConfig':
         d = _as_dict(d)
         base = WebdavConfig()
         base.enabled = _as_bool(d.get('enabled'), False)
@@ -683,7 +664,7 @@ class WebdavConfig:
         base.auto_interval_minutes = _as_int(
             d.get('auto_interval_minutes'), 0, 0)
         base.backup_key = _as_bool(d.get('backup_key'), False)
-        base.proxy_mode = _as_str(d.get('proxy_mode'), PROXY_DIRECT)
+        base.proxy_mode = _as_str(d.get('proxy_mode'), default_proxy_mode)
         base.proxy_url = _as_str(d.get('proxy_url'), '')
         return base
 
@@ -746,7 +727,8 @@ class AiConfig:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: Dict[str, Any]) -> 'AiConfig':
+    def from_dict(d: Dict[str, Any],
+                  default_proxy_mode: str = PROXY_DIRECT) -> 'AiConfig':
         base = AiConfig()
         src = _as_dict(d)          # 非 dict（list/str/None）当空配置
 
@@ -777,7 +759,7 @@ class AiConfig:
             src.get('fail_threshold'), base.fail_threshold, 0, 1000)
         base.include_page_excerpt = _as_bool(
             src.get('include_page_excerpt'), base.include_page_excerpt)
-        base.proxy_mode = _as_str(src.get('proxy_mode'), PROXY_DIRECT)
+        base.proxy_mode = _as_str(src.get('proxy_mode'), default_proxy_mode)
         base.proxy_url = _as_str(src.get('proxy_url'), '')
 
         if legacy_per_day is not None:
@@ -797,13 +779,8 @@ class AppConfig:
     """全局配置。"""
 
     version: int = 1
-    # 全局代理开关：'direct' = 全部直连（不需要填地址）；
-    #              'custom' = 走下面填的代理地址。
-    # 为什么把"直连"也做成显式选项：以前只靠"地址留空"表示直连，
-    # 用户从模板复制来的占位符地址会被当成真实代理，报错还是
-    # "域名解析失败"，看起来像 DNS 故障（实测踩过）。
-    proxy_mode: str = PROXY_DIRECT
-    # 全局代理地址（proxy_mode='custom' 时才使用）
+    # 主代理地址。**它本身不生效**：站点 / 模板同步 / WebDAV / AI / 通知渠道
+    # 各自选「直连 / 主代理 / 自定义」，选了主代理的才用它（见 resolve_proxy）。
     proxy: str = ''
     timezone: str = 'Asia/Shanghai'
     # 内置浏览器可执行文件路径；留空则自动探测
@@ -854,7 +831,6 @@ class AppConfig:
     def to_dict(self, include_secrets: bool = True) -> Dict[str, Any]:
         d = {
             'version': self.version,
-            'proxy_mode': self.proxy_mode,
             'proxy': self.proxy,
             'timezone': self.timezone,
             'browser_path': self.browser_path,
@@ -888,12 +864,17 @@ class AppConfig:
         # 顶层也全部走类型收敛：这是启动路径，任何一处抛异常都会让
         # 容器起不来（用户看到的现象就是"换了镜像但版本没变"）。
         d = _as_dict(d)
-        # 旧配置没有 proxy_mode：有地址就视为"走代理"，没地址就直连。
-        # 这样升级后行为不变，不会突然把已有代理关掉。
+        # 旧配置只有一个全局开关（proxy_mode）。现在开关没了，各处各选 ——
+        # 为了让升级前后行为一致：老配置若是"全局走代理"，就把三处新字段的
+        # **默认值**也设成「主代理」；否则直连。没配过代理的新装环境自然是直连。
         raw_proxy = _as_str(d.get('proxy'), '')
-        mode = _as_str(d.get('proxy_mode'), '')
-        if not mode:
-            mode = PROXY_CUSTOM if raw_proxy.strip() else PROXY_DIRECT
+        legacy_mode = _as_str(d.get('proxy_mode'), '')
+        if not legacy_mode:
+            legacy_mode = PROXY_CUSTOM if raw_proxy.strip() else PROXY_DIRECT
+        # 地址填了、且以前是走代理的 → 这三处沿用主代理；其余一律直连。
+        migrated = (PROXY_INHERIT if (legacy_mode == PROXY_CUSTOM
+                                      and raw_proxy.strip())
+                    else PROXY_DIRECT)
         sites_raw = []
         for s in _as_list(d.get('sites')):
             if isinstance(s, dict):
@@ -903,7 +884,6 @@ class AppConfig:
             # 其它类型（None / str / 数字）直接跳过，不让它拖垮整份配置
         return AppConfig(
             version=_as_int(d.get('version'), 1),
-            proxy_mode=mode,
             proxy=raw_proxy,
             timezone=_as_str(d.get('timezone'), 'Asia/Shanghai'),
             browser_path=_as_str(d.get('browser_path'), ''),
@@ -918,15 +898,15 @@ class AppConfig:
             plugin_sync_interval_days=_as_int(
                 d.get('plugin_sync_interval_days'), 1, 1, 365),
             plugin_sync_proxy_mode=_as_str(
-                d.get('plugin_sync_proxy_mode'), PROXY_DIRECT),
+                d.get('plugin_sync_proxy_mode'), migrated),
             plugin_sync_proxy_url=_as_str(
                 d.get('plugin_sync_proxy_url'), ''),
             auth_required=_as_bool(d.get('auth_required'), True),
             auth_password_enc=_as_str(d.get('auth_password_enc'), ''),
             session_hashes=_as_str_list(d.get('session_hashes')),
             notify=NotifyConfig.from_dict(d.get('notify')),
-            webdav=WebdavConfig.from_dict(d.get('webdav')),
-            ai=AiConfig.from_dict(d.get('ai')),
+            webdav=WebdavConfig.from_dict(d.get('webdav'), migrated),
+            ai=AiConfig.from_dict(d.get('ai'), migrated),
             sites=sites_raw,
         )
 

@@ -130,9 +130,9 @@ class Service:
         except Exception:                                       # noqa: BLE001
             have = set()
         try:
-            helper = self._plugin_sync()
-            remote = helper.remote_shas()      # 最近一次检查/同步看到的远端 sha
-            synced = helper.synced_shas()      # 上次同步时**同意过**的远端 sha
+            # 一次读盘拿到两份 sha：以前分两次调用，.sync_state.json 被解析两遍，
+            # 而 /api/meta 与 /api/templates 每次页面加载都会走这里。
+            synced, remote = self._plugin_sync().state_snapshot()
         except Exception:                                       # noqa: BLE001
             remote, synced = {}, {}
         out = []
@@ -173,7 +173,7 @@ class Service:
         if not tpl:
             raise ValueError(
                 '找不到模板「%s」：可能还没同步到本地。'
-                '到「设置 → 可选站点同步」点「立即同步」后再试' % tid)
+                '到「新增站点 → 用模板新增」点「立即同步」后再试' % tid)
         cfg = self.load_config()
         if cfg.site(tid):
             return {'ok': True, 'already': True, 'id': tid}
@@ -512,9 +512,7 @@ class Service:
         # 这里传的是**主代理地址**本身（设置里填的那个），不再做"全局开关"
         # 判断：每个站点自己选直连 / 主代理 / 自定义，由 resolve_site_proxy 决定。
         return Runner(self.store, box=self.box, browser=self.browser,
-                      proxy=cfg.proxy,
-                      version=self.version,
-                      global_proxy_mode=cfg.proxy_mode)
+                      proxy=cfg.proxy, version=self.version)
 
     def load_state(self) -> RuntimeState:
         return self.store.load_state()
@@ -579,7 +577,7 @@ class Service:
                 'option_specs': T.site_option_specs(s),
                 'options': T.site_options(s),
                 # 站点级代理策略：界面要显示"直连 / 独立代理"标签
-                'proxy_mode': s.proxy_mode or 'inherit',
+                'proxy_mode': s.proxy_mode or 'direct',
                 'proxy_url': s.proxy_url or '',
                 # AI 相关状态：便于界面解释"为什么这个站点不跑了"
                 'ai_consecutive_failures': int(st.get('ai_consecutive_failures') or 0),
@@ -915,8 +913,11 @@ class Service:
         site_id 为空 = 全部站点合并看（那天只要有站点失败就算"有问题"）。
         """
         h = self.history()
-        data = h.calendar(str(site_id or ''), month)
-        data['recent'] = h.recent(str(site_id or ''), recent_days)
+        # 一次读盘，日历与"最近 N 天"共用同一批条目
+        entries = h.load(str(site_id or ''))
+        data = h.calendar(str(site_id or ''), month, entries=entries)
+        data['recent'] = h.recent(str(site_id or ''), recent_days,
+                                  entries=entries)
         # 站点列表：前端下拉框要用（含已停用的，历史还在）
         data['sites'] = [{'id': s.id, 'name': s.name}
                          for s in self.load_config().sites]
@@ -1096,7 +1097,6 @@ class Service:
         restored.ai.base_url = cfg.ai.base_url
         restored.ai.api_key_enc = cfg.ai.api_key_enc
         restored.proxy = cfg.proxy
-        restored.proxy_mode = cfg.proxy_mode
         restored.remote_cdp_url = cfg.remote_cdp_url
         restored.browser_path = cfg.browser_path
         self.save_config(restored)
@@ -1162,11 +1162,11 @@ class Service:
             ncfg.channels = [channel]
         else:
             ncfg = cfg.notify
-        # 代理要按"模式"算：直连模式下哪怕地址栏还留着旧地址也不该走代理
-        from .models import effective_global_proxy
-        report = notify_mod.send_all(ncfg, result,
-                                     effective_global_proxy(cfg.proxy,
-                                                            cfg.proxy_mode))
+        # 这里传的是**主代理地址**：每个渠道自己选直连/主代理/自定义，
+        # 只有选了「主代理」的才会用到它（channel_proxy 里各自判断）。
+        # 以前这里按全局 proxy_mode 过滤，而全局开关已经取消、默认值是
+        # direct —— 结果"渠道选主代理"永远拿不到地址，等于静默失效。
+        report = notify_mod.send_all(ncfg, result, cfg.proxy)
         return {'report': report}
 
     def test_alert(self) -> Dict[str, Any]:
@@ -1273,13 +1273,10 @@ class Service:
     def overview(self) -> Dict[str, Any]:
         cfg = self.load_config()
         state = self.load_state()
-        from .models import effective_global_proxy
-        eff = effective_global_proxy(cfg.proxy, cfg.proxy_mode)
         return {
             'version': self.version,
-            # 是否"真的"在走代理：模式为直连时，哪怕地址栏还留着旧地址也算未启用
-            'proxy_configured': bool(eff),
-            'proxy_mode': cfg.proxy_mode,
+            # 主代理地址是否填了。它本身不生效：各处各自选直连/主代理/自定义。
+            'proxy_configured': bool((cfg.proxy or '').strip()),
             'site_count': len(cfg.sites),
             'enabled_count': sum(1 for s in cfg.sites if s.enabled),
             'notify_channels': notify_mod.configured_channels(cfg.notify),

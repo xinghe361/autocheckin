@@ -23,7 +23,7 @@ DEFAULT_PORT = 28999      # 容器内部监听端口；host 模式下即宿主�
 DEFAULT_DATA_DIR = '/data'
 DEFAULT_TZ = 'Asia/Shanghai'
 
-VERSION = '1.5.5'
+VERSION = '1.5.6'
 
 
 @dataclass
@@ -105,7 +105,8 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
     parser.add_argument('--host', default=None, help='监听地址')
     parser.add_argument('--data-dir', default=None, help='数据目录')
     parser.add_argument('--timezone', default=None, help='时区，如 Asia/Shanghai')
-    parser.add_argument('--proxy', default=None, help='全局代理地址，留空表示直连')
+    parser.add_argument('--proxy', default=None,
+                        help='主代理地址（各功能选「主代理」时才用），留空表示不配')
     parser.add_argument('--tick-seconds', type=int, default=None,
                         help='调度检查间隔（秒），最小 5')
     parser.add_argument('--no-scheduler', action='store_true',
@@ -126,7 +127,7 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
     s.data_dir = (args.data_dir if args.data_dir is not None
                   else os.environ.get('DATA_DIR', DEFAULT_DATA_DIR))
     s.timezone = resolve_timezone(args.timezone, os.environ.get('TZ'))
-    # 代理**只**由网页「设置 → 网络」决定，不再从环境变量读。
+    # 代理**只**由网页「设置 → 主代理地址」决定，不再从环境变量读。
     #
     # 为什么去掉环境变量：两处都能设就会互相打架，而"网页里改了却不生效"
     # 是最难排查的一类问题（用户看到的现象是"我明明填了代理，怎么还是直连"）。
@@ -142,7 +143,7 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
             print('[警告] 代理地址看起来还是模板占位符：%s' % s.proxy)
             print('       程序会把它当成真实主机名去解析，必然失败，')
             print('       报错会显示为"域名解析失败"，但真正的原因是代理没填。')
-            print('       请到网页「设置 → 网络」填真实地址。')
+            print('       请到网页「设置 → 主代理地址」填真实地址。')
             print('       已忽略这个占位符，本次按【直连】运行。')
             s.proxy = ''
         else:
@@ -151,7 +152,7 @@ def build_settings(argv: Optional[List[str]] = None) -> Settings:
                   % (mask_proxy_url(s.proxy), proxy_host(s.proxy)))
     if os.environ.get('PROXY', '').strip():
         print('[提示] 检测到环境变量 PROXY，但本版本已改为'
-              '**只认网页「设置 → 网络」里的代理配置**。')
+              '**只认网页「设置 → 主代理地址」里的配置**。')
         print('       环境变量不再生效，请到网页里填写；'
               'compose 里的 PROXY 行可以删掉了。')
     s.env_key = os.environ.get('AUTOCHECKIN_KEY', '').strip()

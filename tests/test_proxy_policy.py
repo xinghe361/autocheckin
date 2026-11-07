@@ -19,7 +19,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import (PROXY_CUSTOM, PROXY_DIRECT, PROXY_INHERIT, AppConfig,
-                        SiteConfig, effective_global_proxy, resolve_proxy,
+                        SiteConfig, resolve_proxy,
                         resolve_site_proxy)  # noqa: E402
 
 G = 'http://192.168.1.10:7890'
@@ -31,45 +31,44 @@ class TestResolveSiteProxy(unittest.TestCase):
 
     def test_inherit_uses_global_when_global_is_custom(self):
         self.assertEqual(
-            resolve_site_proxy(self._site(PROXY_INHERIT), G, PROXY_CUSTOM), G)
+            resolve_site_proxy(self._site(PROXY_INHERIT), G), G)
 
     def test_inherit_uses_main_proxy_regardless_of_legacy_global_mode(self):
         """选「主代理」就用主代理地址 —— 全局已经没有开关了。"""
         self.assertEqual(
-            resolve_site_proxy(self._site(PROXY_INHERIT), G, PROXY_DIRECT), G)
+            resolve_site_proxy(self._site(PROXY_INHERIT), G), G)
 
     def test_site_direct_overrides_global_proxy(self):
         """站点强制直连：全局配了代理也不走。"""
         self.assertEqual(
-            resolve_site_proxy(self._site(PROXY_DIRECT), G, PROXY_CUSTOM), '')
+            resolve_site_proxy(self._site(PROXY_DIRECT), G), '')
 
     def test_site_custom_overrides_global_direct(self):
         """站点独立代理：全局是直连也能单独走。"""
         self.assertEqual(
-            resolve_site_proxy(self._site(PROXY_CUSTOM, 'http://own:1'),
-                               '', PROXY_DIRECT),
+            resolve_site_proxy(self._site(PROXY_CUSTOM, 'http://own:1'), ''),
             'http://own:1')
 
     def test_site_custom_with_empty_url_is_direct(self):
         """选了"用这个代理"却没填地址 -> 直连，而不是崩掉或乱连。"""
         self.assertEqual(
-            resolve_site_proxy(self._site(PROXY_CUSTOM, ''), G, PROXY_CUSTOM), '')
+            resolve_site_proxy(self._site(PROXY_CUSTOM, ''), G), '')
 
     def test_blank_and_unknown_modes_fall_back_to_direct(self):
         """空值/写错的值一律当直连：默认就该是"不折腾"。"""
         for mode in ('', '  ', 'wat', None):
             with self.subTest(mode=mode):
                 s = SiteConfig(id='x', name='X', proxy_mode=mode or '')
-                self.assertEqual(resolve_site_proxy(s, G, PROXY_CUSTOM), '')
+                self.assertEqual(resolve_site_proxy(s, G), '')
 
     def test_mode_is_case_insensitive(self):
         s = SiteConfig(id='x', name='X', proxy_mode='DIRECT')
-        self.assertEqual(resolve_site_proxy(s, G, PROXY_CUSTOM), '')
+        self.assertEqual(resolve_site_proxy(s, G), '')
 
     def test_whitespace_in_url_is_trimmed(self):
         s = SiteConfig(id='x', name='X', proxy_mode=PROXY_CUSTOM,
                        proxy_url='  http://own:1  ')
-        self.assertEqual(resolve_site_proxy(s, '', PROXY_DIRECT), 'http://own:1')
+        self.assertEqual(resolve_site_proxy(s, ''), 'http://own:1')
 
 
 class TestResolveProxy(unittest.TestCase):
@@ -119,45 +118,6 @@ class TestConfigDefaults(unittest.TestCase):
         self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_INHERIT)
 
 
-class TestEffectiveGlobalProxy(unittest.TestCase):
-    def test_direct_mode_ignores_address(self):
-        """这是"选了直连就该真直连"的关键：地址栏留着旧值也不生效。"""
-        self.assertEqual(effective_global_proxy(G, PROXY_DIRECT), '')
-
-    def test_custom_mode_returns_address(self):
-        self.assertEqual(effective_global_proxy(G, PROXY_CUSTOM), G)
-
-    def test_empty_address(self):
-        self.assertEqual(effective_global_proxy('', PROXY_CUSTOM), '')
-        self.assertEqual(effective_global_proxy('   ', PROXY_CUSTOM), '')
-
-    def test_unknown_mode_treated_as_not_direct(self):
-        """认不出的模式不应静默变成直连（否则代理会莫名失效）。"""
-        self.assertEqual(effective_global_proxy(G, ''), G)
-        self.assertEqual(effective_global_proxy(G, 'whatever'), G)
-
-
-class TestAppConfigProxyRoundTrip(unittest.TestCase):
-    def test_round_trip(self):
-        cfg = AppConfig(proxy_mode=PROXY_CUSTOM, proxy=G)
-        back = AppConfig.from_dict(cfg.to_dict())
-        self.assertEqual(back.proxy_mode, PROXY_CUSTOM)
-        self.assertEqual(back.proxy, G)
-
-    def test_old_config_with_proxy_becomes_custom(self):
-        """升级前的配置只有 proxy 字段：有地址就该继续走代理，不能静默变直连。"""
-        back = AppConfig.from_dict({'version': 1, 'proxy': G})
-        self.assertEqual(back.proxy_mode, PROXY_CUSTOM)
-        self.assertEqual(effective_global_proxy(back.proxy, back.proxy_mode), G)
-
-    def test_old_config_without_proxy_becomes_direct(self):
-        back = AppConfig.from_dict({'version': 1, 'proxy': ''})
-        self.assertEqual(back.proxy_mode, PROXY_DIRECT)
-
-    def test_default_is_direct(self):
-        self.assertEqual(AppConfig().proxy_mode, PROXY_DIRECT)
-
-
 class TestSiteConfigProxyRoundTrip(unittest.TestCase):
     def test_round_trip(self):
         s = SiteConfig(id='x', name='X', proxy_mode=PROXY_CUSTOM,
@@ -173,6 +133,43 @@ class TestSiteConfigProxyRoundTrip(unittest.TestCase):
     def test_old_site_without_field_defaults_to_direct(self):
         back = SiteConfig.from_dict({'id': 'x', 'name': 'X', 'kind': 'template'})
         self.assertEqual(back.proxy_mode, PROXY_DIRECT)
+
+
+
+class TestLegacyGlobalModeMigration(unittest.TestCase):
+    """老配置只有一个全局开关：升级后行为不能变。
+
+    以前「全局走代理」= 所有出站请求都走；现在改成各处三选一，
+    迁移时要把这份意图带到三处默认值上，否则升级当天模板同步/备份/AI
+    会突然从"走代理"变成"直连"（本来能通的站点直接全挂）。
+    """
+
+    def test_custom_mode_migrates_to_main_proxy(self):
+        cfg = AppConfig.from_dict({'proxy': 'http://g:1',
+                                   'proxy_mode': 'custom'})
+        self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_INHERIT)
+        self.assertEqual(cfg.webdav.proxy_mode, PROXY_INHERIT)
+        self.assertEqual(cfg.ai.proxy_mode, PROXY_INHERIT)
+
+    def test_direct_mode_stays_direct(self):
+        cfg = AppConfig.from_dict({'proxy': 'http://g:1',
+                                   'proxy_mode': 'direct'})
+        self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.webdav.proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.ai.proxy_mode, PROXY_DIRECT)
+
+    def test_no_proxy_at_all_is_direct(self):
+        cfg = AppConfig.from_dict({})
+        self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.webdav.proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.ai.proxy_mode, PROXY_DIRECT)
+
+    def test_explicit_new_fields_win_over_migration(self):
+        cfg = AppConfig.from_dict({'proxy': 'http://g:1',
+                                   'proxy_mode': 'custom',
+                                   'webdav': {'proxy_mode': 'direct'}})
+        self.assertEqual(cfg.webdav.proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.ai.proxy_mode, PROXY_INHERIT)
 
 
 if __name__ == '__main__':

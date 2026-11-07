@@ -185,7 +185,8 @@ try:
 
     st, body = get('/api/settings')
     stt = json.loads(body) if isinstance(body, bytes) else body
-    check('设置接口回传 proxy_mode', 'proxy_mode' in stt, str(stt)[:120])
+    check('设置接口回传主代理地址', 'proxy' in stt
+          and 'plugin_sync_proxy_mode' in stt, str(stt)[:120])
 
     st, body = get('/api/sites')
     one = (json.loads(body)['sites'] or [{}])[0]
@@ -235,7 +236,7 @@ try:
     check('元数据含三个通知渠道（Server 酱已移除）',
           set(meta['channels']) == {'pushplus', 'wecom', 'telegram'},
           str(meta.get('channels')))
-    check('元数据含代理模式', set(meta['proxy_modes']) == {'inherit', 'direct', 'custom'})
+    check('元数据不再下发代理模式枚举', 'proxy_modes' not in meta)
 
     st, body = get('/api/sites')
     check('站点列表', st == 200 and len(json.loads(body)['sites']) == 3)

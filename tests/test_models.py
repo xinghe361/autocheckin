@@ -242,20 +242,24 @@ class TestChannelProxy(unittest.TestCase):
         self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL),
                          'http://10.0.0.1:8080')
 
-    def test_notify_level_proxy_removed(self):
-        """通知级代理已移除：没给渠道单独设置时就跟随主代理。
+    def test_notify_level_proxy_is_gone(self):
+        """通知级代理那一层已彻底删除：字段都不存在了。
 
-        用户指出"通知代理"那一层是多余的 —— 已经有主代理，
-        每个渠道又能独立设置，中间那层没有存在意义。
-        所以即使旧配置里还留着 proxy_mode / proxy_url，也不再参与判定。
+        用户指出它多余（已经有主代理，每个渠道又能独立设置）。
+        保留空字段只会让人以为还能配 —— 所以连字段一起删。
         """
-        c = NotifyConfig(proxy_mode='custom', proxy_url='http://notify:8080')
-        self.assertEqual(N.channel_proxy(c, 'pushplus', self.GLOBAL), '',
-                         '通知级代理不该再生效；默认直连')
+        c = NotifyConfig()
+        self.assertFalse(hasattr(c, 'proxy_mode'))
+        self.assertFalse(hasattr(c, 'proxy_url'))
+        # 旧配置里残留的键读进来直接忽略，不影响判定
+        back = NotifyConfig.from_dict({'proxy_mode': 'custom',
+                                       'proxy_url': 'http://notify:8080'})
+        self.assertEqual(N.channel_proxy(back, 'pushplus', self.GLOBAL), '',
+                         '旧的通知级代理配置不该再生效')
 
-    def test_main_proxy_direct_means_direct(self):
-        """主代理为空（选了直连）时，未单独设置的渠道也是直连。"""
-        c = NotifyConfig(proxy_mode='direct')
+    def test_empty_main_proxy_means_direct(self):
+        """主代理为空时，未单独设置的渠道也是直连。"""
+        c = NotifyConfig()
         self.assertEqual(N.channel_proxy(c, 'pushplus', ''), '')
 
     def test_channel_setting_beats_main_proxy(self):
@@ -291,26 +295,17 @@ class TestNotifyConfigRoundTrip(unittest.TestCase):
         落盘只能存密文，加解密由 Service 负责。
         所以这里只断言 mode，url 的往返见 test_config_robustness.py。
         """
-        c = NotifyConfig(proxy_mode='custom', proxy_url='http://p:1',
-                         channel_proxy={'wecom': {'mode': 'direct'}})
+        c = NotifyConfig(channel_proxy={'wecom': {'mode': 'direct',
+                                                  'url': 'http://u:p@h:1'}})
         back = NotifyConfig.from_dict(c.to_dict())
-        self.assertEqual(back.proxy_mode, 'custom')
         self.assertEqual(back.channel_proxy['wecom']['mode'], 'direct')
         self.assertEqual(back.channel_proxy['wecom'].get('url', ''), '',
                          '代理地址明文不该经 to_dict 往返（落盘只有密文）')
-
-    def test_proxy_url_plaintext_not_in_to_dict(self):
-        c = NotifyConfig(proxy_url='http://user:pw@h:8')
-        d = c.to_dict()
-        self.assertNotIn('proxy_url', d, '明文代理地址不能落盘')
-        # 密文字段本身可以出现在结构里（值为空，等 Service 填）
-        self.assertEqual(d.get('proxy_url_enc', ''), '')
 
     def test_legacy_config_without_new_fields(self):
         """旧配置文件没有这些字段，不能崩。"""
         back = NotifyConfig.from_dict({'mode': NOTIFY_ALL, 'pushplus_token': 't'})
         self.assertEqual(back.pushplus_token, 't')
-        self.assertEqual(back.proxy_mode, PROXY_INHERIT)
         self.assertEqual(back.channel_proxy, {})
 
     def test_corrupt_channel_proxy_coerced(self):

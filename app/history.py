@@ -320,7 +320,9 @@ class History:
         return out
 
     # -- 日历 -----------------------------------------------------------
-    def calendar(self, site_id: str = '', month: str = '') -> Dict[str, Any]:
+    def calendar(self, site_id: str = '', month: str = '',
+                 entries: Optional[List[Dict[str, Any]]] = None
+                 ) -> Dict[str, Any]:
         """一个月的日历数据：每天什么状态 + 当天的明细。
 
         状态只有三种，刻意不做"部分成功"这种灰色地带：
@@ -334,8 +336,12 @@ class History:
         since, until = month_bounds(mon)
         today = day_of(now)
 
+        # entries 由调用方一次读好（日历和"最近 N 天"一起算），
+        # 否则同一个请求里要把整个历史文件解析两遍 —— 3000 条时约 24ms。
         buckets: Dict[str, List[Dict[str, Any]]] = {}
-        for e in self.load(site_id=site_id, since=since, until=until):
+        src = (entries if entries is not None
+               else self.load(site_id=site_id, since=since, until=until))
+        for e in src:
             d = day_of(_int(e.get('ts')))
             if not d:
                 continue
@@ -489,12 +495,18 @@ class History:
                               key=lambda x: -x['count']),
         }
 
-    def recent(self, site_id: str = '', days: int = 30) -> Dict[str, Any]:
+    def recent(self, site_id: str = '', days: int = 30,
+               entries: Optional[List[Dict[str, Any]]] = None
+               ) -> Dict[str, Any]:
         """最近 N 天的成功率速览（日历下面那行小字用）。"""
         now = self.now_fn()
         span = max(1, _int(days, 30))
         since = now - span * 86400
-        entries = self.load(site_id=site_id, since=since)
+        if entries is None:
+            entries = self.load(site_id=site_id, since=since)
+        else:
+            # 复用调用方读好的全量条目：这里只按时间窗过滤
+            entries = [e for e in entries if _int(e.get('ts')) >= since]
         ok_n = sum(1 for e in entries if _bool(e.get('ok')))
         fail_n = len(entries) - ok_n
         total = ok_n + fail_n

@@ -296,20 +296,16 @@ class PluginSync:
         except OSError:
             pass
 
-    def synced_shas(self) -> Dict[str, str]:
-        """上次同步时，各文件对应的**远端** sha（文件 → sha）。
+    def state_snapshot(self):
+        """一次读盘拿到 (synced_shas, remote_shas)。
 
-        和 remote_shas 比：不同就说明远端变了、本地还是旧的。
-        ⚠️ 不能拿"本地文件内容的 sha"跟远端比 —— 我们落盘的是重新序列化
-        的 JSON，字节必然不同，那样比完永远是"有新版本"。
+        两个列表都在同一个 .sync_state.json 里，分开取会把文件解析两遍 ——
+        而模板列表在每次页面加载（/api/meta、/api/templates）时都会走到。
         """
-        d = self._read_state().get('shas')
-        return d if isinstance(d, dict) else {}
-
-    def remote_shas(self) -> Dict[str, str]:
-        """最近一次检查/同步时远端文件的 sha（文件 → sha）。"""
-        d = self._read_state().get('remote_shas')
-        return d if isinstance(d, dict) else {}
+        d = self._read_state()
+        synced = d.get('shas') if isinstance(d.get('shas'), dict) else {}
+        remote = d.get('remote_shas') if isinstance(d.get('remote_shas'), dict) else {}
+        return synced, remote
 
     def _write_state(self, files: List[str], source: str,
                      shas: Optional[Dict[str, str]] = None) -> None:

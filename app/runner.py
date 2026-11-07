@@ -124,14 +124,13 @@ class Runner:
                  now_fn: Callable[[], int] = None, rng: random.Random = None,
                  checkin_fn: Callable = None, analyze_fn: Callable = None,
                  notify_fn: Callable = None, alert_fn: Callable = None,
-                 version: str = '', global_proxy_mode: str = '',
-                 history=None):
+                 version: str = '', history=None):
         self.store = store
         self.box = box                  # SecretBox，用于解出站点密码/API Key
         self.browser = browser
+        # 主代理地址（设置里填的那个）。站点自己选直连/主代理/自定义，
+        # 因此这里不做任何"全局开关"判断。
         self.proxy = proxy
-        # 全局代理模式（direct/custom）：决定 inherit 的站点最终走不走代理
-        self.global_proxy_mode = global_proxy_mode or ''
         self.now_fn = now_fn or (lambda: int(time.time()))
         self.rng = rng or random.Random()
         self.checkin_fn = checkin_fn or _default_checkin
@@ -149,12 +148,12 @@ class Runner:
     def _proxy_for(self, site: SiteConfig) -> str:
         """这个站点最终该走哪个代理（空串=直连）。
 
-        站点可以单独设置：跟随全局 / 强制直连 / 用独立代理。
+        站点可以单独设置：直连（默认）/ 主代理 / 自定义。
         单独抽出来是因为它决定"这个站点走不走代理"，
         排查"为什么这个站点连不上"时第一个要看的就是它。
         """
         from .models import resolve_site_proxy
-        return resolve_site_proxy(site, self.proxy, self.global_proxy_mode)
+        return resolve_site_proxy(site, self.proxy)
 
     def _password_of(self, site: SiteConfig) -> str:
         """取站点密码。

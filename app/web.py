@@ -471,7 +471,6 @@ class WebApp:
                 'notify_modes': list(NOTIFY_MODES),
                 'notify_mode_labels': dict(NOTIFY_MODE_LABELS),
                 'channels': list(ALL_CHANNELS),
-                'proxy_modes': [PROXY_INHERIT, PROXY_DIRECT, PROXY_CUSTOM],
                 # 首次安装时「模板来源」输入框默认填这个，省得用户去翻文档
                 'default_template_source': DEFAULT_TEMPLATE_SOURCE,
                 'actions': ['goto', 'click', 'fill', 'wait', 'wait_for',
@@ -481,12 +480,6 @@ class WebApp:
     # ------------------------------------------------------------------
     def _apply_settings(self, cfg, body: Dict[str, Any]) -> None:
         """把界面提交的设置写进配置；空字符串表示"不修改"凭据。"""
-        # 全局「联网方式」开关已取消：设置里那栏只是主代理地址。
-        # 仍接受旧客户端传来的 proxy_mode，但不再影响任何功能
-        # （各处都用自己的三选一，见 models.resolve_proxy）。
-        if 'proxy_mode' in body:
-            mode = str(body.get('proxy_mode') or '').lower()
-            cfg.proxy_mode = mode if mode in ('direct', 'custom') else 'direct'
         if 'proxy' in body:
             cfg.proxy = str(body.get('proxy') or '')
         # 选了"直连"却还留着地址：不报错，但地址不参与生效
@@ -529,12 +522,16 @@ class WebApp:
                 nc.mode = str(n['mode'])
             if 'channels' in n and isinstance(n['channels'], list):
                 nc.channels = [str(x) for x in n['channels']]
-            if 'proxy_mode' in n:
-                nc.proxy_mode = str(n['proxy_mode'])
-            if 'proxy_url' in n:
-                nc.proxy_url = str(n['proxy_url'])
             if 'channel_proxy' in n and isinstance(n['channel_proxy'], dict):
-                nc.channel_proxy = n['channel_proxy']
+                # 逐层收敛：前端或手改的配置里可能是字符串/空值，
+                # 直接存进去会让 channel_proxy() 里的 .get() 抛异常（= 500）。
+                cp = {}
+                for ch, v in list(n['channel_proxy'].items())[:20]:
+                    if not isinstance(v, dict):
+                        continue
+                    cp[str(ch)] = {'mode': str(v.get('mode') or 'direct'),
+                                   'url': str(v.get('url') or '')[:300]}
+                nc.channel_proxy = cp
             if 'custom_sites' in n and isinstance(n['custom_sites'], list):
                 nc.custom_sites = [str(x) for x in n['custom_sites']]
             # 每日汇总
@@ -968,7 +965,6 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
      background:#eef1f5;color:#5a636e}
 .tag.ok{background:#e4f6ea;color:var(--ok)}
 .tag.err{background:#fdecea;color:var(--err)}
-.tag.evo{background:#fde8ef;color:#c2185b}
 .hint{font-size:12px;color:var(--mut);margin-top:6px}
 .msg{margin-top:10px;padding:8px 11px;border-radius:6px;font-size:12.5px;
      white-space:pre-wrap;display:none}
@@ -1085,7 +1081,6 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .kvrow{display:flex;gap:6px;margin-bottom:6px}
 .kvrow input:first-child{flex:0 0 34%}
 .kvrow input{flex:1}
-.paths{font-size:12px;color:var(--mut);margin-top:4px}
 
 /* ===== 执行记录（日历） =====
    配色只用"绿=全部成功 / 红=有失败 / 灰=没跑过"三态。
@@ -1435,7 +1430,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
         <select id="set_nmode"></select></div>
     </div>
     <div class="hint">每个渠道默认<b>直连</b>（通知服务多在公网，跟着签到的主代理反而容易失败）；
-      需要时才在下面选「跟随主代理」或填自定义代理。</div>
+      需要时才在下面选「主代理」（用设置里的地址）或「自定义」。</div>
     <div id="chanBox"></div>
     <div class="fsec" style="margin-top:14px">
       <h4>每日汇总</h4>
@@ -2220,15 +2215,6 @@ function intervalText(minutes){
   return Math.floor(v/60) + ' 小时 ' + (v%60) + ' 分钟';
 }
 
-/* 今天的日期（与后端 _today 的格式一致：YYYY-MM-DD）。
-   用于判断"今天已停止重试"这类带日期的标记是否仍然有效。 */
-function todayStr(){
-  var d = new Date();
-  var m = String(d.getMonth() + 1).padStart(2, '0');
-  var day = String(d.getDate()).padStart(2, '0');
-  return d.getFullYear() + '-' + m + '-' + day;
-}
-
 function cookieTag(s){
   if(!s.has_cookie) return '<span class="tag err">未配置登录</span>';
   if(s.cookie_status===2) return '<span class="tag err">登录已失效</span>';
@@ -2470,7 +2456,6 @@ function toggleEdit(id){
   /* 用户主动操作：强制重建一次，让展开状态立刻生效 */
   _forceSitesRefresh = true;
   _formDirty = false;
-  _pendingSitesRefresh = false;
   loadSites();
   if(willOpen){
     /* 展开后把这张卡片顶到视口上方，长表单不至于跑到屏幕外 */
@@ -2488,14 +2473,6 @@ function toggleEdit(id){
 function radioValue(name){
   var el = document.querySelector('input[name="'+name+'"]:checked');
   return el ? el.value : '';
-}
-function setRadio(name, value){
-  var list = document.querySelectorAll('input[name="'+name+'"]');
-  for(var i = 0; i < list.length; i++){
-    list[i].checked = (list[i].value === value);
-  }
-  /* 程序改 checked 不会触发 change，选中态得手动重画 */
-  paintRadios();
 }
 /* 「直连 / 主代理 / 自定义」三选一：只有选「自定义」时才显示地址框。
    站点表单用的是分段按钮，这里几处用下拉（省地方、也更容易一眼看全三个选项）。 */
@@ -2695,7 +2672,7 @@ function flushCookieMsg(id){
 function siteFormHtml(s, c){
   var id = s.id, p = 'f_'+id+'_';
   var isDaily = (s.mode !== 'success_based');
-  /* 站点级代理模式。老数据可能是空串，当作"跟随全局"处理 */
+  /* 站点级代理模式。老数据可能是空串，按"直连"处理（新的默认值） */
   var sitePmode = s.proxy_mode || 'direct';
   if(['inherit','direct','custom'].indexOf(sitePmode) < 0) sitePmode = 'inherit';
 
@@ -3437,7 +3414,6 @@ function closeCookieHelper(){
    —— 正在编辑的表单会被整块替换掉，用户填到一半的内容就没了
    （实测：粘贴 Cookie 到一半被冲掉）。所以改动过就暂停自动刷新。 */
 var _formDirty = false;
-var _pendingSitesRefresh = false;
 
 /* 标记原始值。用不可见字符做属性前缀，避免与站点自定义的字段名冲突。 */
 var _MARK = '\uE000acOrig\uE000';
@@ -3497,13 +3473,12 @@ function currentEditId(){
 /* 定时/手动刷新。
    保护策略分两层：
      1. 数据没变 -> loadSites 直接跳过 DOM 重建（主要防线，见 loadSites）
-     2. 数据变了但用户正在编辑 -> 记下待办，先不重建，
-        避免把填到一半的内容冲掉；编辑结束（保存/取消）后再补刷新
+     2. 数据变了但用户正在编辑 -> 先不重建，
+        避免把填到一半的内容冲掉；保存/取消本身会重建列表
    这样既不会"动不动就刷新"，也不会因为怕刷新而丢掉数据变化。 */
 function refreshAll(){
   loadOverview();
   if(formIsOpen() && (_formDirty || formHasEdits())){
-    _pendingSitesRefresh = true;
     var id = currentEditId();
     var el = $('f_'+id+'_ckmsg');
     if(el && !el.textContent){
@@ -3514,15 +3489,6 @@ function refreshAll(){
     return;
   }
   loadSites();
-}
-
-/* 保存/取消后：如果之前因为编辑而暂停过，补一次刷新 */
-function resumeAutoRefresh(){
-  _formDirty = false;
-  if(_pendingSitesRefresh){
-    _pendingSitesRefresh = false;
-    loadSites();
-  }
 }
 
 function runNow(){
@@ -4046,7 +4012,7 @@ function collectNotify(){
     document.querySelectorAll('.chProxyUrl').forEach(function(u){
       if(u.dataset.ch === ch) url = u.value.trim();
     });
-    /* 直连/跟随主代理时不留 url：留着会在切回自定义时莫名生效 */
+    /* 直连/主代理时不留 url：留着会在切回自定义时莫名生效 */
     if(sel.value) n.channel_proxy[ch] = {mode: sel.value,
                                         url: sel.value === 'custom' ? url : ''};
   });

@@ -320,8 +320,8 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
         return FlowOutcome(
             success=False,
             message='站点模板文件缺失（templates/%s.json 找不到），'
-                    '这不是站点改版。到「设置 → 可选站点」点「重新扫描」，'
-                    '或填好同步来源拉一次模板即可恢复' % tid,
+                    '这不是站点改版。到「新增站点 → 用模板新增」点「立即同步」，'
+                    '或直接点该模板的「加入」即可恢复' % tid,
             hit='unknown', error_kind='template_missing')
 
     mission = tpl.get('mission_url') or site.homepage
@@ -420,7 +420,7 @@ def _proxy_hint(proxy: str) -> str:
     try:
         from .netutil import mask_proxy_url
         return ('（这次请求走了代理 %s；代理不通也会长这样，'
-                '可到「设置 → 联网方式」切「直连」再试一次）'
+                '可把它改回「直连」再试一次）'
                 % mask_proxy_url(url))
     except Exception:                                           # noqa: BLE001
         return '（这次请求走了代理；代理不通也会长这样）'

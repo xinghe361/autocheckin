@@ -307,7 +307,6 @@ class TestNotifyCredentialsEncryptedAtRest(unittest.TestCase):
         n.wecom_webhook = self.WECOM
         n.tg_bot_token = self.TG
         n.tg_chat_id = self.CHAT
-        n.proxy_url = self.NPX
         n.channel_proxy = {'telegram': {'mode': 'custom', 'url': self.CPX}}
         self.svc.save_config(cfg)
 
@@ -322,7 +321,6 @@ class TestNotifyCredentialsEncryptedAtRest(unittest.TestCase):
                 ('企业微信 key', 'WECOM_KEY'),
                 ('TG bot token', 'TG_BOT_SECRET'),
                 ('TG chat id', 'CHAT_ID_999'),
-                ('通知级代理账密', 'nuser:npass'),
                 ('渠道代理账密', 'cuser:cpass')):
             with self.subTest(label=label):
                 self.assertNotIn(needle, raw,
@@ -334,7 +332,6 @@ class TestNotifyCredentialsEncryptedAtRest(unittest.TestCase):
         self.assertEqual(r.wecom_webhook, self.WECOM)
         self.assertEqual(r.tg_bot_token, self.TG)
         self.assertEqual(r.tg_chat_id, self.CHAT)
-        self.assertEqual(r.proxy_url, self.NPX)
         self.assertEqual(
             (r.channel_proxy.get('telegram') or {}).get('url'), self.CPX)
         # 渠道判定照常工作

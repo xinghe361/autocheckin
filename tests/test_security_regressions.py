@@ -121,7 +121,6 @@ class TestBackupExcludesSecrets(unittest.TestCase):
             pushplus_token='PP_SECRET',
             wecom_webhook='https://qyapi.weixin.qq.com/WECOM_SECRET',
             tg_bot_token='TG_SECRET', tg_chat_id='12345',
-            proxy_url='http://u:p@10.0.0.2:1',
             channel_proxy={'telegram': {'mode': 'custom',
                                         'url': 'http://a:b@1.2.3.4:9'}})
         self.cfg.auth_password_enc = 'ENC_PW'
@@ -138,7 +137,6 @@ class TestBackupExcludesSecrets(unittest.TestCase):
                               ('TG bot token', 'TG_SECRET'),
                               ('TG chat id', '12345'),
                               ('全局代理账密', 'user:pass'),
-                              ('通知级代理账密', 'u:p'),
                               ('渠道代理账密', 'a:b'),
                               ('站点代理账密', 'u2:p2'),
                               ('站点自定义头凭据', 'SITE_SECRET')):
@@ -182,6 +180,42 @@ class TestBackupExcludesSecrets(unittest.TestCase):
         self.assertEqual(restored.session_hashes, ['LOCAL_SESSION'])
         # 但站点数据要正常恢复
         self.assertEqual([s.id for s in restored.sites], ['x'])
+
+    def test_import_keeps_local_proxy_choices(self):
+        """备份不能决定"流量往哪个代理走"。
+
+        以前只保护了全局 proxy；改成"各处各选"之后，备份里的
+        webdav / ai / 模板同步 的代理设置同样能把流量指到攻击者机器上
+        （备份文件本来就是往外传的，走错代理等于直接送给对方）。
+        """
+        local = AppConfig()
+        local.proxy = 'http://local-main:1'
+        local.plugin_sync_proxy_mode = 'direct'
+        local.webdav.proxy_mode = 'direct'
+        local.ai.proxy_mode = 'direct'
+
+        malicious = {
+            'proxy': 'http://attacker:1',
+            'plugin_sync_proxy_mode': 'custom',
+            'plugin_sync_proxy_url': 'http://attacker-sync:1',
+            'webdav': {'url': 'https://dav.example.com/dav/',
+                       'proxy_mode': 'custom',
+                       'proxy_url': 'http://attacker-wd:1'},
+            'ai': {'proxy_mode': 'custom',
+                   'proxy_url': 'http://attacker-ai:1'},
+            'sites': [{'id': 'x', 'name': 'X'}],
+        }
+        r = self.store.import_config(malicious, keep_auth_from=local)
+        self.assertEqual(r.proxy, 'http://local-main:1')
+        self.assertEqual(r.plugin_sync_proxy_mode, 'direct')
+        self.assertEqual(r.plugin_sync_proxy_url, '')
+        self.assertEqual(r.webdav.proxy_mode, 'direct')
+        self.assertEqual(r.webdav.proxy_url, '')
+        self.assertEqual(r.ai.proxy_mode, 'direct')
+        self.assertEqual(r.ai.proxy_url, '')
+        # 站点仍按备份恢复（站点级代理在界面上可见、可改）
+        self.assertEqual([s.id for s in r.sites], ['x'])
+
 
 
 class TestPlainPrefixRequiresWeakMode(unittest.TestCase):
@@ -504,6 +538,8 @@ class TestNoInlineEventInjection(unittest.TestCase):
                          'homepage': 'javascript:alert(document.domain)'})
         site = [s for s in svc.load_config().sites if s.id == 'x1'][0]
         self.assertNotIn('javascript', site.homepage.lower())
+
+
 
 
 if __name__ == '__main__':

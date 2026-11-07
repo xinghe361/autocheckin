@@ -472,7 +472,16 @@ class Store:
             cfg.ai.base_url = keep_auth_from.ai.base_url
             cfg.ai.api_key_enc = keep_auth_from.ai.api_key_enc
             cfg.proxy = keep_auth_from.proxy
-            cfg.proxy_mode = keep_auth_from.proxy_mode
+            # 各处"走哪个代理"的选择同样不能由备份决定 —— 否则恢复一个
+            # 别人的备份就等于把模板同步 / 备份上传 / AI 调用的流量
+            # 指到他填的代理上（数据直接过他的手）。站点级的代理留在站点里，
+            # 恢复后能在界面上看到并改掉。
+            cfg.plugin_sync_proxy_mode = keep_auth_from.plugin_sync_proxy_mode
+            cfg.plugin_sync_proxy_url = keep_auth_from.plugin_sync_proxy_url
+            cfg.webdav.proxy_mode = keep_auth_from.webdav.proxy_mode
+            cfg.webdav.proxy_url = keep_auth_from.webdav.proxy_url
+            cfg.ai.proxy_mode = keep_auth_from.ai.proxy_mode
+            cfg.ai.proxy_url = keep_auth_from.ai.proxy_url
             cfg.remote_cdp_url = keep_auth_from.remote_cdp_url
             cfg.browser_path = keep_auth_from.browser_path
             cfg.sites_initialized = bool(cfg.sites) or \
