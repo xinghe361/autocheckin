@@ -247,11 +247,9 @@ try:
     # 写入设置：含凭据，然后确认不会被明文回显
     post('/api/settings', {
         'proxy': 'http://10.0.0.1:7890',
-        'notify': {'channels': ['telegram', 'wecom'], 'proxy_mode': 'custom',
-                   'proxy_url': 'http://n:1',
-                   # 渠道级代理已改为直接跟随主代理（通知级那层已删）。
-                   # 这里把两个渠道都设为直连，避免冒烟测试真的去连
-                   # 10.0.0.1:7890 这个不存在的代理而卡住超时。
+        'notify': {'channels': ['telegram', 'wecom'],
+                   # 通知只有渠道级代理（通知级那层已删）。两个渠道都设直连，
+                   # 避免冒烟真的去连 10.0.0.1:7890 这个不存在的代理而卡住超时。
                    'channel_proxy': {
                        'wecom': {'mode': 'direct', 'url': ''},
                        'telegram': {'mode': 'direct', 'url': ''}},

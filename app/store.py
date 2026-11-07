@@ -412,7 +412,6 @@ class Store:
                       'tg_bot_token', 'tg_chat_id'):
                 notify.pop(k, None)
             # 渠道级代理地址同样可能带账密
-            notify['proxy_url'] = ''
             for v in (notify.get('channel_proxy') or {}).values():
                 if isinstance(v, dict):
                     v['url'] = ''

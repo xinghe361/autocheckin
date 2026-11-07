@@ -2306,7 +2306,7 @@ function renderSiteRows(sites){
     if(s.step_count) badges += ' <span class="tag">'+s.step_count+' 步</span>';
     if(s.headers && Object.keys(s.headers).length)
       badges += ' <span class="tag">自定义头 '+Object.keys(s.headers).length+'</span>';
-    var pm = s.proxy_mode || 'inherit';
+    var pm = s.proxy_mode || 'direct';   /* 缺字段按直连，和新站点默认一致 */
     if(pm === 'direct') badges += ' <span class="tag">直连</span>';
     else if(pm === 'custom') badges += ' <span class="tag">独立代理</span>';
 

@@ -454,15 +454,15 @@ def resolve_proxy(mode: str, own_url: str, main_proxy: str) -> str:
     保证同一份配置在各个功能上的含义完全一致。
 
         direct            -> 空串（直连）
+        inherit（主代理）   -> main_proxy
         custom            -> own_url
-        其它（含 inherit） -> main_proxy（主代理地址）
 
-    inherit 是历史值，语义就是"用主代理"，因此兼容到同一个分支里。
+    任何不认识的值一律按直连处理。
     """
     m = (mode or '').strip().lower() or PROXY_DIRECT
     if m == PROXY_CUSTOM:
         return (own_url or '').strip()
-    if m == PROXY_INHERIT or m == 'main':
+    if m == PROXY_INHERIT:
         return (main_proxy or '').strip()
     # direct / 空值 / 写错的值：一律直连。宁可连不上，也不要偷偷走代理
     # （"为什么这个站点走了代理"比"为什么连不上"更难查）。
@@ -653,8 +653,7 @@ class WebdavConfig:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: Dict[str, Any],
-                  default_proxy_mode: str = PROXY_DIRECT) -> 'WebdavConfig':
+    def from_dict(d: Dict[str, Any]) -> 'WebdavConfig':
         d = _as_dict(d)
         base = WebdavConfig()
         base.enabled = _as_bool(d.get('enabled'), False)
@@ -664,7 +663,7 @@ class WebdavConfig:
         base.auto_interval_minutes = _as_int(
             d.get('auto_interval_minutes'), 0, 0)
         base.backup_key = _as_bool(d.get('backup_key'), False)
-        base.proxy_mode = _as_str(d.get('proxy_mode'), default_proxy_mode)
+        base.proxy_mode = _as_str(d.get('proxy_mode'), PROXY_DIRECT)
         base.proxy_url = _as_str(d.get('proxy_url'), '')
         return base
 
@@ -727,8 +726,7 @@ class AiConfig:
         return asdict(self)
 
     @staticmethod
-    def from_dict(d: Dict[str, Any],
-                  default_proxy_mode: str = PROXY_DIRECT) -> 'AiConfig':
+    def from_dict(d: Dict[str, Any]) -> 'AiConfig':
         base = AiConfig()
         src = _as_dict(d)          # 非 dict（list/str/None）当空配置
 
@@ -759,7 +757,7 @@ class AiConfig:
             src.get('fail_threshold'), base.fail_threshold, 0, 1000)
         base.include_page_excerpt = _as_bool(
             src.get('include_page_excerpt'), base.include_page_excerpt)
-        base.proxy_mode = _as_str(src.get('proxy_mode'), default_proxy_mode)
+        base.proxy_mode = _as_str(src.get('proxy_mode'), PROXY_DIRECT)
         base.proxy_url = _as_str(src.get('proxy_url'), '')
 
         if legacy_per_day is not None:
@@ -864,17 +862,10 @@ class AppConfig:
         # 顶层也全部走类型收敛：这是启动路径，任何一处抛异常都会让
         # 容器起不来（用户看到的现象就是"换了镜像但版本没变"）。
         d = _as_dict(d)
-        # 旧配置只有一个全局开关（proxy_mode）。现在开关没了，各处各选 ——
-        # 为了让升级前后行为一致：老配置若是"全局走代理"，就把三处新字段的
-        # **默认值**也设成「主代理」；否则直连。没配过代理的新装环境自然是直连。
+        # 这里曾经按旧的全局 proxy_mode 做迁移（老配置"走代理"→三处默认主代理）。
+        # 已按用户要求去掉：不兼容老配置，旧键读到就丢，各功能一律从直连开始。
+        # 全局「proxy」保留，它只是主代理地址的存放处，本身不产生任何出站行为。
         raw_proxy = _as_str(d.get('proxy'), '')
-        legacy_mode = _as_str(d.get('proxy_mode'), '')
-        if not legacy_mode:
-            legacy_mode = PROXY_CUSTOM if raw_proxy.strip() else PROXY_DIRECT
-        # 地址填了、且以前是走代理的 → 这三处沿用主代理；其余一律直连。
-        migrated = (PROXY_INHERIT if (legacy_mode == PROXY_CUSTOM
-                                      and raw_proxy.strip())
-                    else PROXY_DIRECT)
         sites_raw = []
         for s in _as_list(d.get('sites')):
             if isinstance(s, dict):
@@ -898,15 +889,15 @@ class AppConfig:
             plugin_sync_interval_days=_as_int(
                 d.get('plugin_sync_interval_days'), 1, 1, 365),
             plugin_sync_proxy_mode=_as_str(
-                d.get('plugin_sync_proxy_mode'), migrated),
+                d.get('plugin_sync_proxy_mode'), PROXY_DIRECT),
             plugin_sync_proxy_url=_as_str(
                 d.get('plugin_sync_proxy_url'), ''),
             auth_required=_as_bool(d.get('auth_required'), True),
             auth_password_enc=_as_str(d.get('auth_password_enc'), ''),
             session_hashes=_as_str_list(d.get('session_hashes')),
             notify=NotifyConfig.from_dict(d.get('notify')),
-            webdav=WebdavConfig.from_dict(d.get('webdav'), migrated),
-            ai=AiConfig.from_dict(d.get('ai'), migrated),
+            webdav=WebdavConfig.from_dict(d.get('webdav')),
+            ai=AiConfig.from_dict(d.get('ai')),
             sites=sites_raw,
         )
 

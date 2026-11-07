@@ -136,40 +136,45 @@ class TestSiteConfigProxyRoundTrip(unittest.TestCase):
 
 
 
-class TestLegacyGlobalModeMigration(unittest.TestCase):
-    """老配置只有一个全局开关：升级后行为不能变。
+class TestNoLegacyProxyMigration(unittest.TestCase):
+    """不兼容老配置：旧的全局开关读到就丢，各功能一律从直连开始。
 
-    以前「全局走代理」= 所有出站请求都走；现在改成各处三选一，
-    迁移时要把这份意图带到三处默认值上，否则升级当天模板同步/备份/AI
-    会突然从"走代理"变成"直连"（本来能通的站点直接全挂）。
+    以前有个全局 proxy_mode（direct/custom）决定所有出站请求走不走代理。
+    现在它被拆成五处各自三选一，那个键已经没有任何含义 —— 不做迁移，
+    免得"以前随手设过走代理"的机器升级后所有流量还默默走代理。
+    「proxy」本身保留，它只是主代理地址的存放处，不填就不用。
     """
 
-    def test_custom_mode_migrates_to_main_proxy(self):
+    def test_legacy_global_mode_is_ignored(self):
         cfg = AppConfig.from_dict({'proxy': 'http://g:1',
                                    'proxy_mode': 'custom'})
+        self.assertFalse(hasattr(cfg, 'proxy_mode'), '旧的全局开关字段应已删除')
+        self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.webdav.proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.ai.proxy_mode, PROXY_DIRECT)
+
+    def test_main_address_is_still_kept(self):
+        """地址是"仓库"，留着不影响行为；谁选「主代理」才用得上。"""
+        cfg = AppConfig.from_dict({'proxy': 'http://g:1'})
+        self.assertEqual(cfg.proxy, 'http://g:1')
+
+    def test_explicit_choice_is_respected(self):
+        cfg = AppConfig.from_dict({
+            'proxy': 'http://g:1',
+            'plugin_sync_proxy_mode': 'inherit',
+            'webdav': {'proxy_mode': 'custom', 'proxy_url': ''},
+            'ai': {'proxy_mode': 'direct'},
+        })
         self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_INHERIT)
-        self.assertEqual(cfg.webdav.proxy_mode, PROXY_INHERIT)
-        self.assertEqual(cfg.ai.proxy_mode, PROXY_INHERIT)
-
-    def test_direct_mode_stays_direct(self):
-        cfg = AppConfig.from_dict({'proxy': 'http://g:1',
-                                   'proxy_mode': 'direct'})
-        self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_DIRECT)
-        self.assertEqual(cfg.webdav.proxy_mode, PROXY_DIRECT)
+        self.assertEqual(cfg.webdav.proxy_mode, PROXY_CUSTOM)
         self.assertEqual(cfg.ai.proxy_mode, PROXY_DIRECT)
 
-    def test_no_proxy_at_all_is_direct(self):
-        cfg = AppConfig.from_dict({})
-        self.assertEqual(cfg.plugin_sync_proxy_mode, PROXY_DIRECT)
-        self.assertEqual(cfg.webdav.proxy_mode, PROXY_DIRECT)
-        self.assertEqual(cfg.ai.proxy_mode, PROXY_DIRECT)
-
-    def test_explicit_new_fields_win_over_migration(self):
-        cfg = AppConfig.from_dict({'proxy': 'http://g:1',
-                                   'proxy_mode': 'custom',
-                                   'webdav': {'proxy_mode': 'direct'}})
-        self.assertEqual(cfg.webdav.proxy_mode, PROXY_DIRECT)
-        self.assertEqual(cfg.ai.proxy_mode, PROXY_INHERIT)
+    def test_garbage_mode_falls_back_to_direct(self):
+        cfg = AppConfig.from_dict({'ai': {'proxy_mode': 'main'}})
+        self.assertEqual(cfg.ai.proxy_mode, 'main')
+        # 落盘时的值不在三选一里 -> 解析成直连，绝不偷偷走代理
+        from app.models import resolve_proxy
+        self.assertEqual(resolve_proxy(cfg.ai.proxy_mode, '', 'http://g:1'), '')
 
 
 if __name__ == '__main__':
