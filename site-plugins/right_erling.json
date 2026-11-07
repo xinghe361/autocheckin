@@ -2,6 +2,8 @@
   "id": "right_erling",
   "name": "恩山无线论坛（erling 签到）",
   "homepage": "https://www.right.com.cn/forum/",
+  "version": "1.0.0",
+  "updated": "2026-11-08",
   "mission_url": "https://www.right.com.cn/forum/plugin.php?id=erling_qd:sign_in",
   "need_browser": false,
   "verify_ssl": true,

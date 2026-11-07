@@ -2,6 +2,8 @@
   "id": "example",
   "name": "示例站点（请改成你自己的）",
   "homepage": "https://example.com/",
+  "version": "1.0.0",
+  "updated": "2026-11-08",
   "mission_url": "https://example.com/checkin",
   "need_browser": false,
   "verify_ssl": true,

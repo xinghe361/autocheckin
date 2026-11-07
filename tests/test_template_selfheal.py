@@ -296,5 +296,77 @@ class TestUpdateOnly(Case):
                         '没点更新的模板必须还在')
 
 
+
+class TestSyncIdempotentAndVersions(Case):
+    """「同一个模板反复更新都是自己」——内容没变就不该算更新。"""
+
+    SRC = 'xinghe361/autocheckin/site-plugins'
+
+    def _sync(self, listed, payload):
+        store = mock.Mock(dir=os.path.join(self.dir, 'templates'))
+        store.ensure_dir.return_value = store.dir
+        store.load.return_value = []
+        sync = PS.PluginSync(store, proxy_fn=lambda: '')
+        with mock.patch.object(PS, '_list_repo_files', return_value=listed), \
+                mock.patch.object(PS, '_fetch', return_value=payload):
+            return sync.sync(self.SRC)
+
+    def test_second_sync_reports_nothing_updated(self):
+        os.makedirs(os.path.join(self.dir, 'templates'), exist_ok=True)
+        listed = [('v2ex.json', 'https://x/v2ex.json', 'sha1')]
+        payload = json.dumps(load('v2ex'), ensure_ascii=False).encode()
+        first = self._sync(listed, payload)
+        self.assertEqual(first['added'], ['v2ex.json'])
+        second = self._sync(listed, payload)
+        self.assertEqual(second['updated'], [], '内容没变不该再算"更新"')
+        self.assertEqual(second['added'], [])
+
+    def test_list_marks_latest_right_after_sync(self):
+        """同步完成后立刻应该显示"已是最新"，而不是"有新版本"。
+
+        踩过：拿本地文件内容的 sha 跟远端比 —— 落盘时重新序列化过，
+        字节永远不同，于是每行都长期显示"有新版本"。
+        """
+        os.makedirs(os.path.join(self.dir, 'templates'), exist_ok=True)
+        listed = [('v2ex.json', 'https://x/v2ex.json', 'sha1')]
+        payload = json.dumps(load('v2ex'), ensure_ascii=False).encode()
+        self._sync(listed, payload)
+
+        svc = self._svc()
+        rows = {t['id']: t for t in svc.list_templates()}
+        row = rows['v2ex']
+        self.assertFalse(row['has_update'], '刚同步完不该报"有新版本"')
+        self.assertTrue(row['up_to_date'])
+
+    def test_remote_change_marks_update(self):
+        os.makedirs(os.path.join(self.dir, 'templates'), exist_ok=True)
+        payload = json.dumps(load('v2ex'), ensure_ascii=False).encode()
+        self._sync([('v2ex.json', 'https://x/v2ex.json', 'sha1')], payload)
+        # 远端换了内容
+        self._sync([('v2ex.json', 'https://x/v2ex.json', 'sha2')], payload)
+        svc = self._svc()
+        row = {t['id']: t for t in svc.list_templates()}['v2ex']
+        # 这一次同步已经把新内容拉下来了，所以仍是最新
+        self.assertTrue(row['up_to_date'])
+
+    def test_version_field_survives_validation(self):
+        tpl, why = PS.validate_template({
+            'id': 'x1', 'name': 'X', 'homepage': 'https://x.test/',
+            'version': '2.3.1', 'updated': '2026-11-08',
+            'flow': [{'action': 'get', 'url': 'https://x.test/'}],
+        })
+        self.assertEqual(why, '')
+        self.assertEqual(tpl['version'], '2.3.1')
+        self.assertEqual(tpl['updated'], '2026-11-08')
+
+    def test_list_exposes_version_and_time(self):
+        self._seed_tpl()
+        row = {t['id']: t for t in self._svc().list_templates()}['v2ex']
+        for key in ('version', 'tpl_updated', 'file_mtime', 'file',
+                    'has_update', 'up_to_date'):
+            self.assertIn(key, row)
+        self.assertGreater(row['file_mtime'], 0, '要能显示"更新于"')
+
+
 if __name__ == '__main__':
     unittest.main()

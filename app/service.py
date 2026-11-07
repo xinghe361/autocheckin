@@ -129,8 +129,20 @@ class Service:
             have = {s.id for s in self.load_config().sites}
         except Exception:                                       # noqa: BLE001
             have = set()
+        try:
+            helper = self._plugin_sync()
+            remote = helper.remote_shas()      # 最近一次检查/同步看到的远端 sha
+            synced = helper.synced_shas()      # 上次同步时**同意过**的远端 sha
+        except Exception:                                       # noqa: BLE001
+            remote, synced = {}, {}
         out = []
         for t in T.available_templates():
+            fname = t.get('_file') or ('%s.json' % t['id'])
+            # 判断有没有新版：远端当前 sha vs 上次同步时那个 sha。
+            # 用"本地文件内容的 sha"去比是错的 —— 落盘时重新序列化过，
+            # 字节永远不同，结果就是所有模板长期显示"有新版本"。
+            up_sha = str(remote.get(fname) or '')
+            base_sha = str(synced.get(fname) or '')
             out.append({
                 'id': t['id'],
                 'name': t.get('name', t['id']),
@@ -141,6 +153,14 @@ class Service:
                 'source': t.get('source', 'plugin'),
                 'installed': t['id'] in have,
                 'step_count': len(t.get('flow') or []),
+                # 版本/更新时间：模板自己声明的优先，没有就用本地文件时间
+                'version': str(t.get('version') or ''),
+                'tpl_updated': str(t.get('updated') or ''),
+                'file_mtime': int(t.get('_mtime') or 0),
+                'file': fname,
+                # 没记录过（老数据 / 手工放进来的）就既不报"有新版"也不报"最新"
+                'has_update': bool(up_sha and base_sha and up_sha != base_sha),
+                'up_to_date': bool(up_sha and base_sha and up_sha == base_sha),
             })
         return out
 

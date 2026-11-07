@@ -1025,7 +1025,10 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .radios label:hover{border-color:#c3d3f2;background:#f7f9fe}
 .radios input{position:absolute;opacity:0;width:0;height:0;margin:0}
 .radios input:checked+span{color:var(--pri);font-weight:600}
-.radios label:has(input:checked){border-color:#b9cdf7;background:#eef3fe}
+/* 选中态由 JS 打 .on（见 paintRadios），不用 :has(input:checked)：
+   :has 在旧版 Edge/Safari 上不认，整页就只剩文字变蓝、没有底色。
+   class 方案在所有浏览器都一样，且文字颜色仍由 input:checked+span 兜底。 */
+.radios label.on{border-color:#b9cdf7;background:#eef3fe}
 /* 键盘操作仍可见：隐藏的 input 聚焦时给后面的文字描边 */
 .radios input:focus-visible+span{outline:2px solid #b9cdf7;outline-offset:3px;
                                  border-radius:4px}
@@ -1236,6 +1239,78 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 <!-- ============ 新增站点 ============ -->
 <section id="tab-add" class="hide">
   <div class="card">
+    <h2>新增站点</h2>
+    <div class="radios" id="addModeBox">
+      <label><input type="radio" name="add_mode" value="tpl" checked
+        onchange="swAddMode()"><span>用模板新增（推荐）</span></label>
+      <label><input type="radio" name="add_mode" value="rec"
+        onchange="swAddMode()"><span>录制新增（自己点一遍）</span></label>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      <b>用模板</b>：从项目的模板库（GitHub）里挑现成的站点，点「加入」就能签到，
+      不用写步骤。<b>录制</b>：模板里没有的站点，让浏览器把你自己的操作记成步骤。
+    </div>
+  </div>
+
+  <!-- ========== 模式一：用模板新增 ========== -->
+  <div id="addTplPane">
+    <div class="card">
+      <h2>模板来源</h2>
+      <div class="hint">
+        模板放在仓库的 <code>site-plugins/</code> 目录，按下面的来源同步进来，
+        <b>不用重建镜像</b>。同步只是把模板变成「可选」，还要在下面的列表里
+        点「加入」才会真正签到。
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>来源（仓库/目录 或 https 地址）</label>
+          <input id="set_sync_src" placeholder="用户名/仓库名/目录，或 https 地址"
+                 value=""></div>
+        <div><label>每天同步时刻</label>
+          <input id="set_sync_time" placeholder="03:00" style="max-width:120px"></div>
+        <div><label>间隔（天）</label>
+          <input id="set_sync_days" type="number" min="1" max="365" value="1"
+                 style="max-width:110px"></div>
+      </div>
+      <div class="opt">
+        <div class="grow">
+          <div class="t">自动同步</div>
+          <div class="d">关掉只剩手动。<b>手动同步立即执行</b>；自动则到上面那个时刻、
+            且间隔天数已到时才拉（打开后会先立刻拉一次）。只支持 <b>https</b>。</div>
+        </div>
+        <label class="sw" for="set_sync_on">
+          <input type="checkbox" id="set_sync_on">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="b pri" onclick="syncNow()">立即同步</button>
+        <button class="b" onclick="saveSyncSettings()">保存来源设置</button>
+        <button class="b" onclick="loadSyncStatus()">查看状态</button>
+      </div>
+      <div id="syncMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>可选模板</h2>
+      <div class="hint">
+        <b>只有点「加入」的才会出现在站点列表里</b>并参与签到；没加入的只是"可选"。
+        每行写着版本与更新时间，<b>已是最新</b>的不会再给「更新」按钮。
+        <span id="plugDir"></span>
+      </div>
+      <div class="row" style="gap:8px;align-items:center;margin-top:6px">
+        <button class="b" onclick="checkTplUpdates()">检查更新</button>
+        <button class="b" onclick="updateAllTpl()">全部更新</button>
+        <span class="hint" style="margin:0">「检查更新」只比对 sha，不下载文件。</span>
+      </div>
+      <div id="plugErrors"></div>
+      <div id="tplMsg" class="msg"></div>
+      <div id="tplList" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+  <!-- ========== 模式二：录制新增 ========== -->
+  <div id="addRecPane" class="hide">
+  <div class="card">
     <h2>第一步：填站点信息</h2>
     <div class="row">
       <div><label>站点标识（英文，用于文件名）</label>
@@ -1245,8 +1320,6 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     </div>
     <label>主页地址（录制从这里开始）</label>
     <input id="ns_url" placeholder="https://example.com/">
-    <div class="hint">也可以照着现成模板改（到「设置 → 可选站点」点「加入」即可）。
-      当前可选：<span id="newSiteTplList" class="mono"></span></div>
   </div>
 
   <div class="card">
@@ -1269,6 +1342,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     </div>
     <label>已记录步骤（可直接编辑，保存时以此为准）</label>
     <textarea id="recSteps" spellcheck="false"></textarea>
+  </div>
   </div>
 </section>
 
@@ -1322,58 +1396,6 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       <div><label>连接已有 Chrome（CDP，可选）</label>
         <input id="set_cdp" placeholder="http://browser:9222"></div>
     </div>
-  </div>
-
-  <div class="card">
-    <h2>可选站点同步（从 GitHub 拉模板）</h2>
-    <div class="hint">
-      把仓库里某个目录下的 <code>.json</code> 站点模板同步进来，<b>不用重建镜像</b>。
-      同步只是把模板变成「可选」，还要在上面「可选站点」里选中才会真正签到。<br>
-      <b>来源已默认填好本项目地址</b>，直接点「立即同步」即可；想用别人的模板库再改成对方地址。
-    </div>
-    <div class="row">
-      <div><label>来源</label>
-        <input id="set_sync_src" placeholder="用户名/仓库名/目录，或 https 地址"
-               value=""></div>
-      <div><label>每天同步时刻</label>
-        <input id="set_sync_time" placeholder="03:00" style="max-width:120px"></div>
-      <div><label>间隔（天）</label>
-        <input id="set_sync_days" type="number" min="1" max="365" value="1"
-               style="max-width:110px"></div>
-    </div>
-    <div class="opt">
-      <div class="grow">
-        <div class="t">自动同步</div>
-        <div class="d">关掉只剩手动。<b>手动同步立即执行</b>；自动则到上面那个时刻、
-          且间隔天数已到时才拉（打开后会先立刻拉一次）。只支持 <b>https</b>。</div>
-      </div>
-      <label class="sw" for="set_sync_on">
-        <input type="checkbox" id="set_sync_on">
-        <span class="track"></span>
-      </label>
-    </div>
-    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-      <button class="b pri" onclick="syncNow()">立即同步</button>
-      <button class="b" onclick="loadSyncStatus()">查看状态</button>
-    </div>
-    <div id="syncMsg" class="msg"></div>
-  </div>
-
-  <div class="card">
-    <h2>可选站点</h2>
-    <div class="hint">
-      下面是可以加入的站点模板。<b>只有点「加入」的才会出现在站点列表里</b>
-      并参与签到；没加入的只是"可选"。
-      <span id="plugDir"></span>
-    </div>
-    <div class="row" style="gap:8px;align-items:center;margin-top:6px">
-      <button class="b" onclick="checkTplUpdates()">检查更新</button>
-      <button class="b" onclick="updateAllTpl()">全部更新</button>
-      <span class="hint" style="margin:0">模板来自上面的同步来源；有新版时这里会出现「更新」按钮。</span>
-    </div>
-    <div id="plugErrors"></div>
-    <div id="tplMsg" class="msg"></div>
-    <div id="tplList" style="margin-top:10px"></div>
   </div>
 
   <div class="card">
@@ -1565,13 +1587,6 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
 function show(el, text, cls){
   var n = $(el); n.className = 'msg ' + (cls||''); n.textContent = text || '';
 }
-function fmtTime(ts){
-  if(!ts) return '—';
-  var d = new Date(ts*1000);
-  function p(n){ return (n<10?'0':'')+n; }
-  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+
-         p(d.getHours())+':'+p(d.getMinutes());
-}
 function api(method, path, body){
   return fetch(path, {
     method: method,
@@ -1594,11 +1609,22 @@ function switchTab(name){
     $('tab-'+t).className = (t === name) ? '' : 'hide';
   });
   if(name === 'settings'){ loadSettings(); loadAutoRefreshSetting(); }
+  if(name === 'add'){ swAddMode(true); }
   if(name === 'history'){ loadHistory(); }
 }
 document.querySelectorAll('#mainNav button[data-tab]').forEach(function(b){
   b.onclick = function(){ switchTab(b.dataset.tab); };
 });
+/* 「新增站点」上次选的模式记下来（模板 / 录制），别每次都手动切 */
+(function(){
+  try{
+    var m = localStorage.getItem('ac_add_mode');
+    if(m === 'tpl' || m === 'rec'){
+      var r = document.querySelector('input[name="add_mode"][value="'+m+'"]');
+      if(r) r.checked = true;
+    }
+  }catch(e){}
+})();
 /* 支持 #settings / #history 这类深链：刷新后还停在原来那页 */
 (function(){
   var h = (location.hash || '').replace('#','');
@@ -1966,6 +1992,9 @@ function showMain(){
   refreshAll();
   /* 挂上对 QD「Cookies获取助手」扩展的监听（只挂一次） */
   listenQdExtension();
+  /* 登录前就切到「新增站点」的话（深链或刷新），那时拉数据会被 401 挡掉，
+     这里补一次，保证模板来源/列表不是空的 */
+  swAddMode(true);
   /* 恢复用户上次选择的自动刷新设置（默认关闭） */
   applyAutoRefresh();
 }
@@ -2416,6 +2445,8 @@ function setRadio(name, value){
   for(var i = 0; i < list.length; i++){
     list[i].checked = (list[i].value === value);
   }
+  /* 程序改 checked 不会触发 change，选中态得手动重画 */
+  paintRadios();
 }
 /* 代理地址框只在选「走代理」时可用，避免"选了直连却还留着旧地址"的困惑 */
 function swGlobalProxy(){
@@ -2583,6 +2614,7 @@ function renderSiteForm(id){
 
 /* 表单渲染完的收尾：快照基准值 + 重置脏标记 + 贴出待显示的提示 */
 function afterFormRender(id){
+  paintRadios($('form-'+id));
   snapshotForm($('form-'+id));
   _formDirty = false;
   flushCookieMsg(id);
@@ -3121,6 +3153,22 @@ function rootDomain(host){
   return last2;
 }
 
+/* 把一组单选按钮的选中态画到 label 上（.on）。
+   change 事件与首次渲染都要调 —— 动态生成的表单同样适用。 */
+function paintRadios(scope){
+  var root = scope || document;
+  var list = root.querySelectorAll('.radios input[type="radio"]');
+  for(var i = 0; i < list.length; i++){
+    var lb = list[i].closest('label');
+    if(lb) lb.classList.toggle('on', list[i].checked);
+  }
+}
+document.addEventListener('change', function(e){
+  var t = e.target;
+  if(t && t.type === 'radio' && t.name) paintRadios();
+}, true);
+document.addEventListener('DOMContentLoaded', function(){ paintRadios(); });
+
 function setExtReady(on){
   EXT_READY = !!on;
   var nodes = document.querySelectorAll('.extstat');
@@ -3450,9 +3498,6 @@ function delSite(id){
 function loadMeta(){
   return api('GET','/api/meta').then(function(d){
     META = d;
-    $('newSiteTplList').textContent = (d.templates||[]).map(function(t){
-      return t.id + (t.need_browser?'(浏览器)':'');
-    }).join('、');
     return d;
   });
 }
@@ -3574,9 +3619,26 @@ function loadTemplates(){
     }
     var rows = list.map(function(t){
       var tags = [];
+      if(t.version) tags.push('<span class="tag">v'+esc(t.version)+'</span>');
       if(t.need_browser) tags.push('<span class="tag">需要浏览器</span>');
+      /* 版本状态：已是最新 / 有新版本 / 还没比对过 */
+      if(t.has_update){
+        tags.push('<span class="tag err">有新版本</span>');
+      }else if(t.up_to_date){
+        tags.push('<span class="tag ok">已是最新</span>');
+      }else{
+        tags.push('<span class="tag">未检查更新</span>');
+      }
+      var meta = [];
+      /* fmtTime 收的是秒级时间戳（内部再 *1000），这里别再乘 */
+      var when = t.tpl_updated || (t.file_mtime ? fmtTime(t.file_mtime) : '');
+      if(when) meta.push('更新于 ' + esc(when));
+      meta.push(esc(t.id));
+      meta.push(t.step_count + ' 步');
+      if(t.homepage) meta.push(esc(hostOf(t.homepage) || t.homepage));
       var btn = '';
-      if(TPL_UPDATES[t.id]){
+      /* 只有真有新版才给「更新」，避免"点了更新还是同一个自己" */
+      if(t.has_update){
         btn += '<button class="b pri" onclick="updateTpl(\''+esc(t.id)+'\')">'
              + '更新</button> ';
       }
@@ -3586,10 +3648,9 @@ function loadTemplates(){
       return '<div class="row" style="align-items:center;gap:10px;'
         + 'border-top:1px solid var(--bd);padding-top:8px">'
         + '<div style="flex:1"><b>'+esc(t.name)+'</b> '+tags.join(' ')
-        + '<div class="hint" style="margin:0">'+esc(t.id)+' · '
-        + esc(t.homepage||'')+' · '+t.step_count+' 步</div>'
+        + '<div class="hint" style="margin:0">'+meta.join(' · ')+'</div>'
         + (t.note ? '<div class="hint" style="margin:0">'+esc(t.note)+'</div>' : '')
-        + '</div><div>'+btn+'</div></div>';
+        + '</div><div style="white-space:nowrap">'+btn+'</div></div>';
     });
     $('tplList').innerHTML = rows.join('');
   }).catch(function(e){
@@ -3609,48 +3670,95 @@ function installTpl(id){
    站点改版时只需更新模板文件，不用重建镜像、也不用重新同步全部。
    「检查更新」只问 GitHub 要目录的 sha（一次请求，不下载文件）；
    「更新」按单个模板拉取并覆盖本地那一份。 */
-/* 有新版模板：id -> true */
-var TPL_UPDATES = {};
 
 function checkTplUpdates(){
   show('tplMsg','检查中…','');
   api('GET','/api/templates/updates').then(function(d){
-    TPL_UPDATES = {};
-    (d.updates||[]).forEach(function(u){ TPL_UPDATES[u.id] = true; });
     var n = (d.updates||[]).length;
     if(n){
       show('tplMsg','有 '+n+' 个模板可更新：'
-        + (d.updates||[]).map(function(u){ return u.id; }).join('、'), 'ok');
+        + (d.updates||[]).map(function(u){ return u.id; }).join('、')
+        + '。点对应行的「更新」即可。', 'ok');
     }else{
-      show('tplMsg','模板都已是最新' + (d.unknown
-        ? ('（远端还有 '+d.unknown+' 个未安装的模板）') : ''), 'ok');
+      show('tplMsg','本地模板都已是最新' + (d.unknown
+        ? ('（远端还有 '+d.unknown+' 个未同步的模板，点「立即同步」可以拉进来）') : '')
+        + '。', 'ok');
     }
-    loadTemplates();
+    loadTemplates();   /* 服务端已记下远端 sha，重画就能显示每行状态 */
   }).catch(function(e){ show('tplMsg','检查失败：'+e.message,'err'); });
 }
 
 function updateTpl(id){
   show('tplMsg','更新「'+id+'」中…','');
   api('POST','/api/templates/update',{ids:[id]}).then(function(r){
-    delete TPL_UPDATES[id];
-    show('tplMsg','已更新 '+((r.updated||[]).length||1)+' 个模板：'+id,'ok');
-    loadTemplates();
+    var n = (r.updated||[]).length;
+    show('tplMsg', n ? ('已更新：'+id) : ('「'+id+'」已是最新，无需更新'), 'ok');
+    loadTemplates();   /* 重新按服务端 sha 判断，状态徽标会跟着变 */
   }).catch(function(e){ show('tplMsg','更新失败：'+e.message,'err'); });
 }
 
 function updateAllTpl(){
-  if(!Object.keys(TPL_UPDATES).length){
-    show('tplMsg','先点「检查更新」看看有没有新版','' );
-    return;
-  }
   show('tplMsg','全部更新中…','');
   api('POST','/api/templates/update',{}).then(function(r){
-    TPL_UPDATES = {};
-    show('tplMsg','已更新 '+(r.updated||[]).length+' 个模板'
-      + (r.added && r.added.length ? ('，新增 '+(r.added||[]).length+' 个') : '')
-      + ((r.errors||[]).length ? ('，'+r.errors.length+' 个失败') : ''),'ok');
+    var upd = (r.updated||[]).length, add = (r.added||[]).length;
+    show('tplMsg', (upd + add === 0)
+      ? '没有需要更新的模板，已经都是最新。'
+      : ('已更新 '+upd+' 个、新增 '+add+' 个'
+         + ((r.errors||[]).length ? ('，'+r.errors.length+' 个失败') : '')),
+      'ok');
     loadTemplates();
   }).catch(function(e){ show('tplMsg','更新失败：'+e.message,'err'); });
+}
+
+/* ---------------- 新增站点：两种模式 ---------------- */
+var ADD_MODE = 'tpl';
+
+function swAddMode(keep){
+  var r = document.querySelector('input[name="add_mode"]:checked');
+  ADD_MODE = r ? r.value : 'tpl';
+  $('addTplPane').className = (ADD_MODE === 'tpl') ? '' : 'hide';
+  $('addRecPane').className = (ADD_MODE === 'rec') ? '' : 'hide';
+  paintRadios($('addModeBox'));
+  try{ localStorage.setItem('ac_add_mode', ADD_MODE); }catch(e){}
+  if(ADD_MODE === 'tpl'){ loadSyncForm(); loadTemplates(); }
+  if(!keep) window.scrollTo({top:0, behavior:'smooth'});
+}
+
+/* 同步来源这几个输入框现在住在「新增站点」里，设置页不再加载它们，
+   所以进这个 tab 时要自己填一次。只读这几项，不碰其它设置。 */
+function loadSyncForm(){
+  /* 默认来源来自 /api/meta；META 还没回来时先去取一次，否则输入框空着，
+     用户会以为"来源没预填"（说明里却写着已预填）。 */
+  if(!META){
+    loadMeta().then(function(){ loadSyncForm(); })
+              .catch(function(){});
+    return;
+  }
+  api('GET','/api/settings').then(function(d){
+    $('set_sync_on').checked = !!d.plugin_sync_enabled;
+    $('set_sync_src').value = d.plugin_sync_source
+      || ((META && META.default_template_source) || '');
+    $('set_sync_time').value = d.plugin_sync_time || '03:00';
+    $('set_sync_days').value = d.plugin_sync_interval_days || 1;
+    loadSyncStatus();
+  }).catch(function(e){ show('syncMsg', e.message, 'err'); });
+}
+
+/* 只提交同步相关字段。
+   ⚠️ 不能在这里调 saveSettings()：那个会把代理/通知/WebDAV 一起提交，
+   而用户可能从没打开过设置页，那些输入框还是空的 —— 会把配置清掉。 */
+function saveSyncSettings(){
+  var body = {
+    plugin_sync_enabled: $('set_sync_on').checked,
+    plugin_sync_source: $('set_sync_src').value.trim(),
+    plugin_sync_time: $('set_sync_time').value.trim(),
+    plugin_sync_interval_days: parseInt($('set_sync_days').value||'1', 10)
+  };
+  api('POST','/api/settings', body).then(function(){
+    show('syncMsg','已保存。自动同步' + (body.plugin_sync_enabled ? '已开启' : '仍关闭')
+      + '。','ok');
+    loadSyncStatus();
+  }).catch(function(e){ show('syncMsg','保存失败：'+e.message,'err'); });
 }
 
 /* ---------------- 设置 ---------------- */
@@ -3670,16 +3778,6 @@ function loadSettings(){
     swGlobalProxy();
     $('set_headless').value = d.headless ? '1' : '0';
     $('set_cdp').value = d.remote_cdp_url || '';
-    /* 站点模板同步 */
-    $('set_sync_on').checked = !!d.plugin_sync_enabled;
-    /* 没配过就预填项目地址：初次安装不必去翻文档找来源 */
-    $('set_sync_src').value = d.plugin_sync_source
-      || (META.default_template_source || '');
-    $('set_sync_time').value = d.plugin_sync_time || '03:00';
-    $('set_sync_days').value = d.plugin_sync_interval_days || 1;
-    loadSyncStatus();
-    /* 可选站点列表：设置页打开时也要刷新（同步进来的模板要立刻可见） */
-    loadTemplates();
     var n = d.notify || {};
     var mlabels = META.notify_mode_labels || {};
     $('set_nmode').innerHTML = (META.notify_modes||[]).map(function(m){

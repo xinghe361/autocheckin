@@ -172,6 +172,15 @@ def validate_template(data: Any, source: str = '') -> Tuple[Dict[str, Any], str]
     }
     if isinstance(data.get('mission_url'), str):
         tpl['mission_url'] = data['mission_url']
+    # 版本与发布日期：模板作者自己写。界面上要显示"这是哪一版"，
+    # 否则同一个模板反复更新的唯一结果就是"看不出变了没有"。
+    # 以前这两个字段被白名单直接丢掉，于是所有模板在界面上都没有版本。
+    for key, limit in (('version', 40), ('updated', 40)):
+        v = data.get(key)
+        if isinstance(v, (str, int, float)):
+            v = str(v).strip()[:limit]
+            if v:
+                tpl[key] = v
     # 模板可选项（如 NodeSeek 的签到方式）。形状校验交给 templates.option_specs，
     # 它本身就是"认不出就跳过"的容错设计 —— 这里只要原样透传非列表之外的
     # 合法结构即可（写歪了的 options 由 option_specs 静默忽略，不报错）。
@@ -249,6 +258,10 @@ class PluginStore:
                     if tpl['id'] in RESERVED_IDS:
                         # 示例文档：静默跳过，既不进列表也不报错
                         continue
+                    # 记下来源文件名与 mtime：界面上要显示"更新于 X"，
+                    # 也要能算出本地这份内容的 sha 去和远端比。
+                    tpl['_file'] = name
+                    tpl['_mtime'] = int(_mtime)
                     if tpl['id'] in seen:
                         errors.append({'file': name,
                                        'reason': 'id 重复：%s（已忽略这个）'

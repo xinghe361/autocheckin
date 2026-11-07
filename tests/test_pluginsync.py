@@ -309,11 +309,23 @@ class TestPluginSync(unittest.TestCase):
         self.assertNotIn('https://raw.githubusercontent.com/a/b/m/r.md',
                          self.fetch.calls)
 
-    def test_second_sync_is_update_not_add(self):
+    def test_second_sync_is_skipped_when_unchanged(self):
+        """内容一模一样时第二次同步不该再算"更新"（否则用户看不出变没变）。"""
         self.fetch.mapping['https://example.com/p.json'] = [GOOD]
         self.sync.sync('https://example.com/p.json')
         rep = self.sync.sync('https://example.com/p.json')
         self.assertEqual(rep['added'], [])
+        self.assertEqual(rep['updated'], [], '没变就不该报更新')
+        self.assertEqual(rep['removed'], [], '更不能顺手把文件删了')
+        self.assertTrue(os.path.isfile(os.path.join(self.dir, 'templates',
+                                                    'remote1.json')))
+
+    def test_changed_content_counts_as_update(self):
+        self.fetch.mapping['https://example.com/p.json'] = [GOOD]
+        self.sync.sync('https://example.com/p.json')
+        changed = dict(GOOD, note='改了一行')
+        self.fetch.mapping['https://example.com/p.json'] = [changed]
+        rep = self.sync.sync('https://example.com/p.json')
         self.assertEqual(rep['updated'], ['remote1.json'])
 
     def test_invalid_remote_template_rejected(self):

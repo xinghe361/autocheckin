@@ -2,6 +2,8 @@
   "id": "v2ex",
   "name": "V2EX",
   "homepage": "https://www.v2ex.com/",
+  "version": "1.0.0",
+  "updated": "2026-11-08",
   "mission_url": "https://www.v2ex.com/mission/daily",
   "need_browser": false,
   "verify_ssl": true,

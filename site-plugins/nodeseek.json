@@ -2,6 +2,8 @@
   "id": "nodeseek",
   "name": "NodeSeek",
   "homepage": "https://www.nodeseek.com/board",
+  "version": "1.0.0",
+  "updated": "2026-11-08",
   "mission_url": "https://www.nodeseek.com/api/attendance?random={attendance}",
   "need_browser": false,
   "verify_ssl": true,

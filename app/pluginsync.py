@@ -272,6 +272,45 @@ class PluginSync:
         except (OSError, ValueError):
             return {}
 
+    def _remember_remote(self, shas: Dict[str, str]) -> None:
+        """把远端当前各文件的 sha 记下来（不动 files/shas/at）。
+
+        用途：模板列表要能直接显示"已是最新 / 有新版本"，而「检查更新」是
+        用户主动点的、不该顺手改同步状态。单独存一份只读快照最安全 ——
+        写进 shas 会污染 prune 的"上次同步写过哪些文件"的依据。
+        """
+        if not shas:
+            return
+        prev = self._read_state()
+        merged = prev.get('remote_shas') if isinstance(prev.get('remote_shas'), dict) else {}
+        merged = dict(merged)
+        merged.update({k: v for k, v in shas.items() if v})
+        prev['remote_shas'] = merged
+        prev['checked_at'] = int(time.time())
+        try:
+            self.store.ensure_dir()
+            tmp = self._state_path() + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(prev, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._state_path())
+        except OSError:
+            pass
+
+    def synced_shas(self) -> Dict[str, str]:
+        """上次同步时，各文件对应的**远端** sha（文件 → sha）。
+
+        和 remote_shas 比：不同就说明远端变了、本地还是旧的。
+        ⚠️ 不能拿"本地文件内容的 sha"跟远端比 —— 我们落盘的是重新序列化
+        的 JSON，字节必然不同，那样比完永远是"有新版本"。
+        """
+        d = self._read_state().get('shas')
+        return d if isinstance(d, dict) else {}
+
+    def remote_shas(self) -> Dict[str, str]:
+        """最近一次检查/同步时远端文件的 sha（文件 → sha）。"""
+        d = self._read_state().get('remote_shas')
+        return d if isinstance(d, dict) else {}
+
     def _write_state(self, files: List[str], source: str,
                      shas: Optional[Dict[str, str]] = None) -> None:
         self.store.ensure_dir()
@@ -320,6 +359,7 @@ class PluginSync:
         self.store.ensure_dir()
         written: List[str] = []
         updated: List[str] = []
+        unchanged: List[str] = []     # 远端有、本地已一致（要留在 state 里，别当被删）
         errors: List[Dict[str, str]] = []
         fetched = 0          # 成功下载并解析的文件数
         ok_files = 0         # 其中产出有效模板的文件数
@@ -349,12 +389,28 @@ class PluginSync:
                 fn = '%s.json' % tpl['id']
                 path = os.path.join(self.store.dir, fn)
                 existed = os.path.exists(path)
-                tmp = path + '.tmp'
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(tpl, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, path)
+                body = json.dumps(tpl, ensure_ascii=False, indent=2)
+                # 内容一模一样就不落盘、也不计为"更新"。
+                # 我们写出去的是**重新序列化**的 JSON，字节和远端不同，
+                # 所以不能靠比对远端 sha 判断"要不要写"；只能比本地内容。
+                # 不做这一步的后果就是：点一百次「更新」，一百次都"更新了"，
+                # 用户完全看不出到底变没变（实测反馈）。
+                same = False
+                if existed:
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            same = (f.read() == body)
+                    except OSError:
+                        same = False
+                if not same:
+                    tmp = path + '.tmp'
+                    with open(tmp, 'w', encoding='utf-8') as f:
+                        f.write(body)
+                    os.replace(tmp, path)
+                    (updated if existed else written).append(fn)
+                else:
+                    unchanged.append(fn)
                 ok_files += 1
-                (updated if existed else written).append(fn)
 
         # 区分两种失败，别混为一谈：
         #   * **一个文件都没下载到** -> 来源写错 / 仓库私有 / 网络不通，
@@ -374,7 +430,9 @@ class PluginSync:
         removed: List[str] = []
         if prune and not only:
             prev = self._read_state().get('files') or []
-            keep = set(written) | set(updated)
+            # 这次远端仍然给了的文件一律保留（含"内容没变所以没写"的那些），
+            # 只有"上次写过、这次远端确实不再提供"的才删。
+            keep = set(written) | set(updated) | set(unchanged)
             for fn in prev:
                 if fn in keep:
                     continue
@@ -390,7 +448,10 @@ class PluginSync:
 
         # 只更新部分文件时，要把旧记录合并进来 —— 否则 state 里就只剩这一两个
         # 文件，之后 prune 会以为别的都不归它管（文件删不掉了）。
-        files_now = sorted(set(written) | set(updated))
+        # ⚠️ 必须把"内容没变、跳过写入"的文件也算进来：否则这次一个文件都没写，
+        # files_now 就是空，紧接着的清理会把它们全当成"远端已删"删掉
+        #（实测踩到：连续同步两次，第二次模板目录被清空）。
+        files_now = sorted(set(written) | set(updated) | set(unchanged))
         if only:
             prev = self._read_state()
             files_now = sorted(set(prev.get('files') or []) | set(files_now))
@@ -399,6 +460,7 @@ class PluginSync:
             merged.update(shas)
             shas = merged
         self._write_state(files_now, source, shas)
+        self._remember_remote(shas)
         got = self.store.load(force=True)
         return {
             'ok': True,
@@ -468,6 +530,7 @@ class PluginSync:
                 continue
             # 没有记录（老版本同步的）或 sha 变了 → 都算"可更新"
             updates.append({'id': tid, 'file': name})
+        self._remember_remote({n: sha for (n, _u, sha) in listed if sha})
         return {'updates': updates, 'same': same, 'unknown': unknown,
                 'missing': missing, 'source': source,
                 'at': int(time.time())}
