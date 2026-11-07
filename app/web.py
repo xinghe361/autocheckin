@@ -1037,6 +1037,11 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .ckstat{font-size:12.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .ckbox{background:#f7f9fc;border:1px solid var(--bd);border-radius:6px;padding:10px;
        margin-top:8px}
+/* 扩展是否就绪 —— 以前点了没反应，用户完全不知道为什么 */
+.extstat{font-size:11.5px;line-height:1;padding:3px 8px;border-radius:999px;
+         border:1px solid var(--bd);background:#fff;color:var(--mut);white-space:nowrap}
+.extstat.ok{border-color:#bfe3cd;background:#f1faf4;color:var(--ok)}
+.extstat.warn{border-color:#f0d3b4;background:#fdf7ef;color:#a05a00}
 .ckbox textarea{min-height:70px;background:#fff}
 .ckbox .tip{font-size:11.5px;color:var(--mut);line-height:1.6;margin-top:6px}
 .ckbox .tip b{color:#3a424d}
@@ -3012,6 +3017,11 @@ function clearCookie(id){
 
 var COOKIE_IMPORT_PENDING = '';
 var QD_LISTENER_BOUND = false;
+/* 扩展是否在本页生效。扩展加载时会 postMessage({info:'get-cookieModReady'})，
+   收到就说明它注入了本页 —— 拿这个区分"扩展没装/没放行这个地址"和
+   "点了但扩展没回"，否则用户看到的永远是"点了没反应"。 */
+var EXT_READY = false;
+var CK_IMPORT_TIMER = 0;
 /* 待显示给用户的提示。表单每次渲染都会被重建，所以提示要先存在这里，
    等新表单渲染完再贴上去，否则"已保存"会被刷新动作冲掉。 */
 var CK_PENDING_MSG = {};
@@ -3023,14 +3033,31 @@ function hostOf(url){
   catch(e){ return ''; }
 }
 
+/* 扩展在 window.onload 时发 get-cookieModReady，而我们原来是在登录成功后
+   才挂监听 —— 那时候消息早发完了，永远收不到，于是界面上既没有"扩展已就绪"
+   也没有任何失败提示。改为脚本解析期就挂（函数声明会提升，可以先调）。 */
+listenQdExtension();
+
 function listenQdExtension(){
   if(QD_LISTENER_BOUND) return;      /* 避免重复挂载导致一次点击存两遍 */
   QD_LISTENER_BOUND = true;
+  /* 兜底：如果消息已经发过（我们挂得晚），扩展会往 body 打这个属性 */
+  try{
+    if(document.body && document.body.getAttribute('get-cookie') === 'true'){
+      EXT_READY = true;
+    }
+  }catch(e){}
   window.addEventListener('message', function(ev){
     var d = ev.data;
-    if(!d || d.info !== 'cookieRaw') return;      /* 只认扩展的这一种消息 */
+    if(!d) return;
+    if(d.info === 'get-cookieModReady'){           /* 扩展在本页注入了 */
+      setExtReady(true);
+      return;
+    }
+    if(d.info !== 'cookieRaw') return;             /* 其它消息一律不认 */
     var sid = COOKIE_IMPORT_PENDING;
     if(!sid) return;                               /* 不是我们发起的，忽略 */
+    stopImportTimer();
     var raw = d.data;
     if(!raw || raw.error){
       showCookieMsg(sid, '扩展没能读到 Cookie：'
@@ -3075,7 +3102,9 @@ function qdButtonHtml(s){
     + ' data-domain="' + esc(root) + '"'
     + ' data-name="' + esc(s.name) + '"'
     + ' data-fact="markCookieImport" data-sid="' + esc(s.id) + '">'
-    + '⚡ 从浏览器读取 Cookie</button>';
+    + '⚡ 从浏览器读取 Cookie</button>'
+    + '<span class="extstat' + (EXT_READY ? ' ok' : ' warn') + '">'
+    + (EXT_READY ? '扩展已就绪' : '未检测到扩展') + '</span>';
 }
 
 /* 把 www.a.com -> .a.com：扩展会查 domain=.a.com，能同时覆盖子域 */
@@ -3092,7 +3121,57 @@ function rootDomain(host){
   return last2;
 }
 
-function markCookieImportStart(id){ COOKIE_IMPORT_PENDING = id; }
+function setExtReady(on){
+  EXT_READY = !!on;
+  var nodes = document.querySelectorAll('.extstat');
+  for(var i = 0; i < nodes.length; i++) paintExtStat(nodes[i]);
+}
+
+function paintExtStat(el){
+  if(!el) return;
+  if(EXT_READY){
+    el.className = 'extstat ok';
+    el.textContent = '扩展已就绪';
+  }else{
+    el.className = 'extstat warn';
+    el.textContent = '未检测到扩展';
+  }
+}
+
+function stopImportTimer(){
+  if(CK_IMPORT_TIMER){ clearTimeout(CK_IMPORT_TIMER); CK_IMPORT_TIMER = 0; }
+}
+
+/* 点「⚡ 从浏览器读取 Cookie」：
+   立刻给反馈 + 起一个 4 秒兜底 —— 扩展没回就把原因说清楚。
+   以前这里什么都不做，扩展不响应时用户看到的就是"点了没反应"。 */
+function markCookieImportStart(id){
+  COOKIE_IMPORT_PENDING = id;
+  stopImportTimer();
+  /* 有些情况下消息已发过，顺手再确认一次扩展状态 */
+  try{
+    if(!EXT_READY && document.body.getAttribute('get-cookie') === 'true'){
+      setExtReady(true);
+    }
+  }catch(e){}
+  showCookieMsg(id, '正在向浏览器扩展请求 Cookie…', '');
+  CK_IMPORT_TIMER = setTimeout(function(){
+    if(COOKIE_IMPORT_PENDING !== id) return;      /* 已经收到结果了 */
+    COOKIE_IMPORT_PENDING = '';
+    var msg;
+    if(EXT_READY){
+      msg = '扩展收到点击了，但没弹确认框/没返回结果。多半是浏览器把确认框拦了：'
+          + '看地址栏右侧有没有"已阻止对话框"（点它允许），'
+          + '或之前勾过"阻止此页面再创建对话框"——把标签页关掉重开即可清除。'
+          + '刚装或刚更新扩展的话，也先刷新本页再点。';
+    }else{
+      msg = '没检测到这个浏览器扩展：要么没装，要么本页地址没加进它的选项。'
+          + '点右边的「📖 怎么用？」，按第 2 步把 ' + originOf()
+          + ' 填进去（可复制），然后刷新本页。';
+    }
+    showCookieMsg(id, msg, 'err');
+  }, 4000);
+}
 
 function showCookieMsg(id, text, kind){
   var el = $('f_'+id+'_ckmsg');
@@ -3190,8 +3269,8 @@ function openCookieHelper(id){
     +       '（没登录的话扩展只能读到空）</li>'
     +     '<li>回到本页面，点「<b>⚡ 从浏览器读取 Cookie</b>」</li>'
     +     '<li>扩展会弹一个确认框，点<b>确定</b></li>'
-    +     '<li>Cookie 会自动送进来并保存，下面会显示「已保存 N 项」</li>'
-    +     '<li>再点「<b>检查登录状态</b>」确认</li>'
+    +     '<li>Cookie 会填进下面的输入框（不自动保存），提示「已填入 N 项」</li>'
+    +     '<li>确认无误后点「<b>保存 Cookie</b>」，再点「<b>检查登录状态</b>」</li>'
     +   '</ol>'
     +   '<div class="tip" style="font-size:11.5px;color:#8b95a3;margin-top:8px;'
     +     'line-height:1.7">'

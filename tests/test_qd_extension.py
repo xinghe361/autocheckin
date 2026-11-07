@@ -61,8 +61,8 @@ def run_in_node(cases):
     # qdButtonHtml 依赖 esc/hostOf/rootDomain，单独放最后
     parts.append(extract_function(js, 'qdButtonHtml'))
 
-    # 桩：esc 依赖的 DOM 无关，markCookieImportStart 不需要
-    harness = '\n'.join(parts) + '''
+    # 桩：页面里的模块级状态（qdButtonHtml 会读 EXT_READY 决定状态徽标文案）
+    harness = 'var EXT_READY = false;\n' + '\n'.join(parts) + '''
 
 var out = [];
 var cases = JSON.parse(process.argv[2]);
@@ -138,6 +138,8 @@ class TestQdDomainLogic(unittest.TestCase):
         self.assertIn('data-site="https://www.nodeseek.com/board"', btn)
         self.assertIn('data-domain="nodeseek.com"', btn)
         self.assertIn('data-name="NodeSeek 试试手气"', btn)
+        self.assertIn('extstat', btn, '按钮旁要有扩展状态徽标')
+        self.assertIn('未检测到扩展', btn)
         # 扩展在 click 事件里读属性，所以必须是个可点击元素。
         # 注意：这里刻意**不再**把 id 拼进 onclick 字符串 ——
         # onclick="markCookieImportStart('ID')" 是 JS 字符串上下文，
@@ -158,6 +160,36 @@ class TestQdDomainLogic(unittest.TestCase):
         # 不能出现未被转义的裸双引号切断属性
         self.assertNotIn('name" name', btn)
         self.assertIn('&quot;', btn)
+
+
+
+class TestExtensionDiagnostics(unittest.TestCase):
+    """「点按钮没反应」这条线上最容易退化的三点，钉死。"""
+
+    def setUp(self):
+        self.js = extract_page_js()
+
+    def test_listener_registered_before_login(self):
+        """监听必须在解析期就挂上。
+
+        扩展在 window.onload 时 postMessage({info:'get-cookieModReady'})，
+        而页面原来的监听是在登录成功后的 showMain() 里挂的 —— 那时消息早发完了，
+        永远收不到，界面上既没有"已就绪"也没有任何失败提示。
+        """
+        self.assertIn('get-cookieModReady', self.js)
+        # 有一处独立的调用语句（不是函数定义里那一行）
+        calls = re.findall(r'^listenQdExtension\(\);\s*$', self.js, re.M)
+        self.assertTrue(calls, 'listenQdExtension() 要在解析期被调用一次')
+
+    def test_click_gives_feedback_and_timeout(self):
+        """点了要立刻有反馈，且超时要说明原因，不能静默。"""
+        fn = extract_function(self.js, 'markCookieImportStart')
+        self.assertIn('正在向浏览器扩展请求 Cookie', fn)
+        self.assertIn('setTimeout', fn)
+
+    def test_ready_message_marks_state(self):
+        self.assertIn('function setExtReady', self.js)
+        self.assertIn('extstat', self.js)
 
 
 if __name__ == '__main__':
