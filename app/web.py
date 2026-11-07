@@ -384,7 +384,7 @@ class WebApp:
             """可选站点模板（内置 + 插件），标注是否已加入。
 
             插件来自 DATA_DIR/templates/*.json —— 丢个文件进去就能多一个
-            可选站点，**不用重建镜像**。
+            可选站点，<b>不用重建镜像</b>。
             """
             return {'templates': self.service.list_templates(),
                     'dir': self.service.plugin_dir(),
@@ -907,7 +907,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 :root{--bd:#e3e6ea;--fg:#2b2f36;--mut:#7a828c;--pri:#2f6ae8;--ok:#1e8a4c;--err:#c0392b}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-     color:var(--fg);background:#f6f7f9}
+     color:var(--fg);background:#f6f7f9;
+     /* 目录路径、Cookie 这类超长无空格串会把整页撑宽（窄屏就横向溢出），
+        anywhere 会参与 min-content 计算，才真正压得住 */
+     overflow-wrap:anywhere}
 header{background:#fff;border-bottom:1px solid var(--bd);padding:12px 20px;
        display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:5}
 header h1{font-size:16px;margin:0}
@@ -976,15 +979,38 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
 .sw{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;
     margin-top:8px}
 .sw input{display:none}
-.sw .track{width:38px;height:21px;border-radius:11px;background:#cfd6e0;
+.sw .track{width:42px;height:24px;border-radius:12px;background:#c7cfda;
            position:relative;transition:background .16s;flex:none}
-.sw .track::after{content:'';position:absolute;top:2px;left:2px;width:17px;height:17px;
+.sw .track::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;
                   border-radius:50%;background:#fff;transition:left .16s;
                   box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.sw:hover .track{filter:brightness(.97)}
 .sw input:checked+.track{background:var(--pri)}
-.sw input:checked+.track::after{left:19px}
-.sw .lb{font-size:12.5px;color:#3a424d}
+.sw input:checked+.track::after{left:20px}
+.sw .lb{font-size:13px;color:#2b323d;font-weight:600}
 .sw.off .lb{color:var(--mut)}
+/* 选项行：左边标题+说明，右边开关。比裸 checkbox 显眼得多 */
+.opt{display:flex;align-items:center;gap:14px;padding:11px 0}
+.opt+.opt{border-top:1px dashed var(--bd)}
+.opt .grow{flex:1;min-width:0}
+.opt .t{font-size:12.8px;color:#242a33;font-weight:600;line-height:1.5}
+.opt .d{font-size:11.8px;color:var(--mut);margin-top:3px;line-height:1.7}
+.opt .sw{margin-top:0}
+.opt.warn .t{color:#a05a00}
+/* 通知渠道：一张小卡片，关掉时内容变淡 */
+.ch{border:1px solid var(--bd);border-radius:9px;padding:10px 12px;margin-top:10px;
+    background:#f8fafd;transition:background .15s,border-color .15s,box-shadow .15s}
+.ch.on{background:#fff;border-color:#c9dcff;box-shadow:0 1px 6px rgba(45,106,220,.08)}
+.ch:not(.on) .body{opacity:.55}
+.ch .hd{display:flex;align-items:center;gap:10px}
+.ch .hd .grow{flex:1;min-width:0}
+.ch .hd .sw .lb{font-size:13px}
+.ch .hd .sw{margin-top:0}
+.ch .body{margin-top:9px;display:grid;gap:8px}
+.ch .f{display:flex;flex-direction:column;gap:3px}
+.ch .f>label{margin:0;font-size:11.5px;color:var(--mut)}
+.ch .two{display:grid;grid-template-columns:140px 1fr;gap:8px}
+@media(max-width:560px){.ch .two{grid-template-columns:1fr}}
 /* 单选行 */
 .radios{display:flex;gap:16px;flex-wrap:wrap;margin-top:6px}
 .radios label{display:inline-flex;align-items:center;gap:5px;margin:0;
@@ -1258,15 +1284,17 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       「编辑」，在「联网方式」里改。</div>
     <div class="fsec">
       <h4>页面自动刷新</h4>
-      <label class="sw" for="set_autoref">
-        <input type="checkbox" id="set_autoref" onchange="toggleAutoRefresh()">
-        <span class="track"></span><span class="lb">定时刷新站点列表</span>
-      </label>
-      <div class="hint" style="margin-top:6px">
-        <b>默认关闭</b>（推荐）：填表单时不会被刷新打断。
-        需要时点「刷新」按钮即可。<br>
-        打开后在编辑表单期间仍会自动跳过刷新，不会冲掉你填的内容。
-        <span id="set_autorefHint"></span>
+      <div class="opt">
+        <div class="grow">
+          <div class="t">定时刷新站点列表</div>
+          <div class="d">默认关闭（推荐）：填表单时不会被刷新打断，需要时点「刷新」即可。
+            打开后在编辑表单期间仍会自动跳过，不会冲掉你填的内容。
+            <span id="set_autorefHint"></span></div>
+        </div>
+        <label class="sw" for="set_autoref">
+          <input type="checkbox" id="set_autoref" onchange="toggleAutoRefresh()">
+          <span class="track"></span>
+        </label>
       </div>
     </div>
     <div class="row">
@@ -1281,7 +1309,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
   <div class="card">
     <h2>可选站点同步（从 GitHub 拉模板）</h2>
     <div class="hint">
-      把仓库里某个目录下的 <code>.json</code> 站点模板同步进来，**不用重建镜像**。
+      把仓库里某个目录下的 <code>.json</code> 站点模板同步进来，<b>不用重建镜像</b>。
       同步只是把模板变成「可选」，还要在上面「可选站点」里选中才会真正签到。<br>
       <b>来源已默认填好本项目地址</b>，直接点「立即同步」即可；想用别人的模板库再改成对方地址。
     </div>
@@ -1295,14 +1323,16 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
         <input id="set_sync_days" type="number" min="1" max="365" value="1"
                style="max-width:110px"></div>
     </div>
-    <label class="sw" style="margin-top:8px">
-      <input type="checkbox" id="set_sync_on">
-      <span class="track"></span><span class="lb">自动同步</span>
-    </label>
-    <div class="hint" style="margin-top:6px">
-      关掉就只剩手动。<b>手动同步是立即执行</b>；自动则到上面那个时刻、
-      且间隔天数已到时才拉（打开开关后会先立刻拉一次）。
-      只支持 <b>https</b>；来源示例：<code>用户名/仓库名/目录名</code>。
+    <div class="opt">
+      <div class="grow">
+        <div class="t">自动同步</div>
+        <div class="d">关掉只剩手动。<b>手动同步立即执行</b>；自动则到上面那个时刻、
+          且间隔天数已到时才拉（打开后会先立刻拉一次）。只支持 <b>https</b>。</div>
+      </div>
+      <label class="sw" for="set_sync_on">
+        <input type="checkbox" id="set_sync_on">
+        <span class="track"></span>
+      </label>
     </div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="b pri" onclick="syncNow()">立即同步</button>
@@ -1314,7 +1344,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
   <div class="card">
     <h2>可选站点</h2>
     <div class="hint">
-      下面是可以加入的站点模板。**只有点「加入」的才会出现在站点列表里**
+      下面是可以加入的站点模板。<b>只有点「加入」的才会出现在站点列表里</b>
       并参与签到；没加入的只是"可选"。
       <span id="plugDir"></span>
     </div>
@@ -1331,26 +1361,32 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
   <div class="card">
     <h2>通知</h2>
     <div class="row">
-      <div><label>通知策略</label><select id="set_nmode"></select></div>
+      <div style="max-width:280px"><label>通知策略</label>
+        <select id="set_nmode"></select></div>
     </div>
-    <div class="hint">通知默认跟随「设置 → 网络」里的主代理；
-      需要单独指定的渠道，可以在下面每个渠道自己那行里选"直连 / 自定义"。</div>
+    <div class="hint">每个渠道默认<b>直连</b>（通知服务多在公网，跟着签到的主代理反而容易失败）；
+      需要时才在下面选「跟随主代理」或填自定义代理。</div>
     <div id="chanBox"></div>
     <div class="fsec" style="margin-top:14px">
       <h4>每日汇总</h4>
-      <label class="sw" id="set_digestLbl">
-        <input type="checkbox" id="set_digest">
-        <span class="track"></span><span class="lb">每天推一条汇总（代替每站点各推一条）</span>
-      </label>
-      <div class="row" style="margin-top:6px">
+      <div class="opt" id="set_digestLbl">
+        <div class="grow">
+          <div class="t">每天只推一条汇总</div>
+          <div class="d">代替「每站点各推一条」。汇总<b>前一天</b>的结果（签到多在凌晨跑完，
+            早上推"今天"是残缺的）：成功/失败次数、失败的站点与原因。
+            同一天只推一条；某天完全没记录时不推。</div>
+        </div>
+        <label class="sw" for="set_digest">
+          <input type="checkbox" id="set_digest">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px">
         <div>
           <label>推送时刻</label>
           <input id="set_digest_time" placeholder="09:00" style="width:110px">
         </div>
       </div>
-      <div class="hint">汇总的是<b>前一天</b>的结果：签到大多在凌晨跑完，
-        早上推"今天"只会是残缺的。内容为成功/失败次数、失败的站点与原因。
-        同一天只会推一条；某天完全没有记录时不推。</div>
     </div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="b" onclick="testNotify()">发送测试通知</button>
@@ -1413,14 +1449,19 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
     </div>
 
     <div class="fsec">
-      <h4>AI 分析时附带页面片段</h4>
-      <label style="margin-top:2px">
-        <input type="checkbox" id="set_aiexcerpt"> 把失败页面的正文片段一起发给 AI（默认关）
-      </label>
-      <div class="hint" style="margin-top:6px">
-        「判定不了结果」时最有用的线索：让模型看到页面原文，而不是只凭关键词猜。<br>
-        发送前自动脱敏（去标签、抹 Cookie/token/邮箱/长数字，截断 4000 字符）。<br>
-        <b>开启后页面内容会发给你配置的 DeepSeek 服务</b>；介意就别开。
+      <div class="opt">
+        <div class="grow">
+          <div class="t">把失败页面的正文片段一起发给 AI</div>
+          <div class="d">「判定不了结果」时最有用：模型能看到页面原文，而不是只凭关键词猜。
+            发送前自动脱敏（去标签、抹 Cookie / token / 邮箱 / 长数字，截断 4000 字符）。</div>
+        </div>
+        <label class="sw" for="set_aiexcerpt">
+          <input type="checkbox" id="set_aiexcerpt">
+          <span class="track"></span>
+        </label>
+      </div>
+      <div class="hint" style="color:#a05a00;margin-top:2px">
+        开启后页面内容会发给你配置的 DeepSeek 服务；介意就别开，关着也能正常分析。
       </div>
     </div>
 
@@ -1473,11 +1514,15 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       <b>密钥丢了就解不开已保存的密码</b>，所以建议抄一份存好。
     </div>
     <div id="keyInfo" class="mono mut" style="margin-top:8px"></div>
-    <label style="margin-top:10px">
-      <input type="checkbox" id="set_wdkey"> 备份数据时，把密钥也一并存到 WebDAV
-    </label>
-    <div class="hint" style="color:#a05a00">
-      开启后密钥会存到你的 WebDAV 目录里，请确保那个目录只有你自己能访问。
+    <div class="opt warn">
+      <div class="grow">
+        <div class="t">备份数据时，把密钥也一并存到 WebDAV</div>
+        <div class="d">开启后密钥会存到你的 WebDAV 目录里，请确保那个目录只有你自己能访问。</div>
+      </div>
+      <label class="sw" for="set_wdkey">
+        <input type="checkbox" id="set_wdkey">
+        <span class="track"></span>
+      </label>
     </div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="b" onclick="backupKey()">立即备份密钥到 WebDAV</button>
@@ -1536,6 +1581,13 @@ function switchTab(name){
 document.querySelectorAll('#mainNav button[data-tab]').forEach(function(b){
   b.onclick = function(){ switchTab(b.dataset.tab); };
 });
+/* 支持 #settings / #history 这类深链：刷新后还停在原来那页 */
+(function(){
+  var h = (location.hash || '').replace('#','');
+  if(['sites','add','settings','history'].indexOf(h) >= 0 && h !== 'sites'){
+    switchTab(h);
+  }
+})();
 
 /* ==================== 执行记录（日历） ====================
    数据全部由服务端算好再返回：哪天是哪天、这月从周几开始，都不在
@@ -3295,11 +3347,12 @@ function delSite(id){
 
 /* ---------------- 新增站点 / 录制 ---------------- */
 function loadMeta(){
-  api('GET','/api/meta').then(function(d){
+  return api('GET','/api/meta').then(function(d){
     META = d;
     $('newSiteTplList').textContent = (d.templates||[]).map(function(t){
       return t.id + (t.need_browser?'(浏览器)':'');
     }).join('、');
+    return d;
   });
 }
 
@@ -3501,6 +3554,13 @@ function updateAllTpl(){
 
 /* ---------------- 设置 ---------------- */
 function loadSettings(){
+  /* 渠道卡片要靠 META.channels 渲染。深链直接进设置页时 META 可能还没回来，
+     先补一次再渲染，否则「通知」下面会一片空白。 */
+  if(!META || !(META.channels||[]).length){
+    loadMeta().then(function(){ loadSettings(); })
+              .catch(function(){ /* 拿不到就先不渲染，用户切页会重试 */ });
+    return;
+  }
   api('GET','/api/settings').then(function(d){
     SETTINGS = d;
     $('set_proxy').value = d.proxy || '';
@@ -3630,12 +3690,14 @@ function restoreKey(){
 
 function renderChannels(n, d){
   /* Server 酱已按要求移除，所以这里只有三个渠道 */
-  var labels = {pushplus:'pushplus', wecom:'企业微信机器人',
+  var labels = {pushplus:'PushPlus', wecom:'企业微信机器人',
                 telegram:'Telegram'};
   var fields = {
-    pushplus:  {key:'pushplus_token',  ph:'token', masked:n.pushplus_token_masked},
-    wecom:     {key:'wecom_webhook',   ph:'https://qyapi.weixin.qq.com/…'},
-    telegram:  {key:'tg_bot_token',    ph:'bot token，另填 chat id',
+    pushplus:  {key:'pushplus_token',  ph:'token', lb:'PushPlus token',
+                masked:n.pushplus_token_masked},
+    wecom:     {key:'wecom_webhook',   ph:'https://qyapi.weixin.qq.com/…',
+                lb:'机器人 Webhook 地址'},
+    telegram:  {key:'tg_bot_token',    ph:'bot token', lb:'Bot token',
                 masked:n.tg_bot_token_masked}
   };
   var has = n.has_credentials || {};
@@ -3643,28 +3705,61 @@ function renderChannels(n, d){
     var f = fields[ch] || {key:ch, ph:''};
     var cp = (n.channel_proxy||{})[ch] || {};
     var on = (n.channels||[]).indexOf(ch) >= 0;
-    return '<div class="card" style="margin-top:10px">'
-      + '<label><input type="checkbox" data-ch="'+esc(ch)+'" class="chOn" '
-      + (on?'checked':'')+'> 启用 '+esc(labels[ch]||ch)+' '
-      + (has[ch]?'<span class="tag ok">已配置</span>':'<span class="tag">未配置</span>')
-      + '</label>'
-      + '<input class="chField" data-ch="'+esc(ch)+'" data-key="'+esc(f.key)+'" '
-      + 'placeholder="'+esc(f.ph)+'" value="">'
-      + (f.masked? '<div class="hint">已保存：'+esc(f.masked)+'（留空＝不修改）</div>' : '')
-      + (ch==='telegram'? ('<input class="chField" data-ch="telegram" data-key="tg_chat_id" '
-          + 'placeholder="chat id" value="">') : '')
-      + '<label>该渠道走代理</label>'
-      + '<select class="chProxy" data-ch="'+esc(ch)+'">'
+    return '<div class="ch'+(on?' on':'')+'" data-ch="'+esc(ch)+'">'
+      + '<div class="hd">'
+      +   '<label class="sw"><input type="checkbox" class="chOn" data-ch="'+esc(ch)+'"'
+      +     (on?' checked':'')+'>'
+      +     '<span class="track"></span><span class="lb">'+esc(labels[ch]||ch)+'</span></label>'
+      +   '<span class="grow"></span>'
+      +   (has[ch]?'<span class="tag ok">已配置</span>':'<span class="tag">未配置</span>')
+      + '</div>'
+      + '<div class="body">'
+      +   '<div class="f"><label>'+esc(f.lb||f.key)+'</label>'
+      +     '<input class="chField" data-ch="'+esc(ch)+'" data-key="'+esc(f.key)+'" '
+      +     'placeholder="'+esc(f.ph)+'" value=""></div>'
+      +   (ch==='telegram'? ('<div class="f"><label>chat id</label>'
+          + '<input class="chField" data-ch="telegram" data-key="tg_chat_id" '
+          + 'placeholder="chat id" value=""></div>') : '')
+      +   (f.masked? '<div class="hint" style="margin:0">已保存：'+esc(f.masked)
+          + '（留空＝不修改）</div>' : '')
+      +   '<div class="f"><label>该渠道走代理</label><div class="two">'
+      +     '<select class="chProxy" data-ch="'+esc(ch)+'">'
       /* 默认直连：通知渠道多在公网，跟着签到的主代理反而容易失败 */
-      + '<option value="direct"'+(cp.mode!=='custom'&&cp.mode!=='inherit'?' selected':'')+'>直连（默认）</option>'
-      + '<option value="inherit"'+(cp.mode==='inherit'?' selected':'')+'>跟随主代理</option>'
-      + '<option value="custom"'+(cp.mode==='custom'?' selected':'')+'>自定义</option>'
-      + '</select>'
-      + '<input class="chProxyUrl" data-ch="'+esc(ch)+'" placeholder="自定义代理地址" '
-      + 'value="'+esc(cp.url||'')+'">'
-      + '</div>';
+      +       '<option value="direct"'+(cp.mode!=='custom'&&cp.mode!=='inherit'?' selected':'')+'>直连（默认）</option>'
+      +       '<option value="inherit"'+(cp.mode==='inherit'?' selected':'')+'>跟随主代理</option>'
+      +       '<option value="custom"'+(cp.mode==='custom'?' selected':'')+'>自定义</option>'
+      +     '</select>'
+      +     '<input class="chProxyUrl" data-ch="'+esc(ch)+'" placeholder="自定义代理地址" '
+      +       'value="'+esc(cp.url||'')+'">'
+      +   '</div></div>'
+      + '</div></div>';
   }).join('');
   $('chanBox').innerHTML = html;
+  /* 开关未打开时把该渠道的输入区变淡，一眼能看出"没启用" */
+  document.querySelectorAll('#chanBox .chOn').forEach(function(cb){
+    cb.addEventListener('change', function(){
+      var box = cb.closest('.ch');
+      if(box) box.classList.toggle('on', cb.checked);
+    });
+  });
+  /* 只有选「自定义」时地址框才可用 —— 否则那个框一直是亮的，
+     看起来像"填了就会生效"，实际直连时它被忽略 */
+  document.querySelectorAll('#chanBox .chProxy').forEach(function(sel){
+    var ch = sel.dataset.ch;
+    var inp = null;
+    document.querySelectorAll('#chanBox .chProxyUrl').forEach(function(u){
+      if(u.dataset.ch === ch) inp = u;
+    });
+    if(!inp) return;
+    function sync(){
+      var custom = sel.value === 'custom';
+      inp.disabled = !custom;
+      inp.style.opacity = custom ? '1' : '.45';
+      inp.placeholder = custom ? '如 http://192.168.1.2:7890' : '选「自定义」后填写';
+    }
+    sel.addEventListener('change', sync);
+    sync();
+  });
 }
 
 function collectNotify(){
@@ -3682,7 +3777,9 @@ function collectNotify(){
     document.querySelectorAll('.chProxyUrl').forEach(function(u){
       if(u.dataset.ch === ch) url = u.value.trim();
     });
-    if(sel.value) n.channel_proxy[ch] = {mode: sel.value, url: url};
+    /* 直连/跟随主代理时不留 url：留着会在切回自定义时莫名生效 */
+    if(sel.value) n.channel_proxy[ch] = {mode: sel.value,
+                                        url: sel.value === 'custom' ? url : ''};
   });
   /* 每日汇总 */
   n.digest_enabled = !!($('set_digest') && $('set_digest').checked);
