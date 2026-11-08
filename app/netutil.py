@@ -314,7 +314,7 @@ def describe_network_error(kind: str, proxy: str = '') -> str:
         'refused': '连接被拒绝',
         'dns_error': '域名解析失败；检查 DNS 设置',
         'proxy_dns_error': ('连不上你配置的代理服务器（它的地址解析不了）；'
-                            '请检查「设置 → 网络」里的代理地址是否填对 —— '
+                            '请检查「设置 → 主代理地址」里填的地址 —— '
                             '注意模板里的占位符要换成真实地址。'
                             '这一条不是目标站点或 DNS 的问题'),
         'proxy_refused': ('代理服务器拒绝连接；请确认代理已启动、端口正确。'
@@ -327,7 +327,7 @@ def describe_network_error(kind: str, proxy: str = '') -> str:
     # 直连时的失败，追加"可能需要代理"的提示。
     # 这几个 kind 都是"直连到不了站点"的典型症状。
     if not proxy and kind in ('timeout', 'refused', 'unreachable', 'reset'):
-        base += ('；该站点可能需要通过代理访问'
-                 '（国内部分站点/被污染的域名直连不通）。'
-                 '可在「设置 → 网络」里配置代理后重试')
+        base += ('；该站点可能需要通过代理访问（被墙或 DNS 被污染的域名直连不通）。'
+                 '先到「设置 → 主代理地址」填好地址，'
+                 '再到该站点「编辑 → 联网方式」选「主代理」重试')
     return base

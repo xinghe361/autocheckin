@@ -57,7 +57,7 @@ class TestConfigAndOverview(ServiceCase):
 
         以前 Service(proxy=...) 会在"配置里没代理"时顶上去，
         那是环境变量 PROXY 的入口。现在代理**只**来自配置
-        （网页「设置 → 网络」），所以传了这个参数也不该生效。
+        （网页「设置 → 主代理地址」），所以传了这个参数也不该生效。
         """
         svc = SV.Service(self.dir, env_key=S.generate_key(),
                          proxy='http://from-env:1')

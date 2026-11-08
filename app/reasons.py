@@ -73,7 +73,7 @@ _CODES: Dict[str, Tuple[str, str, str]] = {
     'proxy_dns_error': ('代理地址解析失败', 'network', ''),
     'proxy_refused': ('代理拒绝连接', 'network', ''),
     'no_proxy': ('代理不可用', 'network',
-                 '配置了走代理但代理没法用；检查「设置 → 网络」'),
+                 '配置了走代理但代理没法用；检查「设置 → 主代理地址」里的地址'),
     'no_socks': ('缺少 socks 支持', 'network',
                  '这个镜像没装 PySocks，socks 代理用不了；'
                  '改用 http 代理，或重建镜像带上 PySocks'),
