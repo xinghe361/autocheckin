@@ -2,25 +2,26 @@
   "id": "v2ex",
   "name": "V2EX",
   "homepage": "https://www.v2ex.com/",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "updated": "2026-11-08",
   "mission_url": "https://www.v2ex.com/mission/daily",
   "need_browser": false,
   "verify_ssl": true,
   "flow": [
     { "action": "get", "url": "{mission_url}" },
-    { "action": "extract_regex", "pattern": "/mission/daily/redeem\\?once=(\\d+)", "save_as": "once", "required": true },
-    { "action": "get", "url": "https://www.v2ex.com/mission/daily/redeem?once={once}" },
+    { "action": "extract_regex", "pattern": "/mission/daily/redeem\\?once=(\\d+)", "save_as": "once" },
+    { "action": "get", "url": "https://www.v2ex.com/mission/daily/redeem?once={once}", "when": "once" },
     { "action": "get", "url": "{mission_url}" },
     { "action": "extract_regex", "pattern": "已连续登录\\s*(\\d+)\\s*天", "save_as": "log_days", "from": "last" }
   ],
-  "success_keywords": ["每日登录奖励已领取", "已领取", "领取成功", "已经领取"],
+  "success_keywords": ["每日登录奖励已领取", "今日已领取", "已领取",
+                       "领取成功", "已经领取", "已签到"],
   "fail_keywords": ["需要先登录", "请先登录", "登录以继续"],
-  "already_keywords": ["已经领取", "已领取过"],
+  "already_keywords": ["已经领取", "已领取过", "今日已领取"],
   "headers": {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9"
   },
-  "note": "V2EX 每日领币三步：取 once 令牌 → 带令牌 GET redeem（必须是 GET，POST 会 405）→ 重取页面确认。需粘贴登录 Cookie（PB3_SESSION 带 HttpOnly，用 QD 扩展或 Copy as cURL 拿）。"
+  "note": "V2EX 每日领币：取 once 令牌 → 带令牌 GET redeem（必须 GET，POST 会 405）→ 重取页面确认。今天已经领过时页面上没有 redeem 链接，这时跳过领取这步、直接按页面状态判定（已领取=成功）。需粘贴登录 Cookie（PB3_SESSION 带 HttpOnly，用 QD 扩展或 Copy as cURL 拿）。"
 }

@@ -2,7 +2,7 @@
   "id": "chiphell",
   "name": "Chiphell",
   "homepage": "https://www.chiphell.com/",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "updated": "2026-11-08",
   "mission_url": "https://www.chiphell.com/forum.php",
   "need_browser": false,
@@ -11,8 +11,8 @@
     { "action": "get", "url": "https://www.chiphell.com/forum.php" },
     { "action": "extract_regex", "pattern": "积分:\\s*(\\d+)", "save_as": "jifen", "from": "last" }
   ],
-  "success_keywords": ["用户组"],
-  "fail_keywords": ["请先登录", "需要登录", "立即登录", "注册会员"],
+  "success_keywords": ["用户组", "积分:"],
+  "fail_keywords": ["请先登录", "需要登录", "立即登录"],
   "already_keywords": [],
   "headers": {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",

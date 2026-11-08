@@ -98,22 +98,31 @@ class TestV2exFlow(unittest.TestCase):
         self.assertTrue(rec.calls[1][1].endswith('once=123456'),
                         'URL 里应带上提取到的 once：%s' % rec.calls[1][1])
 
-    def test_without_token_fails_early(self):
-        """页面里没有令牌（未登录/被拦）-> 尽早失败，不带字面量继续请求。"""
-        rec = Recorder([(200, PAGE_LOGIN)])
+    def test_without_token_skips_redeem_and_judges_page(self):
+        """页面里没有令牌 -> 跳过 redeem，直接按页面内容判定。
+
+        以前这一步是 required：取不到令牌就报"没找到令牌，通常意味着未登录"。
+        但"今天已经领过"时页面上本来就没有 redeem 链接，于是每天第二次跑
+        都会显示成未登录/失败 —— 用户只能反复换 Cookie。
+        """
+        rec = Recorder([(200, PAGE_LOGIN), (200, PAGE_LOGIN)])
         out = run(rec)
         self.assertFalse(out.success)
-        self.assertEqual(out.error_kind, 'no_token')
-        self.assertEqual(len(rec.calls), 1, '取不到令牌就不该继续请求 redeem')
+        self.assertIn('未登录', out.message)
+        # 只取两次页面（第一次 + 判定前再取一次），绝不去请求 redeem
+        self.assertEqual(len(rec.calls), 2)
+        self.assertTrue(all('redeem' not in url for _, url in rec.calls))
 
     def test_already_redeemed_is_success(self):
-        """今天已经领过 -> 算成功（already），不该报失败触发重试。"""
-        rec = Recorder([
-            (200, PAGE_DONE),            # 页面已经没有领取按钮
-        ])
+        """今天已经领过（页面没有领取按钮）-> 直接判成功，不该报失败触发重试。"""
+        rec = Recorder([(200, PAGE_DONE), (200, PAGE_DONE)])
         out = run(rec)
-        # 没有令牌 -> 早退为 no_token 是合理的（页面确实没有 redeem 链接），
-        # 但真正"已领过"的判定在拿到令牌后的分类里：
+        self.assertTrue(out.success, out.message)
+        self.assertIn('每日登录奖励已领取', out.message)
+        self.assertEqual(len(rec.calls), 2)
+
+    def test_already_hit_after_redeem(self):
+        """领了但回显"已经领取过" -> 也算成功（already），不重试。"""
         rec2 = Recorder([
             (200, PAGE_CAN_REDEEM),
             (302, ''),
@@ -146,12 +155,18 @@ class TestV2exFlow(unittest.TestCase):
         self.assertEqual(actions.count('get'), 3,
                          '应为：取页面 / redeem / 再取页面确认')
 
-    def test_token_extract_is_required(self):
-        steps = [s for s in TPL['flow'] if s.get('action') == 'extract_regex']
-        token = [s for s in steps if s.get('save_as') == 'once']
+    def test_token_extract_is_optional_and_redeem_is_conditional(self):
+        """令牌可以不出现（今天已领过），redeem 用 when 守住。"""
+        steps = TPL['flow']
+        token = [s for s in steps
+                 if s.get('action') == 'extract_regex' and s.get('save_as') == 'once']
         self.assertEqual(len(token), 1, '令牌提取必须有且只有一步')
-        self.assertTrue(token[0].get('required'),
-                        '令牌取不到必须尽早失败，否则会带字面量请求')
+        self.assertFalse(token[0].get('required'),
+                         '令牌取不到不能直接判失败：已领过时页面就没有这个链接')
+        redeem = [s for s in steps if 'redeem' in str(s.get('url') or '')]
+        self.assertEqual(len(redeem), 1)
+        self.assertEqual(redeem[0].get('when'), 'once',
+                         '没有令牌时必须跳过 redeem，不能带字面量去请求')
         # 其余提取（如"已连续登录 N 天"）只是给通知加信息，
         # 页面上没有也不能把整次签到判失败。
         for s in steps:

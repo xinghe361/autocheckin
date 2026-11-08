@@ -45,6 +45,36 @@ class FlowOutcome:
 PAGE_EXCERPT_CAP = 8000
 
 
+def _page_hint(text: str) -> str:
+    """给"判定不了"补一句能查的线索。
+
+    为什么需要：命中不了任何关键词时，界面只显示"无法判断签到结果"，
+    用户既不知道返回的是首页、拦截页还是登录页，也不知道该改什么 ——
+    只能来问"为什么不行"。这里把页面标题、是否有登录表单、开头文字
+    一并带出来，一眼就能看出是哪一类。
+
+    只取很少的量：这些字会进历史记录和通知，不能把整个页面搬过去。
+    """
+    raw = str(text or '')
+    if not raw:
+        return ''
+    bits = []
+    m = re.search(r'<title[^>]*>(.*?)</title>', raw, re.I | re.S)
+    if m:
+        title = ' '.join(m.group(1).split())[:60]
+        if title:
+            bits.append('页面标题「%s」' % title)
+    low = raw.lower()
+    if 'type="password"' in low or "type='password'" in low:
+        bits.append('页面里有登录表单')
+    body = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', raw, flags=re.I | re.S)
+    body = re.sub(r'<[^>]+>', ' ', body)
+    body = ' '.join(body.split()) or ' '.join(raw.split())
+    if body:
+        bits.append('内容开头：%s' % body[:80])
+    return '；'.join(bits)
+
+
 def _take_excerpt(text: str) -> str:
     """把页面正文压成一小段（去多余空白 + 截断）。"""
     s = str(text or '')
@@ -146,6 +176,7 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
         {'action':'get',  'url': '...'}
         {'action':'post', 'url': '...', 'data': {...}}
         {'action':'extract_regex', 'pattern': '...', 'save_as': 'once', 'from': 'last'}
+        {'action':'get', 'url': '...', 'when': 'once'}   # 变量为空则跳过本步
 
     initial_text / initial_status：流程为空、或没有任何请求发生时，用于判定的页面内容，
     保证这种情况下也能正常判定而不会退化成"无法判断"。
@@ -160,6 +191,15 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
 
     for step in (flow or []):
         action = (step.get('action') or '').lower()
+        # 条件步骤：step['when'] 指定的变量为空就跳过这一步。
+        #
+        # 为什么需要：V2EX 的领币地址带一次性令牌，而"今天已经领过"时
+        # 页面上根本没有这个链接 —— 以前 required 一失败就报"没找到令牌，
+        # 通常意味着未登录"，把"已领过"说成"未登录"，用户只能去反复换 Cookie。
+        when = step.get('when')
+        if when and not str(variables.get(str(when)) or '').strip():
+            trace.append('跳过（没有 %s）' % when)
+            continue
         # 整站超时：每步之前看一眼。单步自己有时间上限，但"很多步各自超时"
         # 叠起来可以拖到十几分钟，把当天的整轮跑挂住。
         # 放在步骤之间而不是强杀线程：Python 没法安全地掐断一个正在阻塞的调用，
@@ -238,21 +278,51 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
         return FlowOutcome(True, '今天已经领过了（命中「%s」）%s' % (kw, extra),
                            'already', vars=variables, trace=trace)
     if kind == 'fail':
-        return FlowOutcome(False, '站点提示需要处理（命中「%s」）%s' % (kw, extra),
-                           'fail', vars=variables, trace=trace,
+        msg = '站点提示需要处理（命中「%s」）%s' % (kw, extra)
+        if any(w in kw for w in ('登录', 'login', 'sign in', 'Login')):
+            # "请先登录"这类词的含义很明确，就别让用户去猜"需要处理什么"
+            msg = ('未登录（页面提示「%s」）—— Cookie 可能已失效，'
+                   '请到该站点的「编辑」里重新粘贴%s' % (kw, extra))
+        else:
+            # 同一个页面既有成功词又有失败词，几乎总是判定词配错了
+            # （实例：Chiphell 的"注册会员"是用户组名，登录后必然出现）
+            also = match_keywords(text, success_kw)
+            if also:
+                msg += '｜注意：页面同时出现成功标志「%s」，判定词可能冲突' % also
+        return FlowOutcome(False, msg, 'fail', vars=variables, trace=trace,
                            page_excerpt=_take_excerpt(text))
 
     status = last_resp.status if last_resp else 0
     # 无法判定时区分两种情况：HTTP 层就失败（把状态码带出来）还是页面看不懂
     if status and (status < 200 or status >= 300):
+        msg = 'HTTP %d，且页面未命中任何已知关键词' % status
+        hint = _page_hint(text)
+        if hint:
+            msg += '｜线索：' + hint
         return FlowOutcome(
-            False, 'HTTP %d，且页面未命中任何已知关键词' % status,
-            'unknown', error_kind='http_%d' % status, vars=variables, trace=trace,
-            page_excerpt=_take_excerpt(text))
+            False, msg, 'unknown', error_kind='http_%d' % status,
+            vars=variables, trace=trace, page_excerpt=_take_excerpt(text))
 
-    return FlowOutcome(False, '无法判断签到结果（HTTP %s，页面未命中任何已知关键词）' % status,
-                       'unknown', error_kind='unclear', vars=variables, trace=trace,
+    hint = _page_hint(text)
+    msg = '无法判断签到结果（HTTP %s，页面未命中任何已知关键词）' % status
+    if hint:
+        msg += '｜线索：' + hint
+    return FlowOutcome(False, msg, 'unknown', error_kind='unclear',
+                       vars=variables, trace=trace,
                        page_excerpt=_take_excerpt(text))
+
+
+def verdict_keywords(site: SiteConfig, tpl: Dict[str, Any], key: str) -> List[str]:
+    """判定词取谁的：模板站跟随模板，自定义站点用自己的。
+
+    加入站点时判定词被复制进 SiteConfig，而界面上没有编辑入口。若始终用
+    站点上那份拷贝，模板修好了（比如 Chiphell 的失败词里误放了用户组名
+    "注册会员"）已加入的站点也永远好不了 —— "更新模板"只对没加入的模板有效。
+    """
+    tpl_kw = list(tpl.get(key) or [])
+    if site.kind == KIND_TEMPLATE and tpl_kw:
+        return tpl_kw
+    return list(getattr(site, key, None) or tpl_kw)
 
 
 def _http_fetcher(site: SiteConfig, proxy: str,
@@ -346,16 +416,24 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
     #    runner 随后 save_config 就会把明文落盘 config.json，
     #    还会进 WebDAV 备份 —— 等于完全绕过 SecretBox 加密层。
     #    （这里踩过一次：就地赋值会让"加密存储"这个承诺失效。）
+    # 模板站的判定词与请求头**以模板为准**，不用站点上的那份拷贝。
+    #
+    # 为什么：加入站点时这些值被复制进 SiteConfig，而界面上没有编辑入口。
+    # 于是站点改版后，即使模板已修好（比如 Chiphell 的失败词里误放了
+    # 用户组名"注册会员"），已加入的站点仍然拿着旧副本，永远判不出来 ——
+    # "更新模板"这个动作等于只对还没加入的模板有效。
+    header_src = (tpl.get('headers') if site.kind == KIND_TEMPLATE else None) \
+        or site.headers or {}
     rendered_headers = {
         str(k): _render(str(v), variables)
-        for k, v in (site.headers or {}).items()
+        for k, v in header_src.items()
     }
 
     return run_http_flow(
         fetcher=_http_fetcher(site, proxy, cookie_header, rendered_headers),
         flow=[_render_step(s, variables) for s in flow],
-        success_kw=list(site.success_keywords or tpl.get('success_keywords') or []),
-        fail_kw=list(site.fail_keywords or tpl.get('fail_keywords') or []),
+        success_kw=verdict_keywords(site, tpl, 'success_keywords'),
+        fail_kw=verdict_keywords(site, tpl, 'fail_keywords'),
         already_kw=list(tpl.get('already_keywords') or []),
         initial_vars=variables,
         deadline=deadline,
@@ -473,7 +551,9 @@ def check_cookie_valid(site: SiteConfig, cookie_header: str,
                    % (len(parsed), '、'.join(list(parsed)[:4])))
 
     method = 'GET'
-    fail_kw = list(site.fail_keywords or tpl.get('fail_keywords') or [])
+    # 同样以模板为准：站点上那份拷贝可能带着旧的错误判定词
+    # （Chiphell 的"注册会员"就是登录后必然出现的用户组名）
+    fail_kw = verdict_keywords(site, tpl, 'fail_keywords')
     fetch = _http_fetcher(site, proxy, cookie_header)
     try:
         resp = fetch(method, url, None)
@@ -491,8 +571,7 @@ def check_cookie_valid(site: SiteConfig, cookie_header: str,
         return 2, '登录状态已失效（页面提示「%s」）' % hit
 
     # 命中成功关键词 → 有效
-    hit = match_keywords(text, list(site.success_keywords or
-                                    tpl.get('success_keywords') or []))
+    hit = match_keywords(text, verdict_keywords(site, tpl, 'success_keywords'))
     if hit:
         return 1, '登录状态有效（页面出现「%s」）' % hit
 
@@ -507,7 +586,9 @@ def check_cookie_valid(site: SiteConfig, cookie_header: str,
         return 0, ('页面被站点的安全验证（Cloudflare）拦住，' 
                    '不能据此判断 Cookie 是否有效；以实际签到结果为准')
 
-    return 0, '页面里既没有登录失效提示，也没有成功标志，无法判断'
+    hint = _page_hint(text)
+    return 0, ('页面里既没有登录失效提示，也没有成功标志，无法判断'
+               + ('｜线索：' + hint if hint else ''))
 
 
 def checkin_site(site: SiteConfig, proxy: str = '', password: str = '',

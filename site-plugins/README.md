@@ -74,8 +74,10 @@
   "flow": [
     { "action": "get", "url": "{mission_url}" },
     { "action": "extract_regex", "pattern": "once=(\\d+)",
-      "save_as": "once", "required": true },
-    { "action": "get", "url": "https://a.b/do?once={once}" }
+      "save_as": "once" },
+    // when：变量为空就跳过这一步。像"今天已经领过"时页面里没有领取链接，
+    // 用 when 守住，别把"已领过"判成"未登录"
+    { "action": "get", "url": "https://a.b/do?once={once}", "when": "once" }
   ],
 
   // 判定关键词（按已领 > 失败 > 成功 的优先级）
@@ -87,6 +89,20 @@
   "note": "界面上显示的说明"              // 可选
 }
 ```
+
+### 步骤字段
+
+| 字段 | 作用 |
+|---|---|
+| `action` | `get` / `post` / `extract_regex` |
+| `url` / `pattern` / `data` | 该动作的输入，支持下面的占位符 |
+| `save_as` | `extract_regex` 提取到的值存成哪个变量 |
+| `from` | `first` = 从第一个响应里取，默认从最后一个响应 |
+| `required` | `true` = 取不到就算失败（会明确报"没找到令牌"）|
+| `when` | 指定变量为空时跳过本步。**一次性令牌这类可选流程用它，别用 `required`** |
+
+> ⚠️ 判定词写准很关键。踩过的坑：Chiphell 的登录页里本来就有
+> 「用户组: 注册会员」——把"注册会员"当失败词，等于登录成功必然判失败。
 
 ### 可用的占位符
 

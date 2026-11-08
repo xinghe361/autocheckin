@@ -99,13 +99,13 @@ class TestV2exFlow(unittest.TestCase):
         self.assertIn('once=12345', calls[1][1])
 
     def test_not_logged_in_is_failure(self):
-        """未登录的页面没有令牌，会在取令牌这步就明确失败。"""
+        """未登录页面没有令牌，靠页面里的"请先登录"判失败并说清是 Cookie 问题。"""
         calls = []
         out = self._run([(200, '请先登录'), (200, '请先登录')], calls)
         self.assertFalse(out.success)
-        self.assertIn('令牌', out.message)
-        self.assertIn('未登录', out.message, '应提示通常是未登录')
-        self.assertEqual(out.error_kind, 'no_token')
+        self.assertIn('未登录', out.message)
+        self.assertIn('Cookie', out.message)
+        self.assertEqual(len(calls), 2, '没有令牌时只取两次页面')
 
     def test_fail_keyword_reported_when_token_present(self):
         """有令牌但最后页面提示需要登录时，走关键词判定。"""
@@ -116,12 +116,17 @@ class TestV2exFlow(unittest.TestCase):
         self.assertEqual(out.hit, 'fail')
         self.assertIn('请先登录', out.message)
 
-    def test_missing_token_reports_clearly(self):
-        """页面到了但没有令牌：明确说是令牌问题。"""
+    def test_missing_token_is_not_fatal(self):
+        """页面到了但没有令牌：跳过领取、按页面判定，不能直接判失败。"""
         calls = []
-        out = self._run([(200, '<html>没有令牌的页面</html>')], calls)
+        out = self._run([(200, '<html>没有令牌的页面</html>'),
+                         (200, '<html>没有令牌的页面</html>')], calls)
         self.assertFalse(out.success)
-        self.assertEqual(out.error_kind, 'no_token')
+        # 页面既没成功词也没失败词 —— 应落到"判不了 + 线索"，而不是令牌错误
+        self.assertEqual(out.error_kind, 'unclear')
+        self.assertIn('线索', out.message)
+        self.assertTrue(all('redeem' not in c[1] for c in calls),
+                        '没令牌就不该去请求 redeem')
 
 
 
@@ -370,6 +375,136 @@ class TestProxyHintOnCookieCheck(unittest.TestCase):
         self.assertIn('代理', msg)
         self.assertNotIn('secret', msg, '代理密码不能出现在界面/日志里')
         self.assertIn('10.0.0.1', msg)
+
+
+
+class TestConditionalSteps(unittest.TestCase):
+    """`when`：变量为空就跳过这一步。
+
+    V2EX 的领币地址带一次性令牌，而"今天已经领过"时页面上根本没有这个
+    链接 —— 以前是 required，一失败就报"没找到令牌，通常意味着未登录"，
+    把"已领过"说成"未登录"，用户只能反复换 Cookie。
+    """
+
+    FLOW = [
+        {'action': 'get', 'url': 'https://a.test/'},
+        {'action': 'extract_regex', 'pattern': r'once=(\d+)', 'save_as': 'once'},
+        {'action': 'get', 'url': 'https://a.test/do?once={once}', 'when': 'once'},
+        {'action': 'get', 'url': 'https://a.test/'},
+    ]
+
+    def test_skips_step_without_variable(self):
+        calls = []
+        f = fake_fetcher([(200, '没有令牌'), (200, '今日已领取')], calls)
+        out = E.run_http_flow(f, self.FLOW, ['今日已领取'], [])
+        self.assertTrue(out.success, out.message)
+        self.assertEqual(len(calls), 2, '没有 once 时不该去请求 redeem')
+        self.assertTrue(any('跳过' in t for t in out.trace), out.trace)
+
+    def test_runs_step_when_variable_present(self):
+        calls = []
+        f = fake_fetcher([(200, 'once=42'), (302, ''), (200, '领取成功')], calls)
+        out = E.run_http_flow(f, self.FLOW, ['领取成功'], [])
+        self.assertTrue(out.success, out.message)
+        self.assertEqual(len(calls), 3)
+        self.assertIn('once=42', calls[1][1])
+
+
+class TestTemplateVerdict(unittest.TestCase):
+    """判定词必须跟真实页面一致 —— 这里是踩过的两个实例。"""
+
+    def _run_tpl(self, tid, pages):
+        tpl = load(tid)
+        return E.run_http_flow(
+            fake_fetcher(pages), tpl['flow'], tpl['success_keywords'],
+            tpl['fail_keywords'], tpl.get('already_keywords'),
+            initial_vars={'mission_url': tpl.get('mission_url') or ''})
+
+    def test_chiphell_logged_in_page_is_success(self):
+        """登录后页面里必有"用户组: 注册会员" —— 这个词不能当失败标志。
+
+        以前 fail_keywords 里有"注册会员"（Discuz 的用户组名），于是登录成功
+        反而被判成"站点提示需要处理"，两处（签到与检查登录状态）一起错。
+        """
+        tpl = load('chiphell')
+        self.assertNotIn('注册会员', tpl['fail_keywords'])
+        page = ('<html><title>Chiphell</title><body>'
+                '<div>积分: 128</div><div>用户组: 注册会员</div></body></html>')
+        out = self._run_tpl('chiphell', [(200, page)])
+        self.assertTrue(out.success, out.message)
+
+    def test_chiphell_guest_page_is_fail(self):
+        out = self._run_tpl('chiphell', [(200, '<div>请先登录</div>')])
+        self.assertFalse(out.success)
+        self.assertIn('未登录', out.message)
+
+    def test_v2ex_already_claimed_today(self):
+        """已领过时页面没有 redeem 链接，要直接按页面状态判成功。"""
+        page = ('<html><title>V2EX</title><body>'
+                '<div>每日登录奖励已领取</div><div>已连续登录 128 天</div></body></html>')
+        # 两次：第一次取页面（没有 once）→ 跳过 redeem → 判定前再取一次
+        out = self._run_tpl('v2ex', [(200, page), (200, page)])
+        self.assertTrue(out.success, out.message)
+        self.assertEqual(out.vars.get('log_days'), '128')
+
+
+class TestUnclearDiagnostics(unittest.TestCase):
+    """判定不了时必须给线索，否则用户只能来问"为什么不行"。"""
+
+    def test_unknown_reports_title_and_text(self):
+        page = ('<html><head><title>Just a moment...</title></head>'
+                '<body>Checking your browser</body></html>')
+        out = E.run_http_flow(fake_fetcher([(200, page)]),
+                              [{'action': 'get', 'url': 'https://a.test/'}],
+                              ['签到成功'], [])
+        self.assertFalse(out.success)
+        self.assertIn('线索', out.message)
+        self.assertIn('Just a moment', out.message)
+        self.assertIn('Checking your browser', out.message)
+
+    def test_fail_message_names_both_keywords_on_conflict(self):
+        """成功词与失败词同时命中时要点出来 —— 这几乎总是判定词配错了。"""
+        page = '<div>用户组: 注册会员</div>'
+        out = E.run_http_flow(fake_fetcher([(200, page)]),
+                              [{'action': 'get', 'url': 'https://a.test/'}],
+                              ['用户组'], ['注册会员'])
+        self.assertFalse(out.success)
+        self.assertIn('同时出现成功标志', out.message)
+
+
+
+class TestVerdictKeywordSource(unittest.TestCase):
+    """判定词取谁的：模板站跟模板，自定义站点跟站点。"""
+
+    TPL = {'success_keywords': ['用户组'], 'fail_keywords': ['请先登录']}
+
+    def test_template_site_uses_template_not_stale_copy(self):
+        """站点上那份拷贝带着旧的错误失败词，也必须以模板为准。"""
+        site = SiteConfig(id='chiphell', name='C', kind='template',
+                          template='chiphell',
+                          success_keywords=[],
+                          fail_keywords=['注册会员'])
+        self.assertEqual(E.verdict_keywords(site, self.TPL, 'fail_keywords'),
+                         ['请先登录'])
+        self.assertEqual(E.verdict_keywords(site, self.TPL, 'success_keywords'),
+                         ['用户组'])
+
+    def test_custom_site_uses_its_own(self):
+        site = SiteConfig(id='mine', name='M', kind='custom',
+                          success_keywords=['成功'], fail_keywords=['失败'])
+        self.assertEqual(E.verdict_keywords(site, self.TPL, 'success_keywords'),
+                         ['成功'])
+
+    def test_custom_site_falls_back_to_template(self):
+        site = SiteConfig(id='mine', name='M', kind='custom')
+        self.assertEqual(E.verdict_keywords(site, self.TPL, 'success_keywords'),
+                         ['用户组'])
+
+    def test_template_missing_keyword_falls_back_to_site(self):
+        site = SiteConfig(id='x', name='X', kind='template',
+                          success_keywords=['站点自填'])
+        self.assertEqual(E.verdict_keywords(site, {}, 'success_keywords'),
+                         ['站点自填'])
 
 
 if __name__ == '__main__':

@@ -110,6 +110,9 @@ def validate_template(data: Any, source: str = '') -> Tuple[Dict[str, Any], str]
         # 提取结果可能对不上，但又不报错，最难查的那类问题。
         if 'from' in step:
             one['from'] = str(step['from'])
+        # 条件执行：when 指定的变量为空就跳过这一步
+        if 'when' in step:
+            one['when'] = str(step['when'])
         if 'data' in step:
             if not isinstance(step['data'], (dict, str)):
                 return bad('第 %d 步的 data 既不是对象也不是字符串' % (i + 1))
