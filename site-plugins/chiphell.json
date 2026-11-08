@@ -2,7 +2,7 @@
   "id": "chiphell",
   "name": "Chiphell",
   "homepage": "https://www.chiphell.com/",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "updated": "2026-11-08",
   "mission_url": "https://www.chiphell.com/forum.php",
   "need_browser": false,
@@ -11,7 +11,7 @@
     { "action": "get", "url": "https://www.chiphell.com/forum.php" },
     { "action": "extract_regex", "pattern": "积分:\\s*(\\d+)", "save_as": "jifen", "from": "last" }
   ],
-  "success_keywords": ["用户组", "积分:"],
+  "success_keywords": ["用户组", "积分:", "action=logout"],
   "fail_keywords": ["请先登录", "需要登录", "立即登录"],
   "already_keywords": [],
   "headers": {
@@ -21,5 +21,5 @@
     "Referer": "https://www.chiphell.com/portal.php",
     "Upgrade-Insecure-Requests": "1"
   },
-  "note": "带登录 Cookie 访问 forum.php 即算签到（Discuz 访问计分），页面出现「用户组」即为成功。需粘贴登录 Cookie（auth 字段带 HttpOnly）。"
+  "note": "带登录 Cookie 访问 forum.php 即算签到（Discuz 访问计分）。判定看登录态：页面有 action=logout 或「用户组: xxx」即为成功；只有 action=login 则是 Cookie 没生效。需粘贴登录 Cookie（auth 字段带 HttpOnly）。"
 }

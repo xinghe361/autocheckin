@@ -438,6 +438,28 @@ class TestTemplateVerdict(unittest.TestCase):
         self.assertFalse(out.success)
         self.assertIn('未登录', out.message)
 
+    def test_chiphell_logged_in_detected_by_logout_link(self):
+        """Discuz 登录态的硬标志是 action=logout，跟正文措辞无关。
+
+        实测踩到：页面里既没有"用户组"也没有"注册会员"（模板改版/换了主题），
+        只剩退出链接 —— 只看文案就判成"无法判断"。
+        """
+        page = ('<html><title>Chiphell</title><body>'
+                '<a href="member.php?mod=logging&action=logout&formhash=ab12">退出</a>'
+                '</body></html>')
+        out = self._run_tpl('chiphell', [(200, page)])
+        self.assertTrue(out.success, out.message)
+
+    def test_chiphell_guest_detected_by_login_link(self):
+        """页面只有登录入口（没有退出链接）→ 明确说没登录，不是"判不了"。"""
+        page = ('<html><title>Chiphell</title><body>'
+                '<a href="member.php?mod=logging&action=login">登录</a></body></html>')
+        out = self._run_tpl('chiphell', [(200, page)])
+        self.assertFalse(out.success)
+        self.assertIn('未登录', out.message)
+        self.assertIn('Cookie', out.message)
+        self.assertEqual(out.error_kind, 'not_logged_in')
+
     def test_v2ex_already_claimed_today(self):
         """已领过时页面没有 redeem 链接，要直接按页面状态判成功。"""
         page = ('<html><title>V2EX</title><body>'
@@ -461,6 +483,14 @@ class TestUnclearDiagnostics(unittest.TestCase):
         self.assertIn('线索', out.message)
         self.assertIn('Just a moment', out.message)
         self.assertIn('Checking your browser', out.message)
+
+    def test_empty_body_is_reported_as_empty(self):
+        """正文是空的（被中间设备吞掉/站点返回 204）也要说清楚。"""
+        out = E.run_http_flow(fake_fetcher([(200, '')]),
+                              [{'action': 'get', 'url': 'https://a.test/'}],
+                              ['签到成功'], [])
+        self.assertFalse(out.success)
+        self.assertIn('正文是空的', out.message)
 
     def test_fail_message_names_both_keywords_on_conflict(self):
         """成功词与失败词同时命中时要点出来 —— 这几乎总是判定词配错了。"""

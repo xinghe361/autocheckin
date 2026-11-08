@@ -45,6 +45,23 @@ class FlowOutcome:
 PAGE_EXCERPT_CAP = 8000
 
 
+def _login_state(text: str) -> str:
+    """从页面结构推断登录态，返回 'in' / 'out' / ''（不确定）。
+
+    为什么看结构而不是文案：Discuz 这类站点登录后一定带 action=logout、
+    游客一定带 action=login，而"用户组""注册会员"这类正文措辞每个模板
+    都不一样，还会随站点改版失效。
+    """
+    low = str(text or '').lower()
+    has_out = 'action=logout' in low or 'action%3dlogout' in low
+    has_in = 'action=login' in low or 'action%3dlogin' in low
+    if has_out and not has_in:
+        return 'in'
+    if has_in and not has_out:
+        return 'out'
+    return ''
+
+
 def _page_hint(text: str) -> str:
     """给"判定不了"补一句能查的线索。
 
@@ -56,8 +73,8 @@ def _page_hint(text: str) -> str:
     只取很少的量：这些字会进历史记录和通知，不能把整个页面搬过去。
     """
     raw = str(text or '')
-    if not raw:
-        return ''
+    if not raw.strip():
+        return '响应正文是空的（可能是被站点或中间设备拦掉了）'
     bits = []
     m = re.search(r'<title[^>]*>(.*?)</title>', raw, re.I | re.S)
     if m:
@@ -65,8 +82,17 @@ def _page_hint(text: str) -> str:
         if title:
             bits.append('页面标题「%s」' % title)
     low = raw.lower()
+    state = _login_state(raw)
+    if state == 'in':
+        bits.append('页面有"退出"链接（这次请求是登录态）')
+    elif state == 'out':
+        bits.append('页面有"登录"入口（这次请求没登录上）')
     if 'type="password"' in low or "type='password'" in low:
         bits.append('页面里有登录表单')
+    if any(k in low for k in ('just a moment', 'challenge-platform',
+                              'cf-challenge', '正在进行安全验证',
+                              'enable javascript and cookies')):
+        bits.append('被站点的安全验证（Cloudflare）拦了')
     body = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', raw, flags=re.I | re.S)
     body = re.sub(r'<[^>]+>', ' ', body)
     body = ' '.join(body.split()) or ' '.join(raw.split())
@@ -304,6 +330,15 @@ def run_http_flow(fetcher: Fetcher, flow: List[Dict[str, Any]],
             vars=variables, trace=trace, page_excerpt=_take_excerpt(text))
 
     hint = _page_hint(text)
+    if _login_state(text) == 'out':
+        # 页面结构上就能看出是游客态 —— 这比"无法判断"有用得多，
+        # 用户该做的是去更新 Cookie，而不是研究关键词。
+        return FlowOutcome(
+            False,
+            '未登录（页面出现登录入口，Cookie 没生效）—— 请到该站点的'
+            '「编辑」里重新粘贴 Cookie｜线索：%s' % (hint or '—'),
+            'fail', error_kind='not_logged_in', vars=variables, trace=trace,
+            page_excerpt=_take_excerpt(text))
     msg = '无法判断签到结果（HTTP %s，页面未命中任何已知关键词）' % status
     if hint:
         msg += '｜线索：' + hint
@@ -578,6 +613,13 @@ def check_cookie_valid(site: SiteConfig, cookie_header: str,
     # 网络层就没成功
     if status and (status < 200 or status >= 300):
         return 0, 'HTTP %d，无法据此判断登录状态' % status
+
+    # 结构上能看出登录态 → 比"无法判断"有用
+    state = _login_state(text)
+    if state == 'out':
+        return 2, '登录状态已失效（页面出现登录入口，Cookie 没生效）'
+    if state == 'in':
+        return 1, '登录状态有效（页面有"退出"链接）'
 
     # Cloudflare 挑战页：这时"没命中失败词"不代表登录有效，但也不代表失效
     low = text.lower()
