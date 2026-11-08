@@ -556,6 +556,8 @@ class Service:
                 # 注意这里【不含任何 Cookie 内容】，只有状态与数量
                 'has_cookie': bool(s.cookie_enc),
                 'cookie_status': int(s.cookie_status or 0),
+                # 界面靠它区分"没检查过"和"检查过但判不出来"
+                'cookie_checked_at': int(s.cookie_checked_at or 0),
                 'cookie_updated_at': int(s.cookie_updated_at or 0),
                 'headers': dict(s.headers or {}),
                 # 模板可选项：specs 是"有哪些可选项"（界面据此渲染下拉），

@@ -2664,6 +2664,28 @@ function flushCookieMsg(id){
   showCookieMsg(id, pend.text, pend.kind);
 }
 
+/* 登录状态那一行（表单里用，也用于检查后就地刷新） */
+function ckStatBody(c){
+  c = c || {};
+  if(!c.has_cookie){
+    return '<span class="tag err">未配置</span>'
+      + '<span class="hint" style="margin:0">该站点签到需要登录，'
+      + '请按下面的说明粘贴 Cookie</span>';
+  }
+  var when = c.updated_at? fmtTime(c.updated_at) : '未知时间';
+  var st = c.status===1? '<span class="tag ok">有效</span>'
+         : c.status===2? '<span class="tag err">已失效</span>'
+         : (c.checked_at? '<span class="tag">检查过，无法判断</span>'
+                        : '<span class="tag">未检查</span>');
+  var html = st + '<span class="tag ok">已配置 '+(c.count||0)+' 项</span>'
+    + '<span class="hint" style="margin:0">更新于 '+esc(when)
+    + '（来源：'+esc(c.source||'未知')+'）</span>';
+  if(c.error){
+    html += '<div class="hint" style="color:#c0392b">'+esc(c.error)+'</div>';
+  }
+  return html;
+}
+
 function siteFormHtml(s, c){
   var id = s.id, p = 'f_'+id+'_';
   var isDaily = (s.mode !== 'success_based');
@@ -2671,22 +2693,10 @@ function siteFormHtml(s, c){
   var sitePmode = s.proxy_mode || 'direct';
   if(['inherit','direct','custom'].indexOf(sitePmode) < 0) sitePmode = 'inherit';
 
-  /* ---- 登录状态区 ---- */
-  var ckStatus;
-  if(!c.has_cookie){
-    ckStatus = '<span class="tag err">未配置</span>'
-      + '<span class="hint" style="margin:0">该站点签到需要登录，请按下面的说明粘贴 Cookie</span>';
-  }else{
-    var when = c.updated_at? fmtTime(c.updated_at) : '未知时间';
-    var st = c.status===1? '<span class="tag ok">有效</span>'
-           : c.status===2? '<span class="tag err">已失效</span>'
-           : (c.checked_at? '<span class="tag">检查过，无法判断</span>'
-                          : '<span class="tag">未检查</span>');
-    ckStatus = st + '<span class="tag ok">已配置 '+c.count+' 项</span>'
-      + '<span class="hint" style="margin:0">更新于 '+esc(when)
-      + '（来源：'+esc(c.source||'未知')+'）</span>';
-    if(c.error) ckStatus += '<div class="hint" style="color:#c0392b">'+esc(c.error)+'</div>';
-  }
+  /* ---- 登录状态区 ----
+     包一层带 id 的容器：点「检查登录状态」之后要能就地刷新这块，
+     而不是重建整个表单（那会把正在填的内容和焦点冲掉）。 */
+  var ckStatus = '<div id="ckstat-'+esc(id)+'">' + ckStatBody(c) + '</div>';
 
   var cookieNames = (c.names&&c.names.length)
     ? '<div class="hint">已保存字段：'+esc(c.names.join('、'))+'</div>' : '';
@@ -3052,10 +3062,22 @@ function checkCookie(id){
        直接写在旧 DOM 上的字会被冲掉，用户就以为按钮没反应。 */
     CK_PENDING_MSG[id] = {text: d.message, kind: cls};
     showCookieMsg(id, d.message, cls);
+    /* 表单里的「登录状态」徽标要跟着变。
+       踩过：只 loadSites() 的话，卡片标签会更新，但表单里那块还是
+       "未检查" —— 用户明明看到下面写着"登录状态有效"，上面却叫未检查。 */
+    refreshCookieStat(id);
     loadSites();
   }).catch(function(e){
     showCookieMsg(id, '检查失败：'+e.message, 'err');
   });
+}
+
+/* 重新拉一次 Cookie 摘要，只重画状态那一块 */
+function refreshCookieStat(id){
+  api('GET','/api/site/cookie?id='+encodeURIComponent(id)).then(function(c){
+    var el = $('ckstat-'+id);
+    if(el) el.innerHTML = ckStatBody(c);
+  }).catch(function(){});       /* 拉不到就保持原样，不影响检查结果提示 */
 }
 
 function clearCookie(id){
