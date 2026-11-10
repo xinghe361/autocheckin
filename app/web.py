@@ -930,12 +930,13 @@ body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-seri
         anywhere 会参与 min-content 计算，才真正压得住 */
      overflow-wrap:anywhere}
 header{background:#fff;border-bottom:1px solid var(--bd);padding:12px 20px;
-       display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:5}
-header h1{font-size:16px;margin:0}
-header .mut{color:var(--mut);font-size:12px}
-nav{margin-left:auto;display:flex;gap:6px}
+       display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:5;
+       flex-wrap:wrap}
+header h1{font-size:16px;margin:0;white-space:nowrap}
+header .mut{color:var(--mut);font-size:12px;white-space:nowrap}
+nav{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 nav button{border:1px solid var(--bd);background:#fff;border-radius:5px;
-           padding:5px 12px;cursor:pointer;font-size:13px}
+           padding:5px 12px;cursor:pointer;font-size:13px;white-space:nowrap}
 nav button.on{background:var(--pri);border-color:var(--pri);color:#fff}
 main{padding:18px 20px;max-width:1080px;margin:0 auto}
 .card{background:#fff;border:1px solid var(--bd);border-radius:8px;padding:14px 16px;
@@ -1197,7 +1198,7 @@ textarea{min-height:96px;font-family:ui-monospace,Consolas,monospace;font-size:1
       <button class="b pri" onclick="doLogin()" id="loginBtn">登录</button>
     </div>
     <div id="loginMsg" class="msg"></div>
-    <div class="hint" style="margin-top:14px">
+    <div class="hint" id="loginForgot" style="margin-top:14px">
       忘了口令？在 NAS 上执行下面任一操作即可重置：<br>
       · 关闭访问控制：把 config.json 里的 <span class="mono">auth_required</span> 改成 false<br>
       · 或删除 <span class="mono">auth_password_enc</span> 字段后重启容器（会重新引导设置）
@@ -2005,6 +2006,9 @@ function showLogin(state){
   $('mainBody').className = 'hide';
   $('mainNav').className = 'hide';
   AUTH = state || {};
+  /* 首次设置时还没有口令可"忘记"，那句提示只会让人困惑 */
+  if($('loginForgot')) $('loginForgot').className =
+    state.needs_setup ? 'hint hide' : 'hint';
   if(state.needs_setup){
     $('loginTitle').textContent = '首次使用：设置访问口令';
     $('loginHint').textContent =
@@ -3046,8 +3050,12 @@ function saveCookie(id){
   if(!val.trim()){ alert('请先粘贴 Cookie 内容'); return; }
   api('POST','/api/site/cookie',{id:id, cookie:val}).then(function(d){
     box.value = '';
-    show('f_'+id+'_ckmsg',
-         '已保存 '+d.count+' 项（识别为：'+d.format+'）', 'ok');
+    var text = '已保存 '+d.count+' 项（识别为：'+d.format+'）';
+    /* 后端的 loadSites() 可能因为「已配置登录」这个标记变了而重建整行 ——
+       重建会把刚显示的提示冲掉，用户只看到"什么都没发生"。
+       和 checkCookie 一样先存一份，表单重绘后由 flushCookieMsg 贴回来。 */
+    CK_PENDING_MSG[id] = {text: text, kind: 'ok'};
+    show('f_'+id+'_ckmsg', text, 'ok');
     loadSites();
   }).catch(function(e){
     show('f_'+id+'_ckmsg', '保存失败：'+e.message, 'err');
@@ -3834,7 +3842,9 @@ function loadSettings(){
     var n = d.notify || {};
     var mlabels = META.notify_mode_labels || {};
     $('set_nmode').innerHTML = (META.notify_modes||[]).map(function(m){
-      var txt = mlabels[m] ? (m + '（' + mlabels[m] + '）') : m;
+      /* 只显示中文标签：以前拼成 "fail（仅失败）"，把内部枚举值露在界面上，
+         跟站点表单里的「仅失败时通知」也对不上。 */
+      var txt = mlabels[m] || m;
       return '<option value="'+esc(m)+'"'+(m===n.mode?' selected':'')+'>'+esc(txt)+'</option>';
     }).join('');
     $('set_aikey').value = '';

@@ -429,6 +429,21 @@ def checkin_via_http(site: SiteConfig, proxy: str = '',
                     '或直接点该模板的「加入」即可恢复' % tid,
             hit='unknown', error_kind='template_missing')
 
+    # 没有步骤的自定义站点：有主页就访问主页再判定（"访问即签到"这类），
+    # 连主页都没有才明确报"没有步骤"。
+    #
+    # 以前空流程会直接进 run_http_flow：一个请求都不发，判定用的正文是空串，
+    # 结果报成"无法判断签到结果（HTTP 200，页面未命中关键词）" —— 看着像
+    # 站点返回了空页面，其实我们什么都没请求。
+    if not flow and site.homepage:
+        flow = [{'action': 'get', 'url': '{homepage}'}]
+    if not flow:
+        return FlowOutcome(
+            success=False,
+            message='这个站点还没有签到步骤。纯请求模式只认 get / post / '
+                    'extract_regex，请点「编辑」录制一遍，或从模板加入一个站点',
+            hit='unknown', error_kind='no_steps')
+
     mission = tpl.get('mission_url') or site.homepage
     # 模板可选项（NodeSeek 的"试试手气 / 鸡腿×5"）。
     #
